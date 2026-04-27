@@ -6,6 +6,7 @@
 #include "hal.h"
 #include "stm32f767.h"
 #include "nucleo_f767.h"
+#include "kernel_config.h"
 
 /*============================================================================
  * 内部变量
@@ -20,6 +21,9 @@ static volatile uint32_t systick_count = 0;
 void hal_cpu_init(void) {
     // 设置向量表位置
     SCB->VTOR = 0x08000000UL;
+
+    // 初始化中断优先级
+    hal_interrupt_priority_init();
 }
 
 void hal_irq_enable(void) {
@@ -41,11 +45,39 @@ void hal_irq_restore(uint32_t primask) {
     __asm volatile("msr primask, %0" :: "r"(primask));
 }
 
-void hal_trigger_pendsv(void) {
+/*============================================================================
+ * BasePri 临界区实现
+ *============================================================================*/
+
+uint32_t hal_enter_critical(void) {
+    uint32_t basepri;
+    __asm volatile("mrs %0, basepri" : "=r"(basepri));
+    __asm volatile("msr basepri, %0" :: "r"(SCHED_CRITICAL_PRIORITY << 4));
+    __asm volatile("isb");
+    return basepri;
+}
+
+void hal_exit_critical(uint32_t basepri) {
+    __asm volatile("msr basepri, %0" :: "r"(basepri));
+}
+
+void hal_interrupt_priority_init(void) {
+    // 设置 SysTick 优先级为最低
+    SCB->SHP[11] = SYSTICK_PRIORITY << 4;  // SysTick
+
     // 设置 PendSV 优先级为最低
-    SCB->SHPR[2] = (SCB->SHPR[2] & 0x00FFFFFF) | (0xFF << 24);
-    // 触发 PendSV
+    SCB->SHP[14] = PENDSV_PRIORITY << 4;   // PendSV
+
+    // 设置 SVC 优先级为最高（用于首次切换）
+    SCB->SHP[7] = 0;                        // SVC
+}
+
+void hal_trigger_pendsv(void) {
+    // 触发 PendSV (优先级已在初始化时设置为最低)
     SCB->ICSR = (1 << 28);
+    // 内存屏障确保写入完成
+    __asm volatile("dsb");
+    __asm volatile("isb");
 }
 
 void hal_trigger_svc(uint32_t svc_num) {
@@ -87,6 +119,14 @@ uint32_t hal_systick_get(void) {
     return systick_count;
 }
 
+uint32_t hal_get_tick_count(void) {
+    return systick_count;
+}
+
+void hal_set_tick_count(uint32_t count) {
+    systick_count = count;
+}
+
 void hal_systick_enable(void) {
     SYSTICK->CSR |= SYSTICK_CSR_ENABLE | SYSTICK_CSR_TICKINT;
 }
@@ -121,48 +161,40 @@ void *hal_stack_init(void    *stack_top,
                      void    *arg,
                      void    *exit)
 {
-    (void)stack_size;
+    uint8_t *stack_base = (uint8_t *)stack_top - stack_size;
+
+    // 填充魔数用于栈溢出检测
+    for (int i = 0; i < 16; i++) {
+        stack_base[i] = STACK_MAGIC_BYTE;
+    }
 
     uint32_t *sp = (uint32_t *)((uint8_t *)stack_top);
 
-    sp--;
-    *sp = 0x01000000UL;
+    // Cortex-M 硬件异常栈帧格式 (从高地址到低地址):
+    // xPSR, PC, LR, R12, R3, R2, R1, R0
+    // PendSV 软件帧: R4-R11 (在硬件帧之前)
 
-    sp--;
-    *sp = (uint32_t)entry;
+    // 1. 初始化硬件帧 (异常返回时硬件自动恢复)
+    sp--; *sp = 0x01000000UL;   // xPSR (Thumb bit set)
+    sp--; *sp = (uint32_t)entry; // PC (任务入口)
+    sp--; *sp = (uint32_t)exit;  // LR (任务退出处理)
+    sp--; *sp = 0;               // R12
+    sp--; *sp = 0;               // R3
+    sp--; *sp = 0;               // R2
+    sp--; *sp = 0;               // R1
+    sp--; *sp = (uint32_t)arg;   // R0 (任务参数)
 
-    sp--;
-    *sp = (uint32_t)exit;
+    // 2. 初始化软件帧 (PendSV 恢复)
+    sp--; *sp = 0;  // R11
+    sp--; *sp = 0;  // R10
+    sp--; *sp = 0;  // R9
+    sp--; *sp = 0;  // R8
+    sp--; *sp = 0;  // R7
+    sp--; *sp = 0;  // R6
+    sp--; *sp = 0;  // R5
+    sp--; *sp = 0;  // R4
 
-    sp--;
-    *sp = 0;
-
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = (uint32_t)arg;
-
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-    sp--;
-    *sp = 0;
-
+    // 3. 确保 8 字节对齐 (AAPCS 要求)
     if ((uint32_t)sp & 4) {
         sp--;
         *sp = 0;
