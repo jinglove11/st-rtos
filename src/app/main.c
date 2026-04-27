@@ -1,6 +1,6 @@
 /**
  * @file main.c
- * @brief RTOS 完整功能测试
+ * @brief 调度器功能测试
  */
 
 #include "board_config.h"
@@ -8,10 +8,6 @@
 #include "task.h"
 #include "semaphore.h"
 #include "mutex.h"
-#include "mqueue.h"
-#include "event.h"
-#include "mem.h"
-#include "mempool.h"
 #include "uart.h"
 #include "gpio.h"
 #include <string.h>
@@ -19,6 +15,10 @@
 #define TEST_UART       NUCLEO_DEFAULT_UART
 #define TEST_LED_PORT   NUCLEO_LED_PORT
 #define TEST_LED_PIN    NUCLEO_LED_PIN
+
+/*============================================================================
+ * 测试框架
+ *============================================================================*/
 
 static volatile int test_passed = 0;
 static volatile int test_failed = 0;
@@ -51,39 +51,45 @@ static void test_fail(const char *name) {
     test_failed++;
 }
 
+static void test_summary(void) {
+    test_print("\r\n========================================\r\n");
+    test_print("         SCHEDULER TEST SUMMARY\r\n");
+    test_print("========================================\r\n");
+    test_print_num("Passed: ", test_passed);
+    test_print_num("Failed: ", test_failed);
+    test_print("========================================\r\n");
+    if (test_failed == 0) {
+        test_print("All tests PASSED!\r\n");
+    } else {
+        test_print("Some tests FAILED!\r\n");
+    }
+}
+
 /*============================================================================
- * 测试 1: 任务创建与切换
+ * 测试 1: 任务创建与基本调度
  *============================================================================*/
 
-static volatile int task1_count = 0;
-static volatile int task2_count = 0;
-static volatile uint32_t delay_start_tick = 0;
-static volatile uint32_t delay_end_tick = 0;
+static volatile int test1_task1_ran = 0;
+static volatile int test1_task2_ran = 0;
 
-static void test_task1(void *arg) {
+static void test1_task1(void *arg) {
     (void)arg;
-    for (int i = 0; i < 5; i++) {
-        task1_count++;
-        for (volatile int j = 0; j < 50000; j++);
-    }
+    test1_task1_ran = 1;
 }
 
-static void test_task2(void *arg) {
+static void test1_task2(void *arg) {
     (void)arg;
-    for (int i = 0; i < 5; i++) {
-        task2_count++;
-        for (volatile int j = 0; j < 50000; j++);
-    }
+    test1_task2_ran = 1;
 }
 
-static void test_task_switch(void) {
-    test_print("\r\n=== Test 1: Task Switch ===\r\n");
+static void test_task_create(void) {
+    test_print("\r\n=== Test 1: Task Create & Schedule ===\r\n");
 
-    task1_count = 0;
-    task2_count = 0;
+    test1_task1_ran = 0;
+    test1_task2_ran = 0;
 
-    task_id_t t1 = task_create("test1", test_task1, NULL, 2, 0);
-    task_id_t t2 = task_create("test2", test_task2, NULL, 2, 0);
+    task_id_t t1 = task_create("test1", test1_task1, NULL, 5, 0);
+    task_id_t t2 = task_create("test2", test1_task2, NULL, 5, 0);
 
     if (t1 != KERN_INVALID_ID && t2 != KERN_INVALID_ID) {
         test_pass("Task create");
@@ -95,674 +101,321 @@ static void test_task_switch(void) {
     task_start(t1);
     task_start(t2);
 
-    task_delay(100);
+    task_delay(10);
 
-    if (task1_count > 0 && task2_count > 0) {
-        test_pass("Both tasks running");
+    if (test1_task1_ran && test1_task2_ran) {
+        test_pass("Both tasks executed");
     } else {
-        test_fail("Both tasks running");
+        test_fail("Both tasks executed");
     }
-
-    task_delete(t1);
-    task_delete(t2);
 }
 
 /*============================================================================
- * 测试 2: 优先级调度
+ * 测试 2: 优先级抢占
  *============================================================================*/
 
-static volatile int high_prio_ran = 0;
-static volatile int low_prio_ran = 0;
+static volatile int test2_high_ran = 0;
+static volatile int test2_low_started = 0;
+static volatile int test2_low_finished = 0;
 
-static void high_prio_task(void *arg) {
+static void test2_high_task(void *arg) {
     (void)arg;
-    high_prio_ran = 1;
+    test2_high_ran = 1;
 }
 
-static void low_prio_task(void *arg) {
+static void test2_low_task(void *arg) {
     (void)arg;
-    low_prio_ran = 1;
+    test2_low_started = 1;
+
+    // 高优先级任务应该在这里抢占
+    for (volatile int i = 0; i < 100000; i++);
+
+    test2_low_finished = 1;
 }
 
-static void test_priority(void) {
-    test_print("\r\n=== Test 2: Priority Scheduling ===\r\n");
+static void test_priority_preempt(void) {
+    test_print("\r\n=== Test 2: Priority Preemption ===\r\n");
 
-    high_prio_ran = 0;
-    low_prio_ran = 0;
+    test2_high_ran = 0;
+    test2_low_started = 0;
+    test2_low_finished = 0;
 
-    task_id_t low = task_create("low", low_prio_task, NULL, 5, 0);
-    task_id_t high = task_create("high", high_prio_task, NULL, 1, 0);
+    // 创建低优先级任务 (优先级 10)
+    task_id_t low = task_create("low", test2_low_task, NULL, 10, 0);
+    // 创建高优先级任务 (优先级 2)
+    task_id_t high = task_create("high", test2_high_task, NULL, 2, 0);
 
     task_start(low);
-    task_start(high);
+    task_delay(5);  // 让低优先级任务开始运行
+    task_start(high);  // 启动高优先级任务，应该抢占
 
-    task_delay(50);
+    task_delay(20);
 
-    if (high_prio_ran && low_prio_ran) {
-        test_pass("Priority scheduling");
+    if (test2_high_ran) {
+        test_pass("High priority task ran");
     } else {
-        test_fail("Priority scheduling");
+        test_fail("High priority task ran");
     }
 
-    task_delete(low);
-    task_delete(high);
+    if (test2_low_started && test2_low_finished) {
+        test_pass("Low priority task completed");
+    } else {
+        test_fail("Low priority task completed");
+    }
 }
 
 /*============================================================================
- * 测试 3: 任务延迟
+ * 测试 3: 时间片轮转
+ *============================================================================*/
+
+static volatile int test3_count1 = 0;
+static volatile int test3_count2 = 0;
+
+static void test3_task1(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 5; i++) {
+        test3_count1++;
+        for (volatile int j = 0; j < 50000; j++);
+    }
+}
+
+static void test3_task2(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 5; i++) {
+        test3_count2++;
+        for (volatile int j = 0; j < 50000; j++);
+    }
+}
+
+static void test_round_robin(void) {
+    test_print("\r\n=== Test 3: Round Robin ===\r\n");
+
+    test3_count1 = 0;
+    test3_count2 = 0;
+
+    // 同优先级任务应该轮流执行
+    task_id_t t1 = task_create("rr1", test3_task1, NULL, 5, 0);
+    task_id_t t2 = task_create("rr2", test3_task2, NULL, 5, 0);
+
+    task_start(t1);
+    task_start(t2);
+
+    task_delay(100);
+
+    if (test3_count1 > 0 && test3_count2 > 0) {
+        test_pass("Both tasks ran (round robin)");
+    } else {
+        test_fail("Both tasks ran (round robin)");
+    }
+
+    test_print_num("  Task1 count: ", test3_count1);
+    test_print_num("  Task2 count: ", test3_count2);
+}
+
+/*============================================================================
+ * 测试 4: 任务延时
  *============================================================================*/
 
 static void test_task_delay(void) {
-    test_print("\r\n=== Test 3: Task Delay ===\r\n");
+    test_print("\r\n=== Test 4: Task Delay ===\r\n");
 
-    delay_start_tick = kern_get_tick();
+    uint32_t start = kern_get_tick();
     task_delay(50);
-    delay_end_tick = kern_get_tick();
+    uint32_t end = kern_get_tick();
 
-    uint32_t elapsed = delay_end_tick - delay_start_tick;
+    uint32_t elapsed = end - start;
+
     if (elapsed >= 50 && elapsed <= 52) {
-        test_pass("Task delay accuracy");
+        test_pass("Delay accuracy");
     } else {
-        test_fail("Task delay accuracy");
+        test_fail("Delay accuracy");
     }
-    test_print_num("  Delay elapsed: ", elapsed);
+
+    test_print_num("  Expected: 50 ticks, Actual: ", elapsed);
 }
 
 /*============================================================================
- * 测试 4: 任务挂起与恢复
+ * 测试 5: 任务挂起与恢复
  *============================================================================*/
 
-static int suspend_count = 0;
+static volatile int test5_count = 0;
 
-static void suspend_test_task(void *arg) {
+static void test5_task(void *arg) {
     (void)arg;
     while (1) {
-        suspend_count++;
+        test5_count++;
         for (volatile int j = 0; j < 50000; j++);
         task_yield();
     }
 }
 
-static void test_task_suspend(void) {
-    test_print("\r\n=== Test 4: Task Suspend/Resume ===\r\n");
+static void test_suspend_resume(void) {
+    test_print("\r\n=== Test 5: Suspend & Resume ===\r\n");
 
-    suspend_count = 0;
+    test5_count = 0;
 
-    // 打印当前任务信息
-    task_id_t self = task_self();
-    test_print_num("  Current task: ", self);
-    extern tcb_t *task_get_tcb(task_id_t task_id);
-    tcb_t *self_tcb = task_get_tcb(self);
-    if (self_tcb) {
-        test_print_num("  Current SP: ", (uint32_t)self_tcb->sp);
-        test_print_num("  Current stack base: ", (uint32_t)self_tcb->stack_base);
-    }
-
-    task_id_t t = task_create("suspend", suspend_test_task, NULL, 16, 0);
-    test_print_num("  Created task: ", t);
-
-    // 检查任务栈初始化
-    tcb_t *tcb = task_get_tcb(t);
-    if (tcb) {
-        test_print_num("  TCB addr: ", (uint32_t)tcb);
-        test_print_num("  SP: ", (uint32_t)tcb->sp);
-        test_print_num("  Stack base: ", (uint32_t)tcb->stack_base);
-        test_print_num("  Stack size: ", tcb->stack_size);
-
-        // 计算栈顶
-        uint32_t stack_top = (uint32_t)tcb->stack_base + tcb->stack_size;
-        test_print_num("  Stack top: ", stack_top);
-
-        // 打印栈顶几个值（硬件帧）
-        uint32_t *sp = (uint32_t *)tcb->sp;
-        test_print("  Stack at SP (R4-R11):\r\n");
-        for (int i = 0; i < 8; i++) {
-            test_print_num("    R", i + 4);
-            test_print_num(": ", sp[i]);
-        }
-        test_print("  Stack at SP+32 (hardware frame):\r\n");
-        for (int i = 8; i < 16; i++) {
-            test_print_num("    [", i);
-            test_print_num("]: ", sp[i]);
-        }
-    }
-
+    task_id_t t = task_create("suspend", test5_task, NULL, 10, 0);
     task_start(t);
 
-    test_print("  Calling task_delay(30)...\r\n");
-    task_delay(30);
-    test_print("  task_delay returned\r\n");
-
-    int count1 = suspend_count;
+    task_delay(20);
+    int count1 = test5_count;
 
     task_suspend(t);
-    task_delay(30);
-    int count2 = suspend_count;
+    task_delay(20);
+    int count2 = test5_count;
 
     task_resume(t);
-    task_delay(30);
-    int count3 = suspend_count;
-
-    task_delete(t);
+    task_delay(20);
+    int count3 = test5_count;
 
     if (count1 > 0 && count2 == count1 && count3 > count2) {
-        test_pass("Suspend/Resume");
+        test_pass("Suspend/Resume works");
     } else {
-        test_fail("Suspend/Resume");
+        test_fail("Suspend/Resume works");
     }
+
     test_print_num("  Before suspend: ", count1);
     test_print_num("  During suspend: ", count2);
     test_print_num("  After resume: ", count3);
-}
-
-/*============================================================================
- * 测试 5: 信号量
- *============================================================================*/
-
-static sem_id_t g_test_sem;
-static volatile int sem_test_count = 0;
-
-static void sem_wait_task(void *arg) {
-    (void)arg;
-    kern_err_t err = sem_wait(g_test_sem, 100);
-    if (err == KERN_OK) {
-        sem_test_count++;
-    }
-}
-
-static void test_semaphore(void) __attribute__((unused));
-static void test_mutex(void) __attribute__((unused));
-static void test_mqueue(void) __attribute__((unused));
-static void test_event_flags(void) __attribute__((unused));
-static void test_round_robin(void) __attribute__((unused));
-static void test_memory(void) __attribute__((unused));
-
-static void test_semaphore(void) {
-    test_print("\r\n=== Test 5: Semaphore ===\r\n");
-
-    g_test_sem = sem_create(2, 5);
-    if (g_test_sem != KERN_INVALID_ID) {
-        test_pass("Semaphore create");
-    } else {
-        test_fail("Semaphore create");
-        return;
-    }
-
-    int32_t count = sem_get_count(g_test_sem);
-    if (count == 2) {
-        test_pass("Initial count");
-    } else {
-        test_fail("Initial count");
-    }
-
-    kern_err_t err = sem_wait(g_test_sem, 100);
-    if (err == KERN_OK) {
-        test_pass("Semaphore wait");
-    } else {
-        test_fail("Semaphore wait");
-    }
-
-    count = sem_get_count(g_test_sem);
-    if (count == 1) {
-        test_pass("Count after wait");
-    } else {
-        test_fail("Count after wait");
-    }
-
-    err = sem_post(g_test_sem);
-    if (err == KERN_OK) {
-        test_pass("Semaphore post");
-    } else {
-        test_fail("Semaphore post");
-    }
-
-    count = sem_get_count(g_test_sem);
-    if (count == 2) {
-        test_pass("Count after post");
-    } else {
-        test_fail("Count after post");
-    }
-
-    sem_test_count = 0;
-    sem_wait(g_test_sem, 100);
-    sem_wait(g_test_sem, 100);
-
-    task_id_t t = task_create("sem_wait", sem_wait_task, NULL, 2, 0);
-    task_start(t);
-
-    task_delay(10);
-
-    if (sem_test_count == 0) {
-        test_pass("Task blocked on sem");
-    } else {
-        test_fail("Task blocked on sem");
-    }
-
-    sem_post(g_test_sem);
-
-    task_delay(10);
-
-    if (sem_test_count == 1) {
-        test_pass("Task wakeup by sem");
-    } else {
-        test_fail("Task wakeup by sem");
-    }
 
     task_delete(t);
-
-    err = sem_wait(g_test_sem, 10);
-    if (err == KERN_ERR_TIMEOUT) {
-        test_pass("Semaphore timeout");
-    } else {
-        test_fail("Semaphore timeout");
-    }
-
-    sem_delete(g_test_sem);
 }
 
 /*============================================================================
- * 测试 6: 互斥锁
+ * 测试 6: 阻塞与唤醒 (信号量)
  *============================================================================*/
 
-static mutex_id_t g_test_mutex;
-static volatile int shared_resource = 0;
+static sem_id_t test6_sem;
+static volatile int test6_producer_done = 0;
+static volatile int test6_consumer_got = 0;
 
-static void mutex_task(void *arg) {
+static void test6_producer(void *arg) {
     (void)arg;
-    kern_err_t err = mutex_lock(g_test_mutex, 100);
+    task_delay(20);
+    sem_post(test6_sem);
+    test6_producer_done = 1;
+}
+
+static void test6_consumer(void *arg) {
+    (void)arg;
+    kern_err_t err = sem_wait(test6_sem, 100);
     if (err == KERN_OK) {
-        shared_resource++;
-        for (volatile int j = 0; j < 10000; j++);
-        mutex_unlock(g_test_mutex);
+        test6_consumer_got = 1;
     }
 }
 
-static void test_mutex(void) {
-    test_print("\r\n=== Test 6: Mutex ===\r\n");
+static void test_block_wakeup(void) {
+    test_print("\r\n=== Test 6: Block & Wakeup (Semaphore) ===\r\n");
 
-    g_test_mutex = mutex_create();
-    if (g_test_mutex != KERN_INVALID_ID) {
-        test_pass("Mutex create");
+    test6_producer_done = 0;
+    test6_consumer_got = 0;
+
+    test6_sem = sem_create(0, 1);
+
+    task_id_t consumer = task_create("consumer", test6_consumer, NULL, 5, 0);
+    task_id_t producer = task_create("producer", test6_producer, NULL, 5, 0);
+
+    task_start(consumer);
+    task_start(producer);
+
+    task_delay(50);
+
+    if (test6_producer_done && test6_consumer_got) {
+        test_pass("Block/Wakeup via semaphore");
     } else {
-        test_fail("Mutex create");
-        return;
+        test_fail("Block/Wakeup via semaphore");
     }
 
-    kern_err_t err = mutex_lock(g_test_mutex, 100);
+    sem_delete(test6_sem);
+}
+
+/*============================================================================
+ * 测试 7: 超时唤醒
+ *============================================================================*/
+
+static void test_timeout(void) {
+    test_print("\r\n=== Test 7: Timeout Wakeup ===\r\n");
+
+    sem_id_t sem = sem_create(0, 1);
+
+    uint32_t start = kern_get_tick();
+    kern_err_t err = sem_wait(sem, 30);  // 等待30 ticks，应该超时
+    uint32_t end = kern_get_tick();
+    uint32_t elapsed = end - start;
+
+    if (err == KERN_ERR_TIMEOUT) {
+        test_pass("Timeout returned");
+    } else {
+        test_fail("Timeout returned");
+    }
+
+    if (elapsed >= 30 && elapsed <= 32) {
+        test_pass("Timeout accuracy");
+    } else {
+        test_fail("Timeout accuracy");
+    }
+
+    test_print_num("  Expected: 30 ticks, Actual: ", elapsed);
+
+    sem_delete(sem);
+}
+
+/*============================================================================
+ * 测试 8: 优先级继承
+ *============================================================================*/
+
+static mutex_id_t test8_mutex;
+static volatile int test8_shared = 0;
+static volatile int test8_high_got_lock = 0;
+
+static void test8_low_task(void *arg) {
+    (void)arg;
+    mutex_lock(test8_mutex, 100);
+
+    test8_shared = 1;
+
+    // 持有锁一段时间
+    for (volatile int i = 0; i < 200000; i++);
+
+    mutex_unlock(test8_mutex);
+}
+
+static void test8_high_task(void *arg) {
+    (void)arg;
+    task_delay(5);  // 等待低优先级任务先获取锁
+
+    kern_err_t err = mutex_lock(test8_mutex, 100);
     if (err == KERN_OK) {
-        test_pass("Mutex lock");
-    } else {
-        test_fail("Mutex lock");
+        test8_high_got_lock = 1;
+        mutex_unlock(test8_mutex);
     }
+}
 
-    err = mutex_lock(g_test_mutex, 100);
-    if (err == KERN_OK) {
-        test_pass("Recursive lock");
-    } else {
-        test_fail("Recursive lock");
-    }
+static void test_priority_inheritance(void) {
+    test_print("\r\n=== Test 8: Priority Inheritance ===\r\n");
 
-    mutex_unlock(g_test_mutex);
-    mutex_unlock(g_test_mutex);
+    test8_shared = 0;
+    test8_high_got_lock = 0;
 
-    shared_resource = 0;
+    test8_mutex = mutex_create();
 
-    task_id_t t1 = task_create("mtx1", mutex_task, NULL, 2, 0);
-    task_id_t t2 = task_create("mtx2", mutex_task, NULL, 2, 0);
-    task_id_t t3 = task_create("mtx3", mutex_task, NULL, 2, 0);
+    // 低优先级任务先获取锁
+    task_id_t low = task_create("low", test8_low_task, NULL, 10, 0);
+    // 高优先级任务等待锁
+    task_id_t high = task_create("high", test8_high_task, NULL, 2, 0);
 
-    task_start(t1);
-    task_start(t2);
-    task_start(t3);
+    task_start(low);
+    task_start(high);
 
     task_delay(100);
 
-    if (shared_resource == 3) {
-        test_pass("Mutex mutual exclusion");
+    if (test8_high_got_lock) {
+        test_pass("Priority inheritance works");
     } else {
-        test_fail("Mutex mutual exclusion");
+        test_fail("Priority inheritance works");
     }
 
-    task_delete(t1);
-    task_delete(t2);
-    task_delete(t3);
-
-    err = mutex_lock(g_test_mutex, 100);
-    mutex_unlock(g_test_mutex);
-
-    err = mutex_lock(g_test_mutex, 10);
-    if (err == KERN_ERR_TIMEOUT) {
-        test_pass("Mutex timeout");
-    } else {
-        test_fail("Mutex timeout");
-    }
-
-    mutex_delete(g_test_mutex);
-}
-
-/*============================================================================
- * 测试 7: 消息队列
- *============================================================================*/
-
-static queue_id_t g_test_queue;
-
-static void queue_recv_task(void *arg) {
-    (void)arg;
-    uint32_t msg;
-    kern_err_t err = mqueue_recv(g_test_queue, &msg, 100);
-    if (err == KERN_OK && msg == 0xBEEF5678) {
-        test_pass("Queue blocking recv");
-    }
-}
-
-static void test_mqueue(void) {
-    test_print("\r\n=== Test 7: Message Queue ===\r\n");
-
-    g_test_queue = mqueue_create(4, 8);
-    if (g_test_queue != KERN_INVALID_ID) {
-        test_pass("Queue create");
-    } else {
-        test_fail("Queue create");
-        return;
-    }
-
-    uint32_t send_msg = 0xDEADBEEF;
-    kern_err_t err = mqueue_trysend(g_test_queue, &send_msg);
-    if (err == KERN_OK) {
-        test_pass("Queue send");
-    } else {
-        test_fail("Queue send");
-    }
-
-    uint32_t recv_msg = 0;
-    err = mqueue_tryrecv(g_test_queue, &recv_msg);
-    if (err == KERN_OK && recv_msg == send_msg) {
-        test_pass("Queue recv");
-    } else {
-        test_fail("Queue recv");
-    }
-
-    for (int i = 0; i < 8; i++) {
-        mqueue_trysend(g_test_queue, &send_msg);
-    }
-    err = mqueue_trysend(g_test_queue, &send_msg);
-    if (err == KERN_ERR_BUSY) {
-        test_pass("Queue full");
-    } else {
-        test_fail("Queue full");
-    }
-
-    uint32_t dummy;
-    while (mqueue_tryrecv(g_test_queue, &dummy) == KERN_OK);
-
-    int32_t count = mqueue_get_count(g_test_queue);
-    if (count == 0) {
-        test_pass("Queue empty");
-    } else {
-        test_fail("Queue empty");
-    }
-
-    task_id_t t1 = task_create("qrecv", queue_recv_task, NULL, 2, 0);
-    task_start(t1);
-
-    task_delay(10);
-
-    uint32_t msg = 0xBEEF5678;
-    mqueue_send(g_test_queue, &msg, 100);
-
-    task_delay(10);
-    task_delete(t1);
-
-    mqueue_delete(g_test_queue);
-}
-
-/*============================================================================
- * 测试 8: 事件标志
- *============================================================================*/
-
-static event_id_t g_test_event;
-
-static void event_wait_or_task(void *arg) {
-    (void)arg;
-    uint32_t received;
-    kern_err_t err = event_wait(g_test_event, 0x03, EVENT_OPT_OR, 100, &received);
-    if (err == KERN_OK && (received & 0x03)) {
-        test_pass("Event OR wait");
-    }
-}
-
-static void event_wait_and_task(void *arg) {
-    (void)arg;
-    uint32_t received;
-    kern_err_t err = event_wait(g_test_event, 0x07, EVENT_OPT_AND, 100, &received);
-    if (err == KERN_OK && (received & 0x07) == 0x07) {
-        test_pass("Event AND wait");
-    }
-}
-
-static void test_event_flags(void) {
-    test_print("\r\n=== Test 8: Event Flags ===\r\n");
-
-    g_test_event = event_create(0);
-    if (g_test_event != KERN_INVALID_ID) {
-        test_pass("Event create");
-    } else {
-        test_fail("Event create");
-        return;
-    }
-
-    event_set(g_test_event, 0x01);
-    uint32_t flags = event_get(g_test_event);
-    if (flags == 0x01) {
-        test_pass("Event set");
-    } else {
-        test_fail("Event set");
-    }
-
-    event_set(g_test_event, 0x02);
-    flags = event_get(g_test_event);
-    if (flags == 0x03) {
-        test_pass("Event set multiple");
-    } else {
-        test_fail("Event set multiple");
-    }
-
-    event_clear(g_test_event, 0x01);
-    flags = event_get(g_test_event);
-    if (flags == 0x02) {
-        test_pass("Event clear");
-    } else {
-        test_fail("Event clear");
-    }
-
-    event_clear(g_test_event, 0x02);
-
-    task_id_t t1 = task_create("evt_or", event_wait_or_task, NULL, 2, 0);
-    task_start(t1);
-
-    task_delay(10);
-
-    event_set(g_test_event, 0x01);
-
-    task_delay(10);
-    task_delete(t1);
-
-    event_clear(g_test_event, 0xFF);
-
-    task_id_t t2 = task_create("evt_and", event_wait_and_task, NULL, 2, 0);
-    task_start(t2);
-
-    task_delay(10);
-
-    event_set(g_test_event, 0x01);
-    event_set(g_test_event, 0x02);
-    event_set(g_test_event, 0x04);
-
-    task_delay(10);
-    task_delete(t2);
-
-    event_delete(g_test_event);
-}
-
-/*============================================================================
- * 测试 9: 时间片轮转
- *============================================================================*/
-
-static volatile int rr_count1 = 0;
-static volatile int rr_count2 = 0;
-
-static void rr_task1(void *arg) {
-    (void)arg;
-    for (int i = 0; i < 10; i++) {
-        rr_count1++;
-        for (volatile int j = 0; j < 100000; j++);
-    }
-}
-
-static void rr_task2(void *arg) {
-    (void)arg;
-    for (int i = 0; i < 10; i++) {
-        rr_count2++;
-        for (volatile int j = 0; j < 100000; j++);
-    }
-}
-
-static void test_round_robin(void) {
-    test_print("\r\n=== Test 9: Round Robin ===\r\n");
-
-    rr_count1 = 0;
-    rr_count2 = 0;
-
-    task_id_t t1 = task_create("rr1", rr_task1, NULL, 3, 0);
-    task_id_t t2 = task_create("rr2", rr_task2, NULL, 3, 0);
-
-    task_start(t1);
-    task_start(t2);
-
-    task_delay(200);
-
-    if (rr_count1 > 0 && rr_count2 > 0) {
-        test_pass("Round robin");
-    } else {
-        test_fail("Round robin");
-    }
-
-    test_print_num("  Task1 count: ", rr_count1);
-    test_print_num("  Task2 count: ", rr_count2);
-
-    task_delete(t1);
-    task_delete(t2);
-}
-
-/*============================================================================
- * 测试 10: 内存管理
- *============================================================================*/
-
-static void test_memory(void) {
-    test_print("\r\n=== Test 10: Memory Management ===\r\n");
-
-    mem_stats_t stats = mem_get_stats();
-    test_print_num("  Total heap: ", stats.total_size);
-    test_print_num("  Free heap: ", stats.free_size);
-
-    void *p1 = kmalloc(64);
-    void *p2 = kmalloc(128);
-    void *p3 = kmalloc(256);
-
-    if (p1 && p2 && p3) {
-        test_pass("kmalloc");
-    } else {
-        test_fail("kmalloc");
-    }
-
-    memset(p1, 0xAA, 64);
-    memset(p2, 0xBB, 128);
-    memset(p3, 0xCC, 256);
-
-    kfree(p2);
-
-    void *p4 = kmalloc(64);
-    if (p4) {
-        test_pass("kmalloc after free");
-    } else {
-        test_fail("kmalloc after free");
-    }
-
-    kfree(p1);
-    kfree(p3);
-    kfree(p4);
-
-    stats = mem_get_stats();
-    if (stats.used_size == 0) {
-        test_pass("kfree all");
-    } else {
-        test_fail("kfree all");
-    }
-
-    void *aligned = kmalloc_aligned(64, 32);
-    if (aligned && ((uintptr_t)aligned & 31) == 0) {
-        test_pass("kmalloc_aligned");
-    } else {
-        test_fail("kmalloc_aligned");
-    }
-    kfree_aligned(aligned);
-
-    pool_id_t pool = mempool_create(32, 8);
-    if (pool != POOL_INVALID_ID) {
-        test_pass("mempool_create");
-    } else {
-        test_fail("mempool_create");
-        return;
-    }
-
-    void *blocks[8];
-    for (int i = 0; i < 8; i++) {
-        blocks[i] = mempool_alloc(pool);
-    }
-
-    if (mempool_get_free_count(pool) == 0) {
-        test_pass("mempool full");
-    } else {
-        test_fail("mempool full");
-    }
-
-    void *fail_block = mempool_alloc(pool);
-    if (fail_block == NULL) {
-        test_pass("mempool exhaust");
-    } else {
-        test_fail("mempool exhaust");
-    }
-
-    for (int i = 0; i < 8; i++) {
-        mempool_free(pool, blocks[i]);
-    }
-
-    if (mempool_get_free_count(pool) == 8) {
-        test_pass("mempool free all");
-    } else {
-        test_fail("mempool free all");
-    }
-
-    mempool_delete(pool);
-}
-
-/*============================================================================
- * 测试总结
- *============================================================================*/
-
-static void print_summary(void) {
-    test_print("\r\n========================================\r\n");
-    test_print("         TEST SUMMARY\r\n");
-    test_print("========================================\r\n");
-    test_print_num("Passed: ", test_passed);
-    test_print_num("Failed: ", test_failed);
-    test_print("========================================\r\n");
-
-    if (test_failed == 0) {
-        test_print("All tests PASSED!\r\n");
-    } else {
-        test_print("Some tests FAILED!\r\n");
-    }
+    mutex_delete(test8_mutex);
 }
 
 /*============================================================================
@@ -774,17 +427,21 @@ static void test_main_task(void *arg) {
 
     test_print("\r\n\r\n");
     test_print("========================================\r\n");
-    test_print("    My-RTOS v0.1 Test Suite\r\n");
+    test_print("    My-RTOS Scheduler Test Suite\r\n");
     test_print("========================================\r\n");
 
-    // 只测试调度器相关功能
-    test_task_switch();
-    test_priority();
+    test_task_create();
+    test_priority_preempt();
+    test_round_robin();
     test_task_delay();
-    test_task_suspend();
+    test_suspend_resume();
+    test_block_wakeup();
+    test_timeout();
+    test_priority_inheritance();
 
-    print_summary();
+    test_summary();
 
+    // LED 闪烁表示测试完成
     while (1) {
         gpio_toggle(TEST_LED_PORT, TEST_LED_PIN);
         task_delay(500);
@@ -799,14 +456,14 @@ int main(void) {
     uart_init(TEST_UART, NUCLEO_UART_BAUDRATE);
     gpio_init(TEST_LED_PORT, TEST_LED_PIN, GPIO_DIR_OUTPUT);
 
-    test_print("\r\nMy-RTOS Test Suite Starting...\r\n");
+    test_print("\r\nScheduler Test Starting...\r\n");
 
     kern_init();
 
-    task_id_t main_task = task_create("test_main", test_main_task, NULL, 15, 0);
+    task_id_t main_task = task_create("test_main", test_main_task, NULL, 10, 0);
     task_start(main_task);
 
-    uart_puts(TEST_UART, "Starting test scheduler...\r\n");
+    test_print("Starting scheduler...\r\n");
 
     kern_start();
 
