@@ -79,9 +79,10 @@ int sched_need_switch(void);
 void sched_tick_handler(void);
 
 /**
- * @brief 任务时间片用完
+ * @brief 获取 tick 计数
+ * @return tick 计数
  */
-void sched_time_slice_expired(void);
+uint32_t sched_get_tick_count(void);
 
 /*============================================================================
  * 调度器统计接口
