@@ -63,11 +63,18 @@ static void task_exit_handler(void) {
 // 空闲任务函数
 static void idle_task_func(void *arg) {
     (void)arg;
+    uint32_t check_counter = 0;
 
     while (1) {
 #if KERN_IDLE_SLEEP
         hal_enter_lowpower();
 #endif
+
+        // 定期检查栈溢出
+        if (++check_counter >= 1000) {
+            check_counter = 0;
+            task_check_stack_overflow();
+        }
 
 #if KERN_WATCHDOG_ENABLE
         hal_watchdog_feed();
@@ -235,29 +242,50 @@ kern_err_t task_suspend(task_id_t task_id) {
     }
 
     tcb_t *tcb = &task_pool[task_id];
+    uint32_t crit = hal_enter_critical();
 
     if (tcb->state == TASK_STATE_TERMINATED) {
+        hal_exit_critical(crit);
         return KERN_ERR_STATE;
     }
 
-    if (tcb->state == TASK_STATE_RUNNING) {
-        tcb->state = TASK_STATE_SUSPENDED;
-        sched_yield();
+    if (tcb->state == TASK_STATE_SUSPENDED) {
+        hal_exit_critical(crit);
         return KERN_OK;
     }
 
-    if (tcb->state == TASK_STATE_READY) {
-        sched_remove_ready(tcb);
-        tcb->state = TASK_STATE_SUSPENDED;
-        return KERN_OK;
+    // 根据当前状态处理
+    switch (tcb->state) {
+        case TASK_STATE_RUNNING:
+            // 当前任务挂起自己：设置状态后触发调度
+            // PendSV 会检查状态，SUSPENDED 不会加入就绪队列
+            tcb->state = TASK_STATE_SUSPENDED;
+            hal_exit_critical(crit);
+            sched_yield();  // 触发 PendSV
+            break;
+
+        case TASK_STATE_READY:
+            // 从就绪队列移除
+            sched_remove_ready(tcb);
+            tcb->state = TASK_STATE_SUSPENDED;
+            hal_exit_critical(crit);
+            break;
+
+        case TASK_STATE_BLOCKED:
+            // 从阻塞状态转为挂起，清除阻塞信息
+            tcb->state = TASK_STATE_SUSPENDED;
+            tcb->wake_tick = 0;
+            tcb->block_reason = BLOCK_REASON_NONE;
+            tcb->block_obj = NULL;
+            hal_exit_critical(crit);
+            break;
+
+        default:
+            hal_exit_critical(crit);
+            return KERN_ERR_STATE;
     }
 
-    if (tcb->state == TASK_STATE_BLOCKED) {
-        tcb->state = TASK_STATE_SUSPENDED;
-        return KERN_OK;
-    }
-
-    return KERN_ERR_STATE;
+    return KERN_OK;
 }
 
 kern_err_t task_resume(task_id_t task_id) {
@@ -266,13 +294,23 @@ kern_err_t task_resume(task_id_t task_id) {
     }
 
     tcb_t *tcb = &task_pool[task_id];
+    uint32_t crit = hal_enter_critical();
 
     if (tcb->state != TASK_STATE_SUSPENDED) {
+        hal_exit_critical(crit);
         return KERN_ERR_STATE;
     }
 
+    // 加入就绪队列
     sched_add_ready(tcb);
 
+    // 如果优先级高于当前任务，触发调度
+    tcb_t *current = sched_get_current();
+    if (current && tcb->priority < current->priority) {
+        hal_trigger_pendsv();
+    }
+
+    hal_exit_critical(crit);
     return KERN_OK;
 }
 
@@ -418,4 +456,52 @@ tcb_t *task_get_idle(void) {
 
 uint32_t task_get_used_bitmap(void) {
     return task_used_bitmap;
+}
+
+/*============================================================================
+ * 任务回收 (由 PendSV 调用)
+ *============================================================================*/
+
+void task_reclaim(tcb_t *tcb) {
+    if (tcb == NULL || tcb->id < 0) return;  // 空闲任务不回收
+
+    task_id_t id = tcb->id;
+
+    // 释放任务 ID
+    free_task_id(id);
+
+    // 清零 TCB (可选，调试时可以保留)
+    // memset(tcb, 0, sizeof(tcb_t));
+
+    // 栈空间标记空闲 (静态池，实际无需操作)
+}
+
+/*============================================================================
+ * 栈溢出检测
+ *============================================================================*/
+
+void task_check_stack_overflow(void) {
+    for (task_id_t id = 0; id < KERN_MAX_TASKS; id++) {
+        if (!(task_used_bitmap & (1U << id))) continue;
+
+        tcb_t *tcb = &task_pool[id];
+        if (tcb->state == TASK_STATE_TERMINATED) continue;
+
+        uint8_t *stack_base = (uint8_t *)tcb->stack_base;
+
+        // 检查栈底魔数是否被破坏
+        int overflow = 0;
+        for (int i = 0; i < 16; i++) {
+            if (stack_base[i] != STACK_MAGIC_BYTE) {
+                overflow = 1;
+                break;
+            }
+        }
+
+        if (overflow) {
+            hal_debug_puts("\r\n[STACK OVERFLOW] Task: ");
+            hal_debug_puts(tcb->name);
+            hal_debug_puts("\r\n");
+        }
+    }
 }
