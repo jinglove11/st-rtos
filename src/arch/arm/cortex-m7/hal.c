@@ -62,14 +62,17 @@ void hal_exit_critical(uint32_t basepri) {
 }
 
 void hal_interrupt_priority_init(void) {
-    // 设置 SysTick 优先级为最低
-    SCB->SHP[11] = SYSTICK_PRIORITY << 4;  // SysTick
+    // Cortex-M7 SHPR registers (32-bit access):
+    // SHPR[0] = SHPR1 (0xE000ED18): MemManage, BusFault, UsageFault
+    // SHPR[1] = SHPR2 (0xE000ED1C): bits 31:24 = SVCall priority
+    // SHPR[2] = SHPR3 (0xE000ED20): bits 31:24 = SysTick, bits 23:16 = PendSV
 
-    // 设置 PendSV 优先级为最低
-    SCB->SHP[14] = PENDSV_PRIORITY << 4;   // PendSV
+    // 设置 SVC 优先级为最高（用于首次切换）- SHPR2 bits 31:24
+    SCB->SHPR[1] = (0 << 24);
 
-    // 设置 SVC 优先级为最高（用于首次切换）
-    SCB->SHP[7] = 0;                        // SVC
+    // 设置 PendSV 优先级为最低 - SHPR3 bits 23:16
+    // 设置 SysTick 优先级为最低 - SHPR3 bits 31:24
+    SCB->SHPR[2] = (PENDSV_PRIORITY << 16) | (SYSTICK_PRIORITY << 24);
 }
 
 void hal_trigger_pendsv(void) {
@@ -297,12 +300,6 @@ uint32_t hal_get_timestamp(void) {
  * 看门狗抽象实现
  *============================================================================*/
 
-void hal_watchdog_init(void) {
-}
-
-void hal_watchdog_feed(void) {
-}
-
 #if KERN_WATCHDOG_ENABLE
 
 // IWDG 寄存器
@@ -345,6 +342,14 @@ void hal_watchdog_feed(void) {
 
 void hal_watchdog_stop(void) {
     // IWDG 一旦启动无法停止
+}
+
+#else
+
+void hal_watchdog_init(void) {
+}
+
+void hal_watchdog_feed(void) {
 }
 
 #endif

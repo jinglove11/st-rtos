@@ -56,7 +56,8 @@ const char *kern_get_name(void) {
 }
 
 uint32_t kern_get_tick(void) {
-    return hal_systick_get();
+    extern uint32_t sched_get_tick_count(void);
+    return sched_get_tick_count();
 }
 
 void kern_panic(const char *msg) {

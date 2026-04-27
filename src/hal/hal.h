@@ -2,6 +2,7 @@
 #define HAL_H
 
 #include <stdint.h>
+#include "kernel_config.h"
 
 void hal_cpu_init(void);
 void hal_debug_putc(char c);
@@ -38,7 +39,11 @@ void hal_trigger_pendsv(void);
 void hal_trigger_svc(uint32_t svc_num);
 void hal_trigger_first_switch(void);
 
+#if KERN_WATCHDOG_ENABLE
+void hal_watchdog_init(uint32_t timeout_ms);
+#else
 void hal_watchdog_init(void);
+#endif
 void hal_watchdog_feed(void);
 
 uint32_t hal_get_tick_count(void);

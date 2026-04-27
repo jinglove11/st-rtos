@@ -55,6 +55,9 @@ static uint32_t task_used_bitmap = 0;
  * 内部函数
  *============================================================================*/
 
+// 前向声明
+static void task_check_stack_overflow(void);
+
 // 任务退出处理
 static void task_exit_handler(void) {
     task_exit(NULL);

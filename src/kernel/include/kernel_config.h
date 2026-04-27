@@ -25,7 +25,7 @@
  *============================================================================*/
 
 // 最大任务数 (静态分配)
-#define KERN_MAX_TASKS          4
+#define KERN_MAX_TASKS          16
 
 // 优先级数量 (0 最高, KERN_MAX_PRIORITY-1 最低)
 #define KERN_MAX_PRIORITY       128
@@ -34,7 +34,7 @@
 #define KERN_IDLE_PRIORITY      (KERN_MAX_PRIORITY - 1)
 
 // 默认任务栈大小 (字节)
-#define KERN_DEFAULT_STACK_SIZE 1024
+#define KERN_DEFAULT_STACK_SIZE 2048
 
 // 空闲任务栈大小 (字节)
 #define KERN_IDLE_STACK_SIZE    256
@@ -60,6 +60,22 @@
 
 // CPU 核心数 (SMP)
 #define KERN_CPU_COUNT          1
+
+/*============================================================================
+ * 临界区配置 (BasePri)
+ *============================================================================*/
+
+// 调度器临界区阈值优先级 (0-15, 数值越小优先级越高)
+// 优先级 0-1 的中断不受临界区影响
+// 优先级 >= SCHED_CRITICAL_PRIORITY 的中断在临界区内被屏蔽
+#define SCHED_CRITICAL_PRIORITY     2
+
+// SysTick 和 PendSV 优先级 (最低, 可被抢占)
+#define SYSTICK_PRIORITY            15
+#define PENDSV_PRIORITY             15
+
+// 栈溢出检测魔数
+#define STACK_MAGIC_BYTE            0xCC
 
 /*============================================================================
  * 定时器配置
