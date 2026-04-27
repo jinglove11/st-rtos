@@ -1,6 +1,9 @@
 /**
  * @file scheduler.c
- * @brief 调度器实现
+ * @brief 调度器实现 - 分离式设计
+ *
+ * 核心原则：调度器核心（C 代码）只负责"决策"
+ * PendSV（汇编）负责"执行"（保存/恢复寄存器）
  */
 
 #include "scheduler.h"
@@ -8,9 +11,22 @@
 #include "kernel_types.h"
 #include "task.h"
 #include "hal.h"
+#include <string.h>
 
 extern tcb_t *task_get_tcb(task_id_t task_id);
 extern task_id_t task_get_next(task_id_t task_id);
+extern uint32_t task_get_used_bitmap(void);
+
+/*============================================================================
+ * 调试辅助函数
+ *============================================================================*/
+
+static void debug_puthex(uint32_t v) {
+    const char hex[] = "0123456789ABCDEF";
+    for (int i = 28; i >= 0; i -= 4) {
+        hal_debug_putc(hex[(v >> i) & 0xF]);
+    }
+}
 
 /*============================================================================
  * PendSV 处理 (汇编调用)
@@ -36,7 +52,7 @@ static struct {
     ready_list_t ready_list[KERN_MAX_PRIORITY];
     volatile uint32_t ready_bitmap[4];
     volatile uint32_t tick_count;
-    volatile int need_schedule;
+    volatile int need_resched;
     int started;
 
 #if KERN_TASK_STATS
@@ -44,21 +60,6 @@ static struct {
 #endif
 
 } scheduler;
-
-/*============================================================================
- * 临界区保护
- *============================================================================*/
-
-// 进入临界区 (关中断)
-static inline uint32_t crit_enter(void) {
-    uint32_t primask = hal_irq_save();
-    return primask;
-}
-
-// 退出临界区 (恢复中断)
-static inline void crit_exit(uint32_t primask) {
-    hal_irq_restore(primask);
-}
 
 /*============================================================================
  * 位图操作 (快速查找最高优先级)
@@ -136,7 +137,7 @@ static tcb_t *ready_list_get_head(uint8_t prio) {
  *============================================================================*/
 
 void sched_init(void) {
-    uint32_t crit = crit_enter();
+    uint32_t crit = hal_enter_critical();
 
     for (int i = 0; i < KERN_MAX_PRIORITY; i++) {
         scheduler.ready_list[i].head = NULL;
@@ -147,15 +148,16 @@ void sched_init(void) {
         scheduler.ready_bitmap[i] = 0;
     }
     scheduler.tick_count = 0;
-    scheduler.need_schedule = 0;
+    scheduler.need_resched = 0;
     scheduler.started = 0;
 
-    crit_exit(crit);
+    hal_exit_critical(crit);
 }
 
 void sched_start(void) {
-    uint32_t crit = crit_enter();
+    uint32_t crit = hal_enter_critical();
 
+    // 检查是否有任务
     int has_task = 0;
     for (int i = 0; i < 4; i++) {
         if (scheduler.ready_bitmap[i] != 0) {
@@ -163,8 +165,10 @@ void sched_start(void) {
             break;
         }
     }
+
     if (!has_task) {
-        crit_exit(crit);
+        hal_exit_critical(crit);
+        hal_debug_puts("[SCHED] No task to run!\r\n");
         while (1) {
             hal_enter_lowpower();
         }
@@ -172,7 +176,8 @@ void sched_start(void) {
 
     tcb_t *first = sched_get_highest_ready();
     if (first == NULL) {
-        crit_exit(crit);
+        hal_exit_critical(crit);
+        hal_debug_puts("[SCHED] get_highest_ready returned NULL!\r\n");
         while (1) {
             hal_enter_lowpower();
         }
@@ -182,31 +187,37 @@ void sched_start(void) {
 
     first->state = TASK_STATE_RUNNING;
 
-    _current_task = NULL;
+    _current_task = NULL;  // 关键：首次切换标记
     _next_task = first;
     scheduler.current_task = first;
 
     scheduler.started = 1;
 
+    hal_exit_critical(crit);
+
+    // 启动 SysTick
     hal_systick_init(KERN_TICK_RATE_HZ);
 
+    // 使能全局中断
     hal_irq_enable();
 
+    // 触发首次切换 (SVC)
     hal_trigger_first_switch();
 
+    // 不应该到达这里
     while (1);
 }
 
 void sched_yield(void) {
-    scheduler.need_schedule = 1;
+    scheduler.need_resched = 1;
     hal_trigger_pendsv();
 }
 
 void sched_add_ready(tcb_t *tcb) {
-    uint32_t crit = crit_enter();
+    uint32_t crit = hal_enter_critical();
 
     if (tcb->state == TASK_STATE_READY) {
-        crit_exit(crit);
+        hal_exit_critical(crit);
         return;  // 已经在就绪队列
     }
 
@@ -217,23 +228,23 @@ void sched_add_ready(tcb_t *tcb) {
     if (scheduler.started &&
         scheduler.current_task &&
         tcb->priority < scheduler.current_task->priority) {
-        scheduler.need_schedule = 1;
+        scheduler.need_resched = 1;
         hal_trigger_pendsv();
     }
 
-    crit_exit(crit);
+    hal_exit_critical(crit);
 }
 
 void sched_remove_ready(tcb_t *tcb) {
-    uint32_t crit = crit_enter();
+    uint32_t crit = hal_enter_critical();
 
     if (tcb->state != TASK_STATE_READY) {
-        crit_exit(crit);
+        hal_exit_critical(crit);
         return;
     }
 
     ready_list_remove_internal(tcb);
-    crit_exit(crit);
+    hal_exit_critical(crit);
 }
 
 kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
@@ -243,7 +254,13 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
         return KERN_ERR_STATE;
     }
 
-    // 设置阻塞状态
+    uint32_t crit = hal_enter_critical();
+
+    // 从就绪队列移除当前任务
+    if (current->state == TASK_STATE_READY) {
+        ready_list_remove_internal(current);
+    }
+
     current->state = TASK_STATE_BLOCKED;
     current->block_reason = reason;
     current->block_obj = obj;
@@ -255,22 +272,22 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    scheduler.need_schedule = 1;
+    scheduler.need_resched = 1;
 
-    // 使用 SVC 进行阻塞式上下文切换
-    // SVC 会立即触发异常，保存当前上下文，切换到下一个任务
-    // 当任务被唤醒后再次被调度时，会从这里返回
-    hal_trigger_block_switch();
+    // 解锁并触发 PendSV
+    hal_exit_critical(crit);
+    hal_trigger_pendsv();
 
-    // 当任务再次运行时，返回阻塞结果
+    // 当任务被唤醒时，会从这里继续执行
+    // 此时 block_result 已经被 sched_wakeup 设置
     return current->block_result;
 }
 
 void sched_wakeup(tcb_t *tcb, kern_err_t result) {
-    uint32_t crit = crit_enter();
+    uint32_t crit = hal_enter_critical();
 
     if (tcb->state != TASK_STATE_BLOCKED) {
-        crit_exit(crit);
+        hal_exit_critical(crit);
         return;
     }
 
@@ -282,10 +299,14 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     tcb->state = TASK_STATE_READY;
     ready_list_add_internal(tcb);
 
-    scheduler.need_schedule = 1;
-    hal_trigger_pendsv();
+    // 检查是否需要抢占
+    tcb_t *current = scheduler.current_task;
+    if (current && tcb->priority < current->priority) {
+        scheduler.need_resched = 1;
+        hal_trigger_pendsv();
+    }
 
-    crit_exit(crit);
+    hal_exit_critical(crit);
 }
 
 tcb_t *sched_get_current(void) {
@@ -302,28 +323,37 @@ tcb_t *sched_get_highest_ready(void) {
 }
 
 int sched_need_switch(void) {
-    return scheduler.need_schedule;
+    return scheduler.need_resched;
 }
+
+uint32_t sched_get_tick_count(void) {
+    return scheduler.tick_count;
+}
+
+/*============================================================================
+ * 时钟滴答处理
+ *============================================================================*/
 
 void sched_tick_handler(void) {
     scheduler.tick_count++;
 
     tcb_t *current = scheduler.current_task;
-    if (current == NULL) {
-        return;
-    }
 
+    // 空闲任务不处理时间片
+    if (current && current->id >= 0) {
 #if KERN_TIME_SLICE
-    if (current->time_slice > 0) {
-        current->time_slice--;
+        if (current->time_slice > 0) {
+            current->time_slice--;
 
-        if (current->time_slice == 0) {
-            scheduler.need_schedule = 1;
-            hal_trigger_pendsv();
+            if (current->time_slice == 0) {
+                scheduler.need_resched = 1;
+                hal_trigger_pendsv();
+            }
         }
-    }
 #endif
+    }
 
+    // 检查超时唤醒
     task_id_t id = -1;
     while ((id = task_get_next(id)) != KERN_INVALID_ID) {
         tcb_t *tcb = task_get_tcb(id);
@@ -370,20 +400,52 @@ void sched_update_stats(void) {
  *============================================================================*/
 
 void kern_pendsv_handler(void) {
-    scheduler.need_schedule = 0;
+    scheduler.need_resched = 0;
 
     tcb_t *current = _current_task;
 
-    if (current && current->state == TASK_STATE_RUNNING) {
-        current->time_slice = current->time_slice_reload;
-        current->state = TASK_STATE_READY;
-        // 空闲任务也需要加入就绪队列，确保始终有任务可调度
-        ready_list_add_internal(current);
+    // 处理当前任务状态转换
+    if (current) {
+        // 空闲任务特殊处理
+        if (current->id < 0) {
+            // 空闲任务不加入就绪队列，直接设为 READY
+            current->state = TASK_STATE_READY;
+        } else {
+            // 普通任务状态转换
+            switch (current->state) {
+            case TASK_STATE_RUNNING:
+                // RUNNING -> READY，加入就绪队列尾部（时间片轮转）
+                current->time_slice = current->time_slice_reload;
+                current->state = TASK_STATE_READY;
+                ready_list_add_internal(current);
+                break;
+
+            case TASK_STATE_TERMINATED:
+                // 自动回收：释放任务 ID
+                // 注意：TCB 和栈在 task.c 中管理
+                {
+                    extern void task_reclaim(tcb_t *tcb);
+                    task_reclaim(current);
+                }
+                break;
+
+            case TASK_STATE_BLOCKED:
+            case TASK_STATE_SUSPENDED:
+                // 不加入就绪队列
+                break;
+
+            default:
+                // 未知状态，打印警告
+                break;
+            }
+        }
     }
 
+    // 选择下一个任务
     tcb_t *next = sched_get_highest_ready();
 
     if (next == NULL) {
+        // 没有就绪任务，切换到 idle
         next = task_get_idle();
     } else {
         ready_list_remove_internal(next);
@@ -395,9 +457,11 @@ void kern_pendsv_handler(void) {
     _next_task = next;
 
 #if KERN_TASK_STATS
-    if (current) {
+    if (current && current->id >= 0) {
         current->ctx_switch_count++;
     }
-    next->ctx_switch_count++;
+    if (next->id >= 0) {
+        next->ctx_switch_count++;
+    }
 #endif
 }
