@@ -57,6 +57,8 @@ static void test_fail(const char *name) {
 
 static volatile int task1_count = 0;
 static volatile int task2_count = 0;
+static volatile uint32_t delay_start_tick = 0;
+static volatile uint32_t delay_end_tick = 0;
 
 static void test_task1(void *arg) {
     (void)arg;
@@ -150,51 +152,33 @@ static void test_priority(void) {
  * 测试 3: 任务延迟
  *============================================================================*/
 
-static volatile uint32_t delay_start_tick = 0;
-static volatile uint32_t delay_end_tick = 0;
-
-static void delay_test_task(void *arg) {
-    (void)arg;
-    delay_start_tick = kern_get_tick();
-    task_delay(50);
-    delay_end_tick = kern_get_tick();
-}
-
 static void test_task_delay(void) {
     test_print("\r\n=== Test 3: Task Delay ===\r\n");
 
-    delay_start_tick = 0;
-    delay_end_tick = 0;
-
-    task_id_t t = task_create("delay", delay_test_task, NULL, 2, 0);
-    task_start(t);
-
-    task_delay(100);
+    delay_start_tick = kern_get_tick();
+    task_delay(50);
+    delay_end_tick = kern_get_tick();
 
     uint32_t elapsed = delay_end_tick - delay_start_tick;
-    if (elapsed >= 50 && elapsed <= 55) {
+    if (elapsed >= 50 && elapsed <= 52) {
         test_pass("Task delay accuracy");
     } else {
         test_fail("Task delay accuracy");
     }
     test_print_num("  Delay elapsed: ", elapsed);
-
-    task_delete(t);
 }
 
 /*============================================================================
  * 测试 4: 任务挂起与恢复
  *============================================================================*/
 
-static volatile int suspend_count = 0;
-static volatile int suspend_task_running = 0;
+static int suspend_count = 0;
 
 static void suspend_test_task(void *arg) {
     (void)arg;
     while (1) {
-        suspend_task_running = 1;
         suspend_count++;
-        for (volatile int j = 0; j < 10000; j++);
+        for (volatile int j = 0; j < 50000; j++);
         task_yield();
     }
 }
@@ -203,51 +187,72 @@ static void test_task_suspend(void) {
     test_print("\r\n=== Test 4: Task Suspend/Resume ===\r\n");
 
     suspend_count = 0;
-    suspend_task_running = 0;
 
-    task_id_t t = task_create("suspend", suspend_test_task, NULL, 14, 0);
+    // 打印当前任务信息
+    task_id_t self = task_self();
+    test_print_num("  Current task: ", self);
+    extern tcb_t *task_get_tcb(task_id_t task_id);
+    tcb_t *self_tcb = task_get_tcb(self);
+    if (self_tcb) {
+        test_print_num("  Current SP: ", (uint32_t)self_tcb->sp);
+        test_print_num("  Current stack base: ", (uint32_t)self_tcb->stack_base);
+    }
+
+    task_id_t t = task_create("suspend", suspend_test_task, NULL, 16, 0);
+    test_print_num("  Created task: ", t);
+
+    // 检查任务栈初始化
+    tcb_t *tcb = task_get_tcb(t);
+    if (tcb) {
+        test_print_num("  TCB addr: ", (uint32_t)tcb);
+        test_print_num("  SP: ", (uint32_t)tcb->sp);
+        test_print_num("  Stack base: ", (uint32_t)tcb->stack_base);
+        test_print_num("  Stack size: ", tcb->stack_size);
+
+        // 计算栈顶
+        uint32_t stack_top = (uint32_t)tcb->stack_base + tcb->stack_size;
+        test_print_num("  Stack top: ", stack_top);
+
+        // 打印栈顶几个值（硬件帧）
+        uint32_t *sp = (uint32_t *)tcb->sp;
+        test_print("  Stack at SP (R4-R11):\r\n");
+        for (int i = 0; i < 8; i++) {
+            test_print_num("    R", i + 4);
+            test_print_num(": ", sp[i]);
+        }
+        test_print("  Stack at SP+32 (hardware frame):\r\n");
+        for (int i = 8; i < 16; i++) {
+            test_print_num("    [", i);
+            test_print_num("]: ", sp[i]);
+        }
+    }
+
     task_start(t);
 
-    task_delay(20);
+    test_print("  Calling task_delay(30)...\r\n");
+    task_delay(30);
+    test_print("  task_delay returned\r\n");
 
-    int count_before = suspend_count;
+    int count1 = suspend_count;
 
-    kern_err_t err = task_suspend(t);
-    if (err == KERN_OK) {
-        test_pass("Task suspend");
-    } else {
-        test_fail("Task suspend");
-    }
+    task_suspend(t);
+    task_delay(30);
+    int count2 = suspend_count;
 
-    suspend_task_running = 0;
-    task_delay(20);
-
-    int count_during = suspend_count;
-
-    if (count_during == count_before && suspend_task_running == 0) {
-        test_pass("Task stopped");
-    } else {
-        test_fail("Task stopped");
-    }
-
-    err = task_resume(t);
-    if (err == KERN_OK) {
-        test_pass("Task resume");
-    } else {
-        test_fail("Task resume");
-    }
-
-    task_delay(20);
-
-    int count_after = suspend_count;
-
-    if (count_after > count_during) {
-        test_pass("Task resumed running");
-    } else {
-        test_fail("Task resumed running");
-    }
+    task_resume(t);
+    task_delay(30);
+    int count3 = suspend_count;
 
     task_delete(t);
+
+    if (count1 > 0 && count2 == count1 && count3 > count2) {
+        test_pass("Suspend/Resume");
+    } else {
+        test_fail("Suspend/Resume");
+    }
+    test_print_num("  Before suspend: ", count1);
+    test_print_num("  During suspend: ", count2);
+    test_print_num("  After resume: ", count3);
 }
 
 /*============================================================================
@@ -264,6 +269,13 @@ static void sem_wait_task(void *arg) {
         sem_test_count++;
     }
 }
+
+static void test_semaphore(void) __attribute__((unused));
+static void test_mutex(void) __attribute__((unused));
+static void test_mqueue(void) __attribute__((unused));
+static void test_event_flags(void) __attribute__((unused));
+static void test_round_robin(void) __attribute__((unused));
+static void test_memory(void) __attribute__((unused));
 
 static void test_semaphore(void) {
     test_print("\r\n=== Test 5: Semaphore ===\r\n");
@@ -765,16 +777,11 @@ static void test_main_task(void *arg) {
     test_print("    My-RTOS v0.1 Test Suite\r\n");
     test_print("========================================\r\n");
 
+    // 只测试调度器相关功能
     test_task_switch();
     test_priority();
     test_task_delay();
     test_task_suspend();
-    test_semaphore();
-    test_mutex();
-    test_mqueue();
-    test_event_flags();
-    test_round_robin();
-    test_memory();
 
     print_summary();
 

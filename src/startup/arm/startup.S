@@ -11,9 +11,7 @@
  * 外部声明
  *============================================================================*/
 
-    .extern _estack
-    .extern SystemInit
-    .extern main
+    .extern hardfault_print
 
     .global _reset_handler
     .global _default_handler
@@ -30,7 +28,7 @@ _vectors:
     .word   _estack                     // 0: 初始栈指针
     .word   _reset_handler              // 1: Reset
     .word   _default_handler            // 2: NMI
-    .word   _default_handler            // 3: HardFault
+    .word   HardFault_Handler           // 3: HardFault
     .word   _default_handler            // 4: MemManage
     .word   _default_handler            // 5: BusFault
     .word   _default_handler            // 6: UsageFault
@@ -153,9 +151,46 @@ _vectors:
     .align 2
 
 _default_handler:
+    // 保存 LR 以便调试
+    // LR 包含返回地址，可以帮助定位异常来源
     b   _default_handler
 
     .size _default_handler, . - _default_handler
+
+/*============================================================================
+ * HardFault 处理函数 - 打印异常信息
+ *============================================================================*/
+
+    .section .text
+    .type HardFault_Handler, %function
+    .align 2
+
+HardFault_Handler:
+    // 保存寄存器
+    push    {r4-r7}
+
+    // 获取 PSP 和 MSP
+    mrs     r4, psp
+    mrs     r5, msp
+
+    // 读取故障寄存器
+    ldr     r6, =0xE000ED28     // CFSR
+    ldr     r6, [r6]
+    ldr     r7, =0xE000ED2C     // HFSR
+    ldr     r7, [r7]
+
+    // 调用 C 函数打印信息
+    // 参数: r0=PSP, r1=MSP, r2=CFSR, r3=HFSR
+    mov     r0, r4              // PSP
+    mov     r1, r5              // MSP
+    mov     r2, r6              // CFSR
+    mov     r3, r7              // HFSR
+    bl      hardfault_print
+
+    // 死循环
+    b       .
+
+    .size HardFault_Handler, . - HardFault_Handler
 
 /*============================================================================
  * Reset Handler
