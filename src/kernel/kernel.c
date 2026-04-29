@@ -13,6 +13,7 @@
 #include "hal.h"
 #include "uart.h"
 #include "board_config.h"
+#include "timer.h"
 
 extern uint32_t task_used_bitmap;
 extern tcb_t task_pool[];
@@ -24,6 +25,7 @@ void kern_init(void) {
     task_init();
     sched_init();
     ipc_init();
+    timer_init();
 }
 
 void kern_start(void) {
@@ -37,6 +39,9 @@ void kern_start(void) {
     // 将空闲任务加入就绪队列 (最低优先级)
     // 这样当没有其他任务时，空闲任务会被调度
     sched_add_ready(idle);
+
+    // 启动定时器服务任务
+    timer_service_start();
 
     // 启动调度器
     sched_start();
@@ -68,6 +73,8 @@ void kern_panic(const char *msg) {
         hal_debug_puts(msg);
         hal_debug_puts("\n");
     }
+#else
+    (void)msg;  // 避免未使用参数警告
 #endif
     while (1) {
         hal_enter_lowpower();
