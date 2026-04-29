@@ -181,17 +181,65 @@ typedef struct {
  * 软件定时器
  *============================================================================*/
 
+/**
+ * @brief 定时器状态
+ */
+typedef enum {
+    TIMER_STATE_IDLE = 0,      // 空闲（未启动）
+    TIMER_STATE_ACTIVE,        // 活跃（在堆中）
+    TIMER_STATE_RUNNING,       // 回调执行中
+    TIMER_STATE_DELETED        // 已删除
+} timer_state_t;
+
+/**
+ * @brief 定时器命令类型
+ */
+typedef enum {
+    TIMER_CMD_START,           // 启动定时器
+    TIMER_CMD_STOP,            // 停止定时器
+    TIMER_CMD_RESET,           // 重置定时器
+    TIMER_CMD_CHANGE_PERIOD,   // 修改周期
+    TIMER_CMD_DELETE           // 删除定时器
+} timer_cmd_type_t;
+
+/**
+ * @brief 定时器回调函数类型
+ */
 typedef void (*timer_callback_t)(void *arg);
 
+/**
+ * @brief 定时器控制块
+ */
 typedef struct {
-    uint32_t        period;            // 周期 (ticks)
-    uint32_t        expire;            // 到期时间 (ticks)
-    timer_callback_t callback;         // 回调函数
-    void           *arg;               // 回调参数
-    uint8_t         active;            // 激活标志
-    uint8_t         one_shot;          // 单次触发标志
-    uint8_t         in_use;            // 使用标志
+    // --- 基本信息 ---
+    char            name[KERN_TASK_NAME_LEN];  // 定时器名称
+    timer_id_t      id;                         // 定时器 ID
+    timer_state_t   state;                      // 当前状态
+
+    // --- 时间参数 ---
+    uint32_t        period;                     // 周期（ticks），0 表示单次
+    uint32_t        expire;                     // 到期时间（ticks）
+
+    // --- 回调信息 ---
+    timer_callback_t callback;                  // 回调函数
+    void           *arg;                        // 回调参数
+
+    // --- 堆索引 ---
+    int             heap_index;                 // 在最小堆中的索引，-1 表示不在堆中
+
+    // --- 标志 ---
+    uint8_t         one_shot;                   // 单次触发标志
+    uint8_t         in_use;                     // 使用标志
 } timer_t;
+
+/**
+ * @brief 定时器命令消息
+ */
+typedef struct {
+    timer_cmd_type_t    type;       // 命令类型
+    timer_id_t          timer_id;   // 目标定时器
+    uint32_t            param;      // 参数（周期、延迟等）
+} timer_cmd_t;
 
 /*============================================================================
  * 能力令牌
