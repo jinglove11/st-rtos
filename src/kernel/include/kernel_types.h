@@ -225,7 +225,7 @@ typedef struct {
     void           *arg;                        // 回调参数
 
     // --- 堆索引 ---
-    int             heap_index;                 // 在最小堆中的索引，-1 表示不在堆中
+    int16_t         heap_index;                 // 在最小堆中的索引，-1 表示不在堆中
 
     // --- 标志 ---
     uint8_t         one_shot;                   // 单次触发标志
