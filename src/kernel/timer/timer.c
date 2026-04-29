@@ -302,10 +302,13 @@ static void process_cmd_start(timer_id_t timer_id, uint32_t delay) {
     /* 设置到期时间 */
     uint32_t now = sched_get_tick_count();
     timer->expire = now + (delay > 0 ? delay : timer->period);
-    timer->state = TIMER_STATE_ACTIVE;
 
-    /* 插入堆 */
-    heap_insert(&timer_heap, timer);
+    /* 插入堆，成功后再设置状态 */
+    if (heap_insert(&timer_heap, timer) == 0) {
+        timer->state = TIMER_STATE_ACTIVE;
+    } else {
+        timer->state = TIMER_STATE_IDLE;
+    }
 }
 
 static void process_cmd_stop(timer_id_t timer_id) {
@@ -335,8 +338,13 @@ static void process_cmd_reset(timer_id_t timer_id) {
 
     uint32_t now = sched_get_tick_count();
     timer->expire = now + timer->period;
-    timer->state = TIMER_STATE_ACTIVE;
-    heap_insert(&timer_heap, timer);
+
+    /* 插入堆，成功后再设置状态 */
+    if (heap_insert(&timer_heap, timer) == 0) {
+        timer->state = TIMER_STATE_ACTIVE;
+    } else {
+        timer->state = TIMER_STATE_IDLE;
+    }
 }
 
 static void process_cmd_change_period(timer_id_t timer_id, uint32_t new_period) {
@@ -353,7 +361,13 @@ static void process_cmd_change_period(timer_id_t timer_id, uint32_t new_period) 
         heap_remove(&timer_heap, timer);
         uint32_t now = sched_get_tick_count();
         timer->expire = now + new_period;
-        heap_insert(&timer_heap, timer);
+
+        /* 插入堆，成功后再设置状态 */
+        if (heap_insert(&timer_heap, timer) == 0) {
+            timer->state = TIMER_STATE_ACTIVE;
+        } else {
+            timer->state = TIMER_STATE_IDLE;
+        }
     }
 }
 
@@ -423,8 +437,12 @@ static void process_expired_timers(void) {
         /* 周期定时器重新插入 */
         if (!timer->one_shot && timer->state == TIMER_STATE_RUNNING) {
             timer->expire = now + timer->period;
-            timer->state = TIMER_STATE_ACTIVE;
-            heap_insert(&timer_heap, timer);
+            /* 插入堆，成功后再设置状态 */
+            if (heap_insert(&timer_heap, timer) == 0) {
+                timer->state = TIMER_STATE_ACTIVE;
+            } else {
+                timer->state = TIMER_STATE_IDLE;
+            }
         } else if (timer->one_shot) {
             timer->state = TIMER_STATE_IDLE;
         }
@@ -516,12 +534,16 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
 
 kern_err_t timer_delete(timer_id_t timer_id) {
 #if TIMER_ENABLE
+    uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        hal_irq_restore(crit);
         return KERN_ERR_PARAM;
     }
 
-    return send_command(TIMER_CMD_DELETE, timer_id, 0);
+    kern_err_t err = send_command(TIMER_CMD_DELETE, timer_id, 0);
+    hal_irq_restore(crit);
+    return err;
 #else
     (void)timer_id;
     return KERN_ERR;
@@ -530,12 +552,16 @@ kern_err_t timer_delete(timer_id_t timer_id) {
 
 kern_err_t timer_start(timer_id_t timer_id, uint32_t delay) {
 #if TIMER_ENABLE
+    uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        hal_irq_restore(crit);
         return KERN_ERR_PARAM;
     }
 
-    return send_command(TIMER_CMD_START, timer_id, delay);
+    kern_err_t err = send_command(TIMER_CMD_START, timer_id, delay);
+    hal_irq_restore(crit);
+    return err;
 #else
     (void)timer_id;
     (void)delay;
@@ -545,12 +571,16 @@ kern_err_t timer_start(timer_id_t timer_id, uint32_t delay) {
 
 kern_err_t timer_stop(timer_id_t timer_id) {
 #if TIMER_ENABLE
+    uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        hal_irq_restore(crit);
         return KERN_ERR_PARAM;
     }
 
-    return send_command(TIMER_CMD_STOP, timer_id, 0);
+    kern_err_t err = send_command(TIMER_CMD_STOP, timer_id, 0);
+    hal_irq_restore(crit);
+    return err;
 #else
     (void)timer_id;
     return KERN_ERR;
@@ -559,12 +589,16 @@ kern_err_t timer_stop(timer_id_t timer_id) {
 
 kern_err_t timer_reset(timer_id_t timer_id) {
 #if TIMER_ENABLE
+    uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        hal_irq_restore(crit);
         return KERN_ERR_PARAM;
     }
 
-    return send_command(TIMER_CMD_RESET, timer_id, 0);
+    kern_err_t err = send_command(TIMER_CMD_RESET, timer_id, 0);
+    hal_irq_restore(crit);
+    return err;
 #else
     (void)timer_id;
     return KERN_ERR;
@@ -573,12 +607,16 @@ kern_err_t timer_reset(timer_id_t timer_id) {
 
 kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 #if TIMER_ENABLE
+    uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        hal_irq_restore(crit);
         return KERN_ERR_PARAM;
     }
 
-    return send_command(TIMER_CMD_CHANGE_PERIOD, timer_id, new_period);
+    kern_err_t err = send_command(TIMER_CMD_CHANGE_PERIOD, timer_id, new_period);
+    hal_irq_restore(crit);
+    return err;
 #else
     (void)timer_id;
     (void)new_period;
