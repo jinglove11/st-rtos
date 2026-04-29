@@ -1,0 +1,383 @@
+# My-RTOS 配置选项
+#
+# 使用 make menuconfig 进行交互式配置
+# 或直接编辑 .config 文件
+
+mainmenu "My-RTOS Configuration"
+
+#=============================================================================
+# 常规设置
+#=============================================================================
+
+menu "General Setup"
+
+config PROJECT_NAME
+    string "Project name"
+    default "my-rtos"
+    help
+      项目名称，用于生成的二进制文件名。
+
+config PROJECT_VERSION
+    string "Project version"
+    default "1.0.0"
+    help
+      项目版本号。
+
+endmenu
+
+#=============================================================================
+# 目标板配置
+#=============================================================================
+
+menu "Target Board"
+
+choice
+    prompt "Target board"
+    default BOARD_STM32F767
+
+config BOARD_STM32F767
+    bool "STM32F767ZI (Nucleo-F767ZI)"
+    help
+      ST Nucleo-F767ZI 开发板
+      - MCU: STM32F767ZIT6 (Cortex-M7, 216MHz)
+      - Flash: 2MB, SRAM: 384KB
+
+config BOARD_RP2350
+    bool "RP2350 (Raspberry Pi Pico 2)"
+    help
+      Raspberry Pi Pico 2
+      - MCU: RP2350 (Cortex-M33, 150MHz)
+      - Flash: 4MB (external), SRAM: 520KB
+
+endchoice
+
+config BOARD_NAME
+    string
+    default "stm32f767" if BOARD_STM32F767
+    default "rp2350" if BOARD_RP2350
+
+config BOARD_DISPLAY_NAME
+    string "Board display name"
+    default "Nucleo-F767ZI" if BOARD_STM32F767
+    default "Pico 2" if BOARD_RP2350
+
+endmenu
+
+#=============================================================================
+# 内核配置
+#=============================================================================
+
+menu "Kernel Configuration"
+
+config KERN_NAME
+    string "Kernel name"
+    default "My-RTOS"
+    help
+      内核名称。
+
+config KERN_VERSION_MAJOR
+    int "Version major"
+    default 1
+    range 0 255
+
+config KERN_VERSION_MINOR
+    int "Version minor"
+    default 0
+    range 0 255
+
+config KERN_VERSION_PATCH
+    int "Version patch"
+    default 0
+    range 0 255
+
+config KERN_TASK_NAME_LEN
+    int "Task name length"
+    default 16
+    range 8 64
+    help
+      任务名称最大长度。
+
+config KERNEL_TICK_RATE
+    int "System tick rate (Hz)"
+    default 1000
+    range 100 10000
+    help
+      系统滴答频率（Hz）。
+      - 1000 = 1ms per tick（推荐）
+      - 100 = 10ms per tick
+
+config KERNEL_MAX_TASKS
+    int "Maximum number of tasks"
+    default 16
+    range 4 64
+    help
+      系统支持的最大任务数量。
+
+config KERNEL_MAX_PRIORITIES
+    int "Number of priority levels"
+    default 32
+    range 8 256
+    help
+      优先级数量。数值越大，优先级越低。
+
+config KERNEL_TASK_STACK_SIZE
+    int "Default task stack size (bytes)"
+    default 1024
+    range 256 8192
+    help
+      默认任务栈大小（字节）。
+      必须是 4 的倍数。
+
+config KERNEL_IDLE_STACK_SIZE
+    int "Idle task stack size (bytes)"
+    default 256
+    range 128 1024
+    help
+      空闲任务栈大小（字节）。
+
+config KERNEL_IDLE_PRIORITY
+    int "Idle task priority"
+    default 31
+    range 0 255
+    help
+      空闲任务优先级（数值越大优先级越低）。
+
+config KERN_DEFAULT_TIME_SLICE
+    int "Time slice (ticks)"
+    default 5
+    range 1 100
+    help
+      时间片轮转的时间片大小（滴答数）。
+      设为 0 禁用时间片轮转。
+
+config KERNEL_WATCHDOG
+    bool "Enable watchdog"
+    default n
+    help
+      启用独立看门狗（IWDG）。
+      防止系统死锁。
+
+config KERNEL_WATCHDOG_TIMEOUT
+    int "Watchdog timeout (ms)"
+    depends on KERNEL_WATCHDOG
+    default 1000
+    range 100 10000
+    help
+      看门狗超时时间（毫秒）。
+
+config KERNEL_IDLE_SLEEP
+    bool "CPU sleep in idle task"
+    default y
+    help
+      空闲任务中进入低功耗模式（WFI）。
+      节省功耗。
+
+endmenu
+
+#=============================================================================
+# 内存配置
+#=============================================================================
+
+menu "Memory Configuration"
+
+config MEM_DYNAMIC
+    bool "Enable dynamic memory allocation"
+    default y
+    help
+      启用动态内存分配（malloc/free）。
+
+config MEM_HEAP_SIZE
+    int "Heap size (bytes)"
+    depends on MEM_DYNAMIC
+    default 4096
+    range 1024 65536
+    help
+      动态内存堆大小（字节）。
+
+config MEM_POOL_COUNT
+    int "Memory pool count"
+    default 4
+    range 1 16
+    help
+      内存池数量。
+
+endmenu
+
+#=============================================================================
+# IPC 配置
+#=============================================================================
+
+menu "IPC Configuration"
+
+config IPC_SEMAPHORE
+    bool "Enable semaphore"
+    default y
+    help
+      启用信号量支持。
+
+config IPC_SEMAPHORE_MAX
+    int "Maximum semaphores"
+    depends on IPC_SEMAPHORE
+    default 8
+    range 1 32
+
+config IPC_MUTEX
+    bool "Enable mutex"
+    default y
+    help
+      启用互斥量支持（含优先级继承）。
+
+config IPC_MUTEX_MAX
+    int "Maximum mutexes"
+    depends on IPC_MUTEX
+    default 8
+    range 1 32
+
+config IPC_MQUEUE
+    bool "Enable message queue"
+    default y
+    help
+      启用消息队列支持。
+
+config IPC_MQUEUE_MAX
+    int "Maximum message queues"
+    depends on IPC_MQUEUE
+    default 4
+    range 1 16
+
+config IPC_EVENT
+    bool "Enable event flags"
+    default y
+    help
+      启用事件标志支持。
+
+config IPC_EVENT_MAX
+    int "Maximum event groups"
+    depends on IPC_EVENT
+    default 4
+    range 1 16
+
+endmenu
+
+#=============================================================================
+# 调试配置
+#=============================================================================
+
+menu "Debug Configuration"
+
+config DEBUG_ENABLE
+    bool "Enable debug output"
+    default y
+    help
+      启用调试输出到 UART。
+
+config DEBUG_LEVEL
+    int "Debug level"
+    depends on DEBUG_ENABLE
+    default 2
+    range 0 3
+    help
+      调试级别：
+      0 = 无输出
+      1 = 错误
+      2 = 警告
+      3 = 信息
+
+config DEBUG_STACK_CHECK
+    bool "Enable stack overflow check"
+    default y
+    help
+      启用栈溢出检测。
+      在任务栈底填充魔数，检测栈溢出。
+
+config ASSERT_ENABLE
+    bool "Enable assertions"
+    default y
+    help
+      启用断言检查。
+
+endmenu
+
+#=============================================================================
+# 测试配置
+#=============================================================================
+
+menu "Test Configuration"
+
+config TEST_ENABLE
+    bool "Enable test framework"
+    default y
+    help
+      启用测试框架。
+
+config TEST_MODULE_SCHEDULER
+    bool "Scheduler tests"
+    depends on TEST_ENABLE
+    default y
+    help
+      启用调度器测试模块。
+
+config TEST_MODULE_EXAMPLE
+    bool "Example tests"
+    depends on TEST_ENABLE
+    default n
+    help
+      启用示例测试模块。
+
+endmenu
+
+#=============================================================================
+# 定时器配置
+#=============================================================================
+
+menu "Timer Configuration"
+
+config TIMER_ENABLE
+    bool "Enable software timer"
+    default y
+    help
+      启用软件定时器支持。
+
+config TIMER_MAX
+    int "Maximum timers"
+    depends on TIMER_ENABLE
+    default 16
+    range 4 64
+    help
+      最大定时器数量。
+
+config TIMER_CMD_QUEUE_SIZE
+    int "Timer command queue size"
+    depends on TIMER_ENABLE
+    default 8
+    range 4 32
+    help
+      定时器命令队列大小。
+
+config TIMER_TASK_PRIORITY
+    int "Timer service task priority"
+    depends on TIMER_ENABLE
+    default 1
+    range 0 31
+    help
+      定时器服务任务优先级。
+      数值越小优先级越高。
+      建议设为较高优先级以确保定时器响应及时。
+
+config TIMER_TASK_STACK_SIZE
+    int "Timer service task stack size (bytes)"
+    depends on TIMER_ENABLE
+    default 512
+    range 256 2048
+    help
+      定时器服务任务栈大小（字节）。
+
+config TIMER_NAME_LEN
+    int "Timer name length"
+    depends on TIMER_ENABLE
+    default 16
+    range 8 32
+    help
+      定时器名称最大长度。
+
+endmenu
