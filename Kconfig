@@ -324,6 +324,13 @@ config TEST_MODULE_EXAMPLE
     help
       启用示例测试模块。
 
+config TEST_MODULE_TIMER
+    bool "Timer tests"
+    depends on TEST_ENABLE && TIMER_ENABLE
+    default y
+    help
+      启用定时器测试模块。
+
 endmenu
 
 #=============================================================================

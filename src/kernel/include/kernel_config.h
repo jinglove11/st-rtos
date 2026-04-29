@@ -42,11 +42,12 @@
 #define MEM_DYNAMIC 1
 #define MEM_HEAP_SIZE (4096)
 #define MEM_POOL_COUNT (4)
-#define PROJECT_NAME "my-rtos"qs"
+#define PROJECT_NAME "my-rtos"
 #define PROJECT_VERSION "1.0.0"
 #define TEST_ENABLE 1
 // #define TEST_MODULE_EXAMPLE 0
 #define TEST_MODULE_SCHEDULER 1
+#define TEST_MODULE_TIMER 1
 #define TIMER_CMD_QUEUE_SIZE (8)
 #define TIMER_ENABLE 1
 #define TIMER_MAX (16)
