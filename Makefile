@@ -6,12 +6,33 @@
 # 目标板选择
 #
 # 使用方法:
-#   make BOARD=rp2350       # 编译 RP2350 (Pico 2)
-#   make BOARD=stm32f767    # 编译 STM32F767 (Nucleo-F767ZI)
-#   make                    # 默认编译 STM32F767
+#   make menuconfig         # 交互式配置
+#   make BOARD=stm32f767    # 编译 STM32F767
+#   make BOARD=rp2350       # 编译 RP2350
+#   make                    # 使用 .config 中的配置
 #----------------------------------------------------------------------------
 
-BOARD       ?= stm32f767
+# 从配置文件读取目标板
+-include .config
+
+# 命令行 BOARD 参数优先
+ifdef BOARD
+    BOARD_NAME := $(BOARD)
+else ifneq ($(filter y,$(CONFIG_BOARD_STM32F767)),)
+    BOARD_NAME := stm32f767
+else ifneq ($(filter y,$(CONFIG_BOARD_RP2350)),)
+    BOARD_NAME := rp2350
+else ifneq ($(filter "stm32f767",$(BOARD_NAME)),)
+    # 从 BOARD_NAME 配置读取
+    BOARD_NAME := stm32f767
+else ifneq ($(filter "rp2350",$(BOARD_NAME)),)
+    BOARD_NAME := rp2350
+else
+    # 默认值
+    BOARD_NAME ?= stm32f767
+endif
+
+BOARD := $(BOARD_NAME)
 
 #----------------------------------------------------------------------------
 # 平台配置
@@ -91,11 +112,14 @@ CFLAGS      += -I$(SRC_DIR)/kernel/include
 CFLAGS      += -I$(SRC_DIR)/kernel/core
 CFLAGS      += -I$(SRC_DIR)/kernel/task
 CFLAGS      += -I$(SRC_DIR)/kernel/ipc
+CFLAGS      += -I$(SRC_DIR)/kernel/timer
 CFLAGS      += -I$(SRC_DIR)/kernel/mem
 CFLAGS      += -I$(SRC_DIR)/hal
 CFLAGS      += -I$(SRC_DIR)/drivers/include
 CFLAGS      += -I$(SRC_DIR)/board/$(TARGET_MCU)
+CFLAGS      += -I$(SRC_DIR)/kernel
 CFLAGS      += -I$(SRC_DIR)/arch/arm/cortex-m7
+CFLAGS      += -I$(SRC_DIR)/tests
 CFLAGS      += -DTARGET_BOARD=$(BOARD_DEFINE)
 
 ASFLAGS     = $(CPU)
@@ -124,6 +148,12 @@ KERN_SOURCES += src/kernel/ipc/semaphore.c
 KERN_SOURCES += src/kernel/ipc/mutex.c
 KERN_SOURCES += src/kernel/ipc/mqueue.c
 KERN_SOURCES += src/kernel/ipc/event.c
+KERN_SOURCES += src/kernel/timer/timer.c
+KERN_SOURCES += src/kernel/system_init.c
+
+TEST_SOURCES  = src/tests/test_framework.c
+TEST_SOURCES += src/tests/test_scheduler.c
+# TEST_SOURCES += src/tests/test_example.c  # 示例测试模块（取消注释启用）
 
 HAL_SOURCES  = $(HAL_SRC)
 
@@ -136,7 +166,7 @@ APP_SOURCES  += $(SYSTEM_C)
 ASM_SOURCES  = $(STARTUP_ASM)
 ASM_SOURCES  += $(HAL_ASM)
 
-C_SOURCES    = $(KERN_SOURCES) $(HAL_SOURCES) $(APP_SOURCES)
+C_SOURCES    = $(KERN_SOURCES) $(HAL_SOURCES) $(APP_SOURCES) $(TEST_SOURCES)
 
 OBJECTS      = $(C_SOURCES:src/%.c=$(BUILD_DIR)/%.o)
 OBJECTS      += $(ASM_SOURCES:src/%.S=$(BUILD_DIR)/%.o)
@@ -145,11 +175,25 @@ OBJECTS      += $(ASM_SOURCES:src/%.S=$(BUILD_DIR)/%.o)
 # 构建规则
 #----------------------------------------------------------------------------
 
-.PHONY: all clean flash info help
+.PHONY: all clean flash info help menuconfig defconfig genconfig
+
+# 配置文件
+CONFIG_FILE   = .config
+CONFIG_HEADER = src/kernel/include/kernel_config.h
 
 all: $(TARGET)
 
-$(TARGET): $(OBJECTS) $(LINK_SCRIPT)
+# 检查配置文件
+$(CONFIG_FILE):
+	@echo "No configuration found, running defconfig..."
+	@python3 scripts/menuconfig.py defconfig
+
+# 生成配置头文件
+$(CONFIG_HEADER): $(CONFIG_FILE)
+	@python3 scripts/menuconfig.py genconfig
+
+# 编译前检查配置
+$(TARGET): $(CONFIG_HEADER) $(OBJECTS) $(LINK_SCRIPT)
 	@echo "Linking: $@"
 	@mkdir -p $(BUILD_DIR)
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $@
@@ -212,6 +256,31 @@ info:
 	@for f in $(ASM_SOURCES); do echo "  $$f"; done
 
 #----------------------------------------------------------------------------
+# 配置
+#----------------------------------------------------------------------------
+
+# 加载默认配置
+menuconfig:
+	@python3 scripts/menuconfig.py
+
+defconfig:
+	@python3 scripts/menuconfig.py defconfig
+
+# 根据目标板加载默认配置
+stm32f767_defconfig:
+	@cp configs/stm32f767_defconfig .config
+	@python3 scripts/menuconfig.py genconfig
+	@echo "Loaded STM32F767 default configuration"
+
+rp2350_defconfig:
+	@cp configs/rp2350_defconfig .config
+	@python3 scripts/menuconfig.py genconfig
+	@echo "Loaded RP2350 default configuration"
+
+genconfig:
+	@python3 scripts/menuconfig.py genconfig
+
+#----------------------------------------------------------------------------
 # 帮助
 #----------------------------------------------------------------------------
 
@@ -219,7 +288,13 @@ help:
 	@echo "My-RTOS Build System"
 	@echo ""
 	@echo "Usage:"
-	@echo "  make BOARD=<board> [target]"
+	@echo "  make [target] [BOARD=<board>]"
+	@echo ""
+	@echo "Configuration:"
+	@echo "  menuconfig         - Interactive configuration"
+	@echo "  stm32f767_defconfig- Load STM32F767 default config"
+	@echo "  rp2350_defconfig   - Load RP2350 default config"
+	@echo "  genconfig          - Generate config header"
 	@echo ""
 	@echo "Boards:"
 	@echo "  rp2350       - Raspberry Pi Pico 2 (RP2350)"
@@ -234,5 +309,7 @@ help:
 	@echo "  help         - Show this help message"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make BOARD=stm32f767        # Build for Nucleo-F767ZI"
-	@echo "  make BOARD=rp2350 flash     # Build and flash Pico 2"
+	@echo "  make stm32f767_defconfig   # Load STM32 config"
+	@echo "  make menuconfig            # Configure the project"
+	@echo "  make                       # Build with .config"
+	@echo "  make BOARD=rp2350 flash    # Build and flash Pico 2"
