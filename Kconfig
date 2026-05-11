@@ -1,0 +1,770 @@
+# My-RTOS 配置选项
+#
+# 使用 make menuconfig 进行交互式配置
+# 或直接编辑 .config 文件
+
+mainmenu "My-RTOS Configuration"
+
+#=============================================================================
+# 常规设置
+#=============================================================================
+
+menu "General Setup"
+
+config PROJECT_NAME
+    string "Project name"
+    default "my-rtos"
+    help
+      项目名称，用于生成的二进制文件名。
+
+config PROJECT_VERSION
+    string "Project version"
+    default "1.0.0"
+    help
+      项目版本号。
+
+endmenu
+
+#=============================================================================
+# 目标板配置
+#=============================================================================
+
+menu "Target Board"
+
+choice
+    prompt "Target board"
+    default BOARD_STM32F767
+
+config BOARD_STM32F767
+    bool "STM32F767ZI (Nucleo-F767ZI)"
+    help
+      ST Nucleo-F767ZI 开发板
+      - MCU: STM32F767ZIT6 (Cortex-M7, 216MHz)
+      - Flash: 2MB, SRAM: 384KB
+
+config BOARD_RP2350
+    bool "RP2350 (Raspberry Pi Pico 2)"
+    help
+      Raspberry Pi Pico 2
+      - MCU: RP2350 (Cortex-M33, 150MHz)
+      - Flash: 4MB (external), SRAM: 520KB
+
+endchoice
+
+config BOARD_NAME
+    string
+    default "stm32f767" if BOARD_STM32F767
+    default "rp2350" if BOARD_RP2350
+
+config BOARD_DISPLAY_NAME
+    string "Board display name"
+    default "Nucleo-F767ZI" if BOARD_STM32F767
+    default "Pico 2" if BOARD_RP2350
+
+endmenu
+
+#=============================================================================
+# 内核配置
+#=============================================================================
+
+menu "Kernel Configuration"
+
+config KERN_NAME
+    string "Kernel name"
+    default "My-RTOS"
+    help
+      内核名称。
+
+config KERN_VERSION_MAJOR
+    int "Version major"
+    default 1
+    range 0 255
+
+config KERN_VERSION_MINOR
+    int "Version minor"
+    default 0
+    range 0 255
+
+config KERN_VERSION_PATCH
+    int "Version patch"
+    default 0
+    range 0 255
+
+config KERN_TASK_NAME_LEN
+    int "Task name length"
+    default 16
+    range 8 64
+    help
+      任务名称最大长度。
+
+config KERNEL_TICK_RATE
+    int "System tick rate (Hz)"
+    default 1000
+    range 100 10000
+    help
+      系统滴答频率（Hz）。
+      - 1000 = 1ms per tick（推荐）
+      - 100 = 10ms per tick
+
+config KERNEL_MAX_TASKS
+    int "Maximum number of tasks"
+    default 16
+    range 4 64
+    help
+      系统支持的最大任务数量。
+
+config KERNEL_MAX_PRIORITIES
+    int "Number of priority levels"
+    default 32
+    range 8 256
+    help
+      优先级数量。数值越大，优先级越低。
+
+config KERNEL_TASK_STACK_SIZE
+    int "Default task stack size (bytes)"
+    default 1024
+    range 256 8192
+    help
+      默认任务栈大小（字节）。
+      必须是 4 的倍数。
+
+config KERNEL_IDLE_STACK_SIZE
+    int "Idle task stack size (bytes)"
+    default 256
+    range 128 1024
+    help
+      空闲任务栈大小（字节）。
+
+config KERNEL_IDLE_PRIORITY
+    int "Idle task priority"
+    default 31
+    range 0 255
+    help
+      空闲任务优先级（数值越大优先级越低）。
+
+config KERN_DEFAULT_TIME_SLICE
+    int "Time slice (ticks)"
+    default 5
+    range 1 100
+    help
+      时间片轮转的时间片大小（滴答数）。
+      设为 0 禁用时间片轮转。
+
+config KERN_TASK_STATS
+    bool "Enable task CPU usage statistics"
+    default y
+    help
+      启用任务 CPU 使用率统计。
+      每个 TCB 记录上下文切换次数和 CPU 使用率百分比。
+      shell `top` 命令可显示各任务 CPU 占用。
+
+config TRACE_ENABLE
+    bool "Enable kernel event tracing"
+    default y
+    help
+      启用内核事件追踪。
+      记录任务切换、中断、系统调用等事件到环形 buffer。
+      shell `trace` 命令可查看最近事件。
+
+config TRACE_BUFFER_SIZE
+    int "Trace buffer size"
+    depends on TRACE_ENABLE
+    default 128
+    range 32 1024
+    help
+      Trace 环形 buffer 条目数。
+
+config KERNEL_WATCHDOG
+    bool "Enable watchdog"
+    default n
+    help
+      启用独立看门狗（IWDG）。
+      防止系统死锁。
+
+config KERNEL_WATCHDOG_TIMEOUT
+    int "Watchdog timeout (ms)"
+    depends on KERNEL_WATCHDOG
+    default 1000
+    range 100 10000
+    help
+      看门狗超时时间（毫秒）。
+
+config KERNEL_IDLE_SLEEP
+    bool "CPU sleep in idle task"
+    default y
+    help
+      空闲任务中进入低功耗模式（WFI）。
+      节省功耗。
+
+endmenu
+
+#=============================================================================
+# 内存配置
+#=============================================================================
+
+menu "Memory Configuration"
+
+config MEM_DYNAMIC
+    bool "Enable dynamic memory allocation"
+    default y
+    help
+      启用动态内存分配（malloc/free）。
+
+config MEM_HEAP_SIZE
+    int "Heap size (bytes)"
+    depends on MEM_DYNAMIC
+    default 4096
+    range 1024 65536
+    help
+      动态内存堆大小（字节）。
+
+config MEM_POOL_COUNT
+    int "Memory pool count"
+    default 4
+    range 1 16
+    help
+      内存池数量。
+
+endmenu
+
+#=============================================================================
+# IPC 配置
+#=============================================================================
+
+menu "IPC Configuration"
+
+config IPC_SEMAPHORE
+    bool "Enable semaphore"
+    default y
+    help
+      启用信号量支持。
+
+config IPC_SEMAPHORE_MAX
+    int "Maximum semaphores"
+    depends on IPC_SEMAPHORE
+    default 8
+    range 1 32
+
+config IPC_MUTEX
+    bool "Enable mutex"
+    default y
+    help
+      启用互斥量支持（含优先级继承）。
+
+config IPC_MUTEX_MAX
+    int "Maximum mutexes"
+    depends on IPC_MUTEX
+    default 8
+    range 1 32
+
+config MUTEX_DEADLOCK_DETECT
+    bool "Enable deadlock detection"
+    depends on IPC_MUTEX
+    default y
+    help
+      启用互斥锁死锁检测。
+      在获取锁前检测等待图环，防止死锁形成。
+
+config IPC_MQUEUE
+    bool "Enable message queue"
+    default y
+    help
+      启用消息队列支持。
+
+config IPC_MQUEUE_MAX
+    int "Maximum message queues"
+    depends on IPC_MQUEUE
+    default 4
+    range 1 16
+
+config IPC_EVENT
+    bool "Enable event flags"
+    default y
+    help
+      启用事件标志支持。
+
+config IPC_EVENT_MAX
+    int "Maximum event groups"
+    depends on IPC_EVENT
+    default 4
+    range 1 16
+
+config IPC_ENDPOINT
+    bool "Enable endpoint (C/S messaging)"
+    default y
+    help
+      启用 Endpoint 客户端-服务器消息传递。
+      多对一模型：多个客户端发送请求，服务端接收并回复。
+
+config IPC_ENDPOINT_MAX
+    int "Maximum endpoints"
+    depends on IPC_ENDPOINT
+    default 4
+    range 1 16
+
+config IPC_EP_MSG_SIZE
+    int "Endpoint message size (bytes)"
+    depends on IPC_ENDPOINT
+    default 64
+    range 8 512
+
+config IPC_EP_MAX_PENDING
+    int "Max pending messages per endpoint"
+    depends on IPC_ENDPOINT
+    default 4
+    range 1 16
+
+config IPC_CHANNEL
+    bool "Enable channel (P2P messaging)"
+    default y
+    help
+      启用 Channel 点对点双向通信。
+      一对一模型，带共享内存区域。
+
+config IPC_CHANNEL_MAX
+    int "Maximum channels"
+    depends on IPC_CHANNEL
+    default 4
+    range 1 16
+
+config IPC_CH_MSG_SIZE
+    int "Channel message size (bytes)"
+    depends on IPC_CHANNEL
+    default 64
+    range 8 512
+
+endmenu
+
+#=============================================================================
+# 调试配置
+#=============================================================================
+
+menu "Debug Configuration"
+
+config DEBUG_ENABLE
+    bool "Enable debug output"
+    default y
+    help
+      启用调试输出到 UART。
+
+config DEBUG_LEVEL
+    int "Debug level"
+    depends on DEBUG_ENABLE
+    default 2
+    range 0 3
+    help
+      调试级别：
+      0 = 无输出
+      1 = 错误
+      2 = 警告
+      3 = 信息
+
+config DEBUG_STACK_CHECK
+    bool "Enable stack overflow check"
+    default y
+    help
+      启用栈溢出检测。
+      在任务栈底填充魔数，检测栈溢出。
+
+config ASSERT_ENABLE
+    bool "Enable assertions"
+    default y
+    help
+      启用断言检查。
+
+endmenu
+
+#=============================================================================
+# 测试配置
+#=============================================================================
+
+menu "Test Configuration"
+
+config TEST_ENABLE
+    bool "Enable test framework"
+    default y
+    help
+      启用测试框架。
+
+config TEST_MODULE_SCHEDULER
+    bool "Scheduler tests"
+    depends on TEST_ENABLE
+    default y
+    help
+      启用调度器测试模块。
+
+config TEST_MODULE_EXAMPLE
+    bool "Example tests"
+    depends on TEST_ENABLE
+    default n
+    help
+      启用示例测试模块。
+
+config TEST_MODULE_TIMER
+    bool "Timer tests"
+    depends on TEST_ENABLE && TIMER_ENABLE
+    default y
+    help
+      启用定时器测试模块。
+
+config TEST_MODULE_DEADLOCK
+    bool "Deadlock detection tests"
+    depends on TEST_ENABLE && MUTEX_DEADLOCK_DETECT
+    default y
+    help
+      启用死锁检测测试模块。
+
+config TEST_MODULE_MPU
+    bool "MPU protection tests"
+    depends on TEST_ENABLE && MPU_ENABLE
+    default y
+    help
+      启用 MPU 内存保护测试模块。
+      (栈溢出检测、代码段保护、数据段隔离)
+
+config TEST_MODULE_SYSCALL
+    bool "Syscall interface tests"
+    depends on TEST_ENABLE && SYSCALL_ENABLE
+    default y
+    help
+      启用系统调用接口测试模块。
+      (syscall 正确性、参数传递、上下文保存/恢复)
+
+config TEST_MODULE_IRQ
+    bool "Interrupt management tests"
+    depends on TEST_ENABLE && IRQ_ENABLE
+    default y
+    help
+      启用中断管理测试模块。
+      (池管理、上下文检测、API 正确性)
+
+config TEST_MODULE_CAP
+    bool "Capability system tests"
+    depends on TEST_ENABLE && CAP_ENABLE
+    default y
+    help
+      启用能力系统测试模块。
+      (能力生命周期、权限校验、transfer/derive)
+
+config TEST_MODULE_FAULT
+    bool "Fault handler tests"
+    depends on TEST_ENABLE && FAULT_ENABLE
+    default y
+    help
+      启用 Fault handler 测试模块。
+      (crash_dump 结构、向量表验证)
+
+config TEST_MODULE_VFS
+    bool "VFS tests"
+    depends on TEST_ENABLE && VFS_ENABLE
+    default y
+    help
+      启用 VFS 虚拟文件系统测试模块。
+      (inode 生命周期、fd 操作、devfs、ramfs、路径解析)
+
+config TEST_MODULE_IPC_UPGRADE
+    bool "IPC upgrade tests"
+    depends on TEST_ENABLE && IPC_ENDPOINT && IPC_CHANNEL
+    default y
+    help
+      启用 IPC 升级测试模块。
+      (Endpoint C/S、Channel P2P、syscall 补全)
+
+config TEST_MODULE_WATCHDOG
+    bool "Watchdog tests"
+    depends on TEST_ENABLE && KERNEL_WATCHDOG
+    default y
+    help
+      启用看门狗测试模块。
+      (IWDG 寄存器访问、喂狗、SR 状态)
+
+config TEST_MODULE_STATS
+    bool "CPU statistics tests"
+    depends on TEST_ENABLE && KERN_TASK_STATS
+    default y
+    help
+      启用 CPU 使用率统计测试模块。
+      (基本功能、多任务竞争、idle 合理性)
+
+endmenu
+
+#=============================================================================
+# 定时器配置
+#=============================================================================
+
+menu "Timer Configuration"
+
+config TIMER_ENABLE
+    bool "Enable software timer"
+    default y
+    help
+      启用软件定时器支持。
+
+config TIMER_MAX
+    int "Maximum timers"
+    depends on TIMER_ENABLE
+    default 16
+    range 4 64
+    help
+      最大定时器数量。
+
+config TIMER_CMD_QUEUE_SIZE
+    int "Timer command queue size"
+    depends on TIMER_ENABLE
+    default 8
+    range 4 32
+    help
+      定时器命令队列大小。
+
+config TIMER_TASK_PRIORITY
+    int "Timer service task priority"
+    depends on TIMER_ENABLE
+    default 1
+    range 0 31
+    help
+      定时器服务任务优先级。
+      数值越小优先级越高。
+      建议设为较高优先级以确保定时器响应及时。
+
+config TIMER_TASK_STACK_SIZE
+    int "Timer service task stack size (bytes)"
+    depends on TIMER_ENABLE
+    default 512
+    range 256 2048
+    help
+      定时器服务任务栈大小（字节）。
+
+config TIMER_NAME_LEN
+    int "Timer name length"
+    depends on TIMER_ENABLE
+    default 16
+    range 8 32
+    help
+      定时器名称最大长度。
+
+endmenu
+
+menu "VFS Configuration"
+
+config VFS_ENABLE
+    bool "Enable Virtual File System"
+    default y
+    help
+      启用 VFS 虚拟文件系统。
+      提供 inode、文件描述符、路径解析，
+      以及 devfs (设备文件系统) 和 ramfs (内存文件系统)。
+
+config VFS_MAX_INODES
+    int "Maximum inodes"
+    depends on VFS_ENABLE
+    default 32
+    range 8 128
+    help
+      全局 inode 池大小。
+      每个文件、目录、设备节点占用一个 inode。
+
+config VFS_MAX_FDS
+    int "Maximum file descriptors per task"
+    depends on VFS_ENABLE
+    default 8
+    range 4 32
+    help
+      每个任务可同时打开的最大文件描述符数量。
+      每 fd 占 12 字节 (inode* + flags + offset + in_use)。
+
+endmenu
+
+menu "Microkernel Configuration"
+
+config MPU_ENABLE
+    bool "Enable MPU memory protection"
+    default y
+    help
+      启用 Cortex-M7 MPU 内存保护。
+      用户任务运行在非特权模式，MPU region 隔离内存访问。
+      这是微内核安全隔离的基础。
+
+config SYSCALL_ENABLE
+    bool "Enable syscall interface"
+    depends on MPU_ENABLE
+    default y
+    help
+      启用系统调用接口 (SVC #1)。
+      用户任务通过 svc 指令请求内核服务。
+
+config SYSCALL_TABLE_SIZE
+    int "Syscall table size"
+    depends on SYSCALL_ENABLE
+    default 40
+    range 16 64
+    help
+      系统调用分发表大小。
+
+config MPU_REGION_COUNT
+    int "MPU regions per task"
+    depends on MPU_ENABLE
+    default 5
+    range 3 8
+    help
+      每个用户任务使用的 MPU region 数量。
+      典型: 0=代码, 1=数据, 2=栈, 3-4=共享/外设。
+
+endmenu
+
+menu "Interrupt Configuration"
+
+config IRQ_ENABLE
+    bool "Enable interrupt management"
+    default y
+    help
+      启用 ISR 注册、底半部和线程化 IRQ 支持。
+
+config IRQ_MAX_USER
+    int "Maximum registered ISRs"
+    depends on IRQ_ENABLE
+    default 16
+    range 1 64
+    help
+      最大可注册的用户中断处理函数数量。
+
+config IRQ_DEFAULT_PRIORITY
+    int "Default ISR priority"
+    depends on IRQ_ENABLE
+    default 8
+    range 0 14
+    help
+      新注册 ISR 的默认 NVIC 优先级。
+      0=最高优先级, 14=最低 (PendSV/SysTick 使用 15)。
+
+config IRQ_BH_ENABLE
+    bool "Enable bottom halves"
+    depends on IRQ_ENABLE
+    default y
+    help
+      启用底半部 (bottom half) 延迟处理机制。
+      可从 ISR 中安全调度，在任务上下文中执行。
+
+config IRQ_BH_MAX
+    int "Maximum bottom halves"
+    depends on IRQ_BH_ENABLE
+    default 8
+    range 1 32
+    help
+      最大底半部槽位数。
+
+config IRQ_THREADED_ENABLE
+    bool "Enable threaded IRQs"
+    depends on IRQ_ENABLE
+    default y
+    help
+      启用线程化中断处理。
+      ISR 被降级为任务上下文执行，适合复杂处理。
+
+config IRQ_THREADED_MAX
+    int "Maximum threaded IRQs"
+    depends on IRQ_THREADED_ENABLE
+    default 4
+    range 1 16
+    help
+      最大线程化 IRQ 槽位数。
+
+config IRQ_THREADED_STACK_SIZE
+    int "Threaded IRQ handler stack size (bytes)"
+    depends on IRQ_THREADED_ENABLE
+    default 512
+    range 256 2048
+    help
+      线程化 IRQ 处理任务的栈大小。
+
+endmenu
+
+menu "Capability Configuration"
+
+config CAP_ENABLE
+    bool "Enable capability system"
+    default y
+    help
+      启用能力系统 (capability-based access control)。
+      所有 IPC 对象和内存分配通过能力令牌访问，
+      提供权限控制和任务间隔离。
+
+config CAP_MAX_COUNT
+    int "Maximum capability entries"
+    depends on CAP_ENABLE
+    default 32
+    range 8 128
+    help
+      全局能力池大小。每个 IPC 对象和内存
+      分配占用一个能力槽位。
+
+endmenu
+
+menu "Fault Handler Configuration"
+
+config FAULT_ENABLE
+    bool "Enable fault handlers"
+    default y
+    help
+      启用完整的 Fault 异常处理。
+      MemManage/BusFault/UsageFault → 终止用户任务。
+      HardFault → crash dump + panic。
+
+config FAULT_CRASH_DUMP
+    bool "Enable crash dump on fault"
+    depends on FAULT_ENABLE
+    default y
+    help
+      故障时保存完整寄存器上下文到 SRAM 中的
+      .crash_dump section，重启后保留用于调试。
+
+endmenu
+
+menu "Shell Configuration"
+
+config SHELL_ENABLE
+    bool "Enable interactive shell"
+    default y
+    depends on VFS_ENABLE
+    help
+      通过串口终端提供交互式 shell。
+      测试完成后自动启动。
+
+config SHELL_STACK_SIZE
+    int "Shell task stack size (bytes)"
+    depends on SHELL_ENABLE
+    default 2048
+    range 1024 8192
+    help
+      Shell 任务栈大小（字节）。
+      行缓冲 + 命令解析 + 目录遍历需要较大栈空间。
+
+config SHELL_PRIORITY
+    int "Shell task priority"
+    depends on SHELL_ENABLE
+    default 5
+    range 0 31
+    help
+      Shell 任务优先级（数值越小优先级越高）。
+
+endmenu
+
+menu "Driver Configuration"
+
+config DRIVER_ENABLE
+    bool "Enable device driver framework"
+    default y
+    depends on VFS_ENABLE
+    help
+      启用设备驱动框架。
+      提供 device_t 抽象层, 驱动自动注册到 devfs。
+
+config DRIVER_MAX_DEVICES
+    int "Maximum devices"
+    depends on DRIVER_ENABLE
+    default 8
+    range 4 16
+    help
+      设备注册表最大设备数。
+
+endmenu
+

@@ -1,0 +1,71 @@
+/**
+ * @file mpu.h
+ * @brief Cortex-M7 MPU 内存保护接口
+ */
+
+#ifndef MPU_H
+#define MPU_H
+
+#include "kernel_types.h"
+
+#if MPU_ENABLE
+
+/*============================================================================
+ * MPU 寄存器宏 (供外部使用)
+ *============================================================================*/
+
+/* RBAR */
+#define RBAR_VALID            (1UL << 4)
+
+/* RASR — Cortex-M7 (PMSAv7) MPU_RASR bit layout:
+ *   [0]     ENABLE
+ *   [5:1]   SIZE
+ *   [7:6]   Reserved
+ *   [15:8]  SRD  (Sub-Region Disable)
+ *   [17:16] TEX[2:1]
+ *   [18]    TEX[0]
+ *   [19]    S    (Shareable)
+ *   [20]    C    (Cacheable)
+ *   [21]    B    (Bufferable)
+ *   [23:22] Reserved
+ *   [26:24] AP   (Access Permission, 3-bit)
+ *   [27]    Reserved
+ *   [28]    XN   (Execute Never)
+ *   [31:29] Reserved
+ */
+#define RASR_ENABLE           (1UL << 0)
+#define RASR_SRD_SHIFT        8
+
+/* AP (Access Permission) — bits [26:24] */
+#define AP_NOACCESS     (0x0UL << 24)
+#define AP_PRW          (0x1UL << 24)
+#define AP_PRW_URO      (0x2UL << 24)
+#define AP_FULL         (0x3UL << 24)
+#define AP_PRO          (0x5UL << 24)
+
+/* Memory type attributes — bits [21:16] */
+/* Strongly-ordered: TEX=000, S=1, C=0, B=0 */
+#define ATTR_STRONGLY_ORDERED   (1UL << 19)
+/* Device: TEX=000, S=0, C=0, B=1 */
+#define ATTR_DEVICE             (1UL << 21)
+/* Normal, Write-Back, Write-Allocate: TEX=001, S=1, C=1, B=1 */
+#define ATTR_NORMAL_WBWA        ((1UL << 18) | (1UL << 19) | (1UL << 20) | (1UL << 21))
+
+#define XN_ENABLE               (1UL << 28)
+
+void mpu_init(void);
+void mpu_region_set(uint32_t region, uint32_t base, uint32_t size, uint32_t attr);
+void mpu_region_disable(uint32_t region);
+uint32_t mpu_calc_rasr_size(uint32_t size);
+uint32_t mpu_stack_guard_rasr(uint32_t base, uint32_t size, uint32_t subregion_disable);
+void mpu_load_task_regions(tcb_t *tcb);
+void mpu_enable_default_map(void);
+
+#else
+
+static inline void mpu_init(void) {}
+static inline void mpu_load_task_regions(tcb_t *tcb) { (void)tcb; }
+
+#endif /* MPU_ENABLE */
+
+#endif /* MPU_H */

@@ -1,0 +1,425 @@
+/**
+ * @file mqueue.c
+ * @brief 消息队列实现
+ */
+
+#include "mqueue.h"
+#include "wait_queue.h"
+#include "scheduler.h"
+#include "kernel_config.h"
+#include "hal.h"
+#include <string.h>
+
+/*============================================================================
+ * 静态分配的消息队列池和缓冲区
+ *============================================================================*/
+
+static mqueue_t mqueue_pool[KERN_MAX_MQUEUES];
+static uint32_t mqueue_used_bitmap;
+
+// 消息缓冲区池 (每个队列独立缓冲区)
+static uint8_t mqueue_buffers[KERN_MAX_MQUEUES][KERN_MQUEUE_DEPTH * KERN_MSG_MAX_SIZE]
+    __attribute__((aligned(4)));
+
+/*============================================================================
+ * 内部函数
+ *============================================================================*/
+
+// 分配消息队列 ID
+static queue_id_t alloc_mqueue_id(void) {
+    for (int i = 0; i < KERN_MAX_MQUEUES; i++) {
+        if (!(mqueue_used_bitmap & (1U << i))) {
+            mqueue_used_bitmap |= (1U << i);
+            return (queue_id_t)i;
+        }
+    }
+    return KERN_INVALID_ID;
+}
+
+// 释放消息队列 ID
+static void free_mqueue_id(queue_id_t id) {
+    if (id >= 0 && id < KERN_MAX_MQUEUES) {
+        mqueue_used_bitmap &= ~(1U << id);
+    }
+}
+
+// 获取消息队列指针
+static mqueue_t *get_mqueue(queue_id_t id) {
+    if (id < 0 || id >= KERN_MAX_MQUEUES) {
+        return NULL;
+    }
+    if (!mqueue_pool[id].in_use) {
+        return NULL;
+    }
+    return &mqueue_pool[id];
+}
+
+// 内部发送消息 (无锁)
+static void mqueue_do_put(mqueue_t *mq, const void *msg) {
+    uint8_t *dst = (uint8_t *)mq->buffer + (mq->head * mq->msg_size);
+    memcpy(dst, msg, mq->msg_size);
+
+    mq->head = (mq->head + 1) % mq->capacity;
+    mq->count++;
+}
+
+// 内部接收消息 (无锁)
+static void mqueue_do_get(mqueue_t *mq, void *msg) {
+    uint8_t *src = (uint8_t *)mq->buffer + (mq->tail * mq->msg_size);
+    memcpy(msg, src, mq->msg_size);
+
+    mq->tail = (mq->tail + 1) % mq->capacity;
+    mq->count--;
+}
+
+/*============================================================================
+ * 公开接口实现
+ *============================================================================*/
+
+void mqueue_init(void) {
+    memset(mqueue_pool, 0, sizeof(mqueue_pool));
+    mqueue_used_bitmap = 0;
+}
+
+queue_id_t mqueue_create(uint32_t msg_size, uint32_t capacity) {
+    uint32_t crit = hal_irq_save();
+
+    queue_id_t id = alloc_mqueue_id();
+    if (id == KERN_INVALID_ID) {
+        hal_irq_restore(crit);
+        return KERN_INVALID_ID;
+    }
+
+    // 限制消息大小和容量
+    if (msg_size > KERN_MSG_MAX_SIZE) {
+        msg_size = KERN_MSG_MAX_SIZE;
+    }
+    if (capacity > KERN_MQUEUE_DEPTH) {
+        capacity = KERN_MQUEUE_DEPTH;
+    }
+
+    mqueue_t *mq = &mqueue_pool[id];
+
+    mq->buffer = mqueue_buffers[id];
+    mq->msg_size = (uint16_t)msg_size;
+    mq->capacity = (uint16_t)capacity;
+    mq->count = 0;
+    mq->head = 0;
+    mq->tail = 0;
+    mq->in_use = 1;
+
+    wait_queue_init(&mq->send_queue);
+    wait_queue_init(&mq->recv_queue);
+
+    hal_irq_restore(crit);
+    return id;
+}
+
+kern_err_t mqueue_delete(queue_id_t queue_id) {
+    uint32_t crit = hal_irq_save();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL) {
+        hal_irq_restore(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    // 唤醒所有发送等待的任务
+    tcb_t *tcb = mq->send_queue.head;
+    while (tcb) {
+        tcb_t *next = tcb->wait_next;
+        tcb->wait_next = NULL;
+        tcb->wait_prev = NULL;
+        tcb->block_result = KERN_ERR_NOEXIST;
+        tcb->block_obj = NULL;
+        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        tcb = next;
+    }
+
+    // 唤醒所有接收等待的任务
+    tcb = mq->recv_queue.head;
+    while (tcb) {
+        tcb_t *next = tcb->wait_next;
+        tcb->wait_next = NULL;
+        tcb->wait_prev = NULL;
+        tcb->block_result = KERN_ERR_NOEXIST;
+        tcb->block_obj = NULL;
+        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        tcb = next;
+    }
+
+    // 清零并释放
+    memset(mq, 0, sizeof(mqueue_t));
+    free_mqueue_id(queue_id);
+
+    hal_irq_restore(crit);
+    return KERN_OK;
+}
+
+kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (mq->count < mq->capacity) {
+        mqueue_do_put(mq, msg);
+
+        if (mq->recv_queue.count > 0) {
+            tcb_t *tcb = wait_queue_get_highest(&mq->recv_queue);
+            if (tcb) {
+                wait_queue_remove(&mq->recv_queue, tcb);
+                tcb->block_result = KERN_OK;
+                tcb->block_obj = NULL;
+                sched_wakeup(tcb, KERN_OK);
+            }
+        }
+
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    if (hal_irq_get_active() >= 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_ISR;
+    }
+
+    tcb_t *current = sched_get_current();
+    current->block_reason = BLOCK_REASON_QUEUE;
+    current->block_obj = mq;
+
+    wait_queue_add(&mq->send_queue, current);
+
+    /* 从就绪队列移除 */
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    /* 设置阻塞状态 */
+    current->state = TASK_STATE_BLOCKED;
+    current->block_result = KERN_OK;
+
+    /* 设置超时唤醒时间 */
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+
+    /* 触发上下文切换 */
+    hal_trigger_pendsv();
+
+    /* 等待被唤醒 */
+    while (current->state == TASK_STATE_BLOCKED) {
+        __asm volatile("wfi");
+        __asm volatile("dmb");
+    }
+
+    kern_err_t result = current->block_result;
+
+    if (result == KERN_OK) {
+        crit = hal_enter_critical();
+        if (mq->count < mq->capacity) {
+            mqueue_do_put(mq, msg);
+        }
+        hal_exit_critical(crit);
+    } else {
+        crit = hal_enter_critical();
+        if (current->block_obj == mq) {
+            wait_queue_remove(&mq->send_queue, current);
+            current->block_obj = NULL;
+        }
+        hal_exit_critical(crit);
+    }
+
+    return result;
+}
+
+kern_err_t mqueue_trysend(queue_id_t queue_id, const void *msg) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (mq->count >= mq->capacity) {
+        hal_exit_critical(crit);
+        return KERN_ERR_BUSY;
+    }
+
+    mqueue_do_put(mq, msg);
+
+    // 检查是否有任务在等待接收
+    if (mq->recv_queue.count > 0) {
+        tcb_t *tcb = wait_queue_get_highest(&mq->recv_queue);
+        if (tcb) {
+            wait_queue_remove(&mq->recv_queue, tcb);
+            tcb->block_result = KERN_OK;
+            tcb->block_obj = NULL;
+            sched_wakeup(tcb, KERN_OK);
+        }
+    }
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (mq->count > 0) {
+        mqueue_do_get(mq, msg);
+
+        if (mq->send_queue.count > 0) {
+            tcb_t *tcb = wait_queue_get_highest(&mq->send_queue);
+            if (tcb) {
+                wait_queue_remove(&mq->send_queue, tcb);
+                tcb->block_result = KERN_OK;
+                tcb->block_obj = NULL;
+                sched_wakeup(tcb, KERN_OK);
+            }
+        }
+
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    if (hal_irq_get_active() >= 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_ISR;
+    }
+
+    tcb_t *current = sched_get_current();
+    current->block_reason = BLOCK_REASON_QUEUE;
+    current->block_obj = mq;
+
+    /* 先加入等待队列 */
+    wait_queue_add(&mq->recv_queue, current);
+
+    /* 关键：在释放临界区前，完成状态转换
+     * 1. 从就绪队列移除
+     * 2. 设置状态为 BLOCKED
+     * 这样当另一个任务调用 mqueue_trysend 时，sched_wakeup 能正确唤醒当前任务。
+     */
+
+    /* 从就绪队列移除 - 需要直接操作，因为我们在临界区内 */
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    /* 设置阻塞状态 */
+    current->state = TASK_STATE_BLOCKED;
+    current->block_result = KERN_OK;
+
+    /* 设置超时唤醒时间 */
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+
+    /* 触发上下文切换
+     * 由于状态已经是 BLOCKED，PendSV 会选择下一个任务运行
+     */
+    hal_trigger_pendsv();
+
+    /* 等待被唤醒 - 使用内存屏障确保正确读取状态 */
+    while (current->state == TASK_STATE_BLOCKED) {
+        __asm volatile("wfi");
+        __asm volatile("dmb");
+    }
+
+    kern_err_t result = current->block_result;
+
+    if (result == KERN_OK) {
+        crit = hal_enter_critical();
+        if (mq->count > 0) {
+            mqueue_do_get(mq, msg);
+        }
+        hal_exit_critical(crit);
+    } else {
+        crit = hal_enter_critical();
+        if (current->block_obj == mq) {
+            wait_queue_remove(&mq->recv_queue, current);
+            current->block_obj = NULL;
+        }
+        hal_exit_critical(crit);
+    }
+
+    return result;
+}
+
+kern_err_t mqueue_tryrecv(queue_id_t queue_id, void *msg) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (mq->count == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_BUSY;
+    }
+
+    mqueue_do_get(mq, msg);
+
+    // 检查是否有任务在等待发送
+    if (mq->send_queue.count > 0) {
+        tcb_t *tcb = wait_queue_get_highest(&mq->send_queue);
+        if (tcb) {
+            wait_queue_remove(&mq->send_queue, tcb);
+            tcb->block_result = KERN_OK;
+            tcb->block_obj = NULL;
+            sched_wakeup(tcb, KERN_OK);
+        }
+    }
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+int32_t mqueue_get_count(queue_id_t queue_id) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL) {
+        hal_exit_critical(crit);
+        return -1;
+    }
+
+    int32_t count = mq->count;
+
+    hal_exit_critical(crit);
+    return count;
+}
