@@ -234,6 +234,141 @@ static void test_endpoint_timeout(void) {
 }
 
 /*============================================================================
+ * Test 8b: Endpoint reply authority is recv-scoped
+ *============================================================================*/
+
+static ep_id_t test_ep_reply_scope;
+static volatile int ep_scope_server_done;
+static volatile int ep_scope_client_done;
+static volatile kern_err_t ep_scope_bad_reply;
+static volatile uint32_t ep_scope_reply_val;
+
+static void ep_scope_server(void *arg) {
+    (void)arg;
+    uint32_t req = 0;
+
+    if (endpoint_recv(test_ep_reply_scope, &req, 1000) == KERN_OK) {
+        task_delay(20);
+        req += 10;
+        (void)endpoint_reply(test_ep_reply_scope, &req);
+    }
+
+    ep_scope_server_done = 1;
+}
+
+static void ep_scope_bad_replier(void *arg) {
+    (void)arg;
+    task_delay(5);
+    uint32_t reply = 0xBAD;
+    ep_scope_bad_reply = endpoint_reply(test_ep_reply_scope, &reply);
+}
+
+static void ep_scope_client(void *arg) {
+    (void)arg;
+    uint32_t msg = 7;
+    kern_err_t err = endpoint_send(test_ep_reply_scope, &msg, 1000);
+    if (err == KERN_OK) {
+        ep_scope_reply_val = msg;
+    }
+    ep_scope_client_done = 1;
+}
+
+static void test_endpoint_reply_scoped_to_receiver(void) {
+    test_section("Test 8b: Endpoint reply scoped to receiver");
+
+    test_ep_reply_scope = endpoint_create("ep_scope", sizeof(uint32_t), 2);
+    TEST_ASSERT(test_ep_reply_scope >= 0, "reply scope endpoint created");
+    if (test_ep_reply_scope < 0) return;
+
+    ep_scope_server_done = 0;
+    ep_scope_client_done = 0;
+    ep_scope_bad_reply = KERN_OK;
+    ep_scope_reply_val = 0;
+
+    task_id_t server = task_create("ep_ssrv", ep_scope_server, NULL, 10, 0);
+    task_id_t bad = task_create("ep_sbad", ep_scope_bad_replier, NULL, 11, 0);
+    task_id_t client = task_create("ep_scli", ep_scope_client, NULL, 12, 0);
+    TEST_ASSERT(server >= 0 && bad >= 0 && client >= 0, "reply scope tasks created");
+    if (server < 0 || bad < 0 || client < 0) {
+        endpoint_delete(test_ep_reply_scope);
+        return;
+    }
+
+    task_start(server);
+    task_start(client);
+    task_start(bad);
+
+    task_delay(120);
+
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE, (int)ep_scope_bad_reply,
+                   "non-receiver reply rejected");
+    TEST_ASSERT_EQ(1, ep_scope_server_done, "receiver server completed");
+    TEST_ASSERT_EQ(1, ep_scope_client_done, "scoped client completed");
+    TEST_ASSERT_EQ(17, (int)ep_scope_reply_val, "valid receiver reply delivered");
+
+    endpoint_delete(test_ep_reply_scope);
+}
+
+/*============================================================================
+ * Test 8c: Endpoint reply after client timeout fails
+ *============================================================================*/
+
+static ep_id_t test_ep_reply_timeout;
+static volatile kern_err_t ep_timeout_client_err;
+static volatile kern_err_t ep_timeout_reply_err;
+static volatile int ep_timeout_server_done;
+
+static void ep_timeout_server(void *arg) {
+    (void)arg;
+    uint32_t req = 0;
+
+    if (endpoint_recv(test_ep_reply_timeout, &req, 1000) == KERN_OK) {
+        task_delay(40);
+        req += 1;
+        ep_timeout_reply_err = endpoint_reply(test_ep_reply_timeout, &req);
+    }
+    ep_timeout_server_done = 1;
+}
+
+static void ep_timeout_client(void *arg) {
+    (void)arg;
+    uint32_t msg = 11;
+    ep_timeout_client_err = endpoint_send(test_ep_reply_timeout, &msg, 10);
+}
+
+static void test_endpoint_reply_after_timeout(void) {
+    test_section("Test 8c: Endpoint reply after timeout");
+
+    test_ep_reply_timeout = endpoint_create("ep_rto", sizeof(uint32_t), 2);
+    TEST_ASSERT(test_ep_reply_timeout >= 0, "reply timeout endpoint created");
+    if (test_ep_reply_timeout < 0) return;
+
+    ep_timeout_client_err = KERN_OK;
+    ep_timeout_reply_err = KERN_OK;
+    ep_timeout_server_done = 0;
+
+    task_id_t server = task_create("ep_tsrv", ep_timeout_server, NULL, 10, 0);
+    task_id_t client = task_create("ep_tcli", ep_timeout_client, NULL, 11, 0);
+    TEST_ASSERT(server >= 0 && client >= 0, "reply timeout tasks created");
+    if (server < 0 || client < 0) {
+        endpoint_delete(test_ep_reply_timeout);
+        return;
+    }
+
+    task_start(server);
+    task_start(client);
+    task_delay(120);
+
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)ep_timeout_client_err,
+                   "client send timed out");
+    TEST_ASSERT_EQ(1, ep_timeout_server_done, "timeout server completed");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)ep_timeout_reply_err,
+                   "reply after timeout rejected");
+
+    endpoint_delete(test_ep_reply_timeout);
+}
+
+/*============================================================================
  * Test 9: Endpoint capability copy transfer
  *============================================================================*/
 
@@ -667,6 +802,103 @@ static void test_channel_delete_wakes_sender(void) {
 }
 
 /*============================================================================
+ * Test 17: Endpoint client death is visible to server reply
+ *============================================================================*/
+
+static ep_id_t test_ep_death;
+static volatile int ep_death_server_got;
+static volatile kern_err_t ep_death_reply_err;
+
+static void ep_death_server(void *arg) {
+    (void)arg;
+
+    uint32_t msg = 0;
+    kern_err_t err = endpoint_recv(test_ep_death, &msg, 1000);
+    if (err == KERN_OK) {
+        ep_death_server_got = 1;
+        task_delay(50);
+        msg++;
+        ep_death_reply_err = endpoint_reply(test_ep_death, &msg);
+    }
+}
+
+static void ep_death_client(void *arg) {
+    (void)arg;
+
+    uint32_t msg = 12;
+    (void)endpoint_send(test_ep_death, &msg, 1000);
+}
+
+static void test_endpoint_client_death_reply(void) {
+    test_section("Test 17: Endpoint client death notification");
+
+    test_ep_death = endpoint_create("ep_dead", sizeof(uint32_t), 2);
+    TEST_ASSERT(test_ep_death >= 0, "endpoint created");
+
+    ep_death_server_got = 0;
+    ep_death_reply_err = KERN_OK;
+
+    task_id_t server = task_create("ep_dsrv", ep_death_server, NULL, 10, 0);
+    task_id_t client = task_create("ep_dcli", ep_death_client, NULL, 11, 0);
+    TEST_ASSERT(server >= 0 && client >= 0, "death tasks created");
+
+    task_start(server);
+    task_start(client);
+    for (int i = 0; i < 50 && ep_death_server_got == 0; i++) {
+        task_delay(1);
+    }
+
+    TEST_ASSERT(ep_death_server_got == 1, "server received request");
+    kern_err_t err = task_delete(client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "delete blocked client");
+
+    task_delay(100);
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)ep_death_reply_err,
+                   "server reply sees dead client");
+
+    endpoint_delete(test_ep_death);
+}
+
+/*============================================================================
+ * Test 18: Channel peer death is visible to sender
+ *============================================================================*/
+
+static ch_id_t test_ch_peer_dead;
+static volatile kern_err_t ch_peer_dead_err;
+
+static void ch_peer_dead_sender(void *arg) {
+    (void)arg;
+
+    uint32_t msg = 0x12345678;
+    ch_peer_dead_err = channel_send(test_ch_peer_dead, &msg, 0);
+}
+
+static void test_channel_peer_death(void) {
+    test_section("Test 18: Channel peer death notification");
+
+    test_ch_peer_dead = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(test_ch_peer_dead >= 0, "channel created");
+
+    ch_peer_dead_err = KERN_OK;
+    task_id_t sender = task_create("ch_pdead", ch_peer_dead_sender, NULL, 10, 0);
+    task_id_t peer = task_create("ch_pgone", ch_dummy_peer, NULL, 11, 512);
+    TEST_ASSERT(sender >= 0 && peer >= 0, "peer-death tasks created");
+
+    kern_err_t err = channel_connect(test_ch_peer_dead, sender, peer);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "channel connected");
+
+    err = task_delete(peer);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "peer deleted before send");
+
+    task_start(sender);
+    task_delay(20);
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)ch_peer_dead_err,
+                   "send sees dead peer");
+
+    channel_delete(test_ch_peer_dead);
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -682,6 +914,8 @@ static void test_ipc_upgrade_module(void) {
     test_endpoint_cs();
     test_endpoint_multi_client();
     test_endpoint_timeout();
+    test_endpoint_reply_scoped_to_receiver();
+    test_endpoint_reply_after_timeout();
     test_endpoint_cap_transfer();
     test_endpoint_delete_wakes();
 
@@ -692,6 +926,8 @@ static void test_ipc_upgrade_module(void) {
     test_channel_peer_permissions();
     test_channel_delete_wakes();
     test_channel_delete_wakes_sender();
+    test_endpoint_client_death_reply();
+    test_channel_peer_death();
 }
 
 TEST_MODULE_REGISTER(ipc_upgrade, test_ipc_upgrade_module);

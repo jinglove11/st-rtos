@@ -45,6 +45,8 @@ kern_err_t task_start(task_id_t task_id);
  */
 void task_exit(void *retval) __attribute__((noreturn));
 kern_err_t task_exit_request(void *retval);
+kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result);
+void task_terminate(tcb_t *tcb);
 
 /**
  * @brief 挂起任务

@@ -16,6 +16,7 @@
 
 static kern_stats_t kern_stats;
 static uint32_t last_stat_tick;
+static uint32_t subsys_counters[STATS_SUBSYS_MAX][STATS_COUNTER_MAX];
 
 /*============================================================================
  * 外部引用
@@ -29,6 +30,11 @@ extern uint32_t task_get_used_bitmap(void);
 void stats_init(void) {
     last_stat_tick = 0;
     kern_stats = (kern_stats_t){0};
+    for (int i = 0; i < STATS_SUBSYS_MAX; i++) {
+        for (int j = 0; j < STATS_COUNTER_MAX; j++) {
+            subsys_counters[i][j] = 0;
+        }
+    }
 }
 
 /*============================================================================
@@ -112,6 +118,31 @@ void stats_record_syscall(uint8_t task_id) {
 
 void stats_record_fault(void) {
     kern_stats.fault_count++;
+}
+
+kern_err_t stats_record_event(uint8_t subsystem, uint8_t counter) {
+    if (subsystem >= STATS_SUBSYS_MAX || counter >= STATS_COUNTER_MAX) {
+        return KERN_ERR_PARAM;
+    }
+
+    subsys_counters[subsystem][counter]++;
+    return KERN_OK;
+}
+
+uint32_t stats_get_event_count(uint8_t subsystem, uint8_t counter) {
+    if (subsystem >= STATS_SUBSYS_MAX || counter >= STATS_COUNTER_MAX) {
+        return 0;
+    }
+
+    return subsys_counters[subsystem][counter];
+}
+
+void stats_clear_events(void) {
+    for (int i = 0; i < STATS_SUBSYS_MAX; i++) {
+        for (int j = 0; j < STATS_COUNTER_MAX; j++) {
+            subsys_counters[i][j] = 0;
+        }
+    }
 }
 
 /*============================================================================

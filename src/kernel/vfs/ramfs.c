@@ -127,7 +127,12 @@ static kern_err_t dir_lookup(inode_t *dir, const char *name, inode_t **result) {
     }
 
     *result = inode_lookup_child(dir, name);
-    return (*result) ? KERN_OK : KERN_ERR_NOEXIST;
+    if (*result) {
+        inode_get(*result);
+        return KERN_OK;
+    }
+
+    return KERN_ERR_NOEXIST;
 }
 
 static kern_err_t dir_create(inode_t *dir, const char *name, uint32_t type) {

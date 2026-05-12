@@ -17,6 +17,8 @@
 #include "task.h"
 #include "hal.h"
 #include "kernel.h"
+#include "trace.h"
+#include "stats.h"
 
 static void test_handler_stub(void);
 
@@ -117,6 +119,101 @@ static void test_bh_lifecycle(void) {
     for (int i = 0; i < created; i++) {
         bh_delete(ids[i]);
     }
+}
+
+typedef struct {
+    int16_t bh_id;
+    int     ran;
+} bh_self_delete_ctx_t;
+
+static void bh_self_delete_handler(void *arg) {
+    bh_self_delete_ctx_t *ctx = (bh_self_delete_ctx_t *)arg;
+    ctx->ran++;
+    (void)bh_delete(ctx->bh_id);
+}
+
+static void test_bh_delete_while_running(void) {
+    test_section("Test 3c: BH delete while running");
+
+    bh_self_delete_ctx_t ctx;
+    ctx.bh_id = KERN_INVALID_ID;
+    ctx.ran = 0;
+
+    int16_t bh_id = bh_create(bh_self_delete_handler, &ctx);
+    TEST_ASSERT(bh_id >= 0, "self-delete BH created");
+    if (bh_id < 0) return;
+    ctx.bh_id = bh_id;
+
+    kern_err_t err = bh_schedule(bh_id);
+    TEST_ASSERT_EQ(KERN_OK, err, "self-delete BH scheduled");
+
+    task_delay(5);
+    TEST_ASSERT_EQ(1, ctx.ran, "self-delete BH ran once");
+
+    err = bh_schedule(bh_id);
+    TEST_ASSERT_NE(KERN_OK, err, "deleted running BH cannot be rescheduled");
+
+    int16_t new_id = bh_create(bh_test_handler, &bh_test_counter);
+    TEST_ASSERT(new_id >= 0, "BH slot reusable after running delete");
+    if (new_id >= 0) {
+        (void)bh_delete(new_id);
+    }
+}
+
+/*============================================================================
+ * 测试 3b: IRQ/BH trace 与 stats
+ *============================================================================*/
+
+#if TRACE_ENABLE && KERN_TASK_STATS
+static void irq_trace_count_cb(const trace_entry_t *entry, void *ctx) {
+    (void)entry;
+    (void)ctx;
+}
+#endif
+
+static void test_irq_bh_trace_stats(void) {
+    test_section("Test 3b: IRQ/BH Trace/Stats");
+
+#if TRACE_ENABLE && KERN_TASK_STATS
+    trace_clear();
+    stats_clear_events();
+
+    int16_t bh_id = bh_create(bh_test_handler, &bh_test_counter);
+    TEST_ASSERT(bh_id >= 0, "BH create for diagnostics");
+
+    kern_err_t err = bh_cancel(bh_id);
+    TEST_ASSERT_EQ(KERN_OK, err, "BH cancel diagnostics");
+
+    err = bh_delete(bh_id);
+    TEST_ASSERT_EQ(KERN_OK, err, "BH delete diagnostics");
+
+    err = irq_register(0, test_handler_stub, 8);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ register diagnostics");
+
+    err = irq_disable(0);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ mask diagnostics");
+
+    err = irq_enable(0);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ unmask diagnostics");
+
+    err = irq_unregister(0);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ release diagnostics");
+
+    uint16_t bh_events = trace_filter(TRACE_BH, irq_trace_count_cb, NULL);
+    uint16_t irq_events = trace_filter(TRACE_IRQ, irq_trace_count_cb, NULL);
+    TEST_ASSERT(bh_events >= 3, "BH trace events recorded");
+    TEST_ASSERT(irq_events >= 4, "IRQ trace events recorded");
+    TEST_ASSERT(stats_get_event_count(STATS_SUBSYS_BH, STATS_COUNTER_CANCEL) >= 1,
+                "BH cancel stat recorded");
+    TEST_ASSERT(stats_get_event_count(STATS_SUBSYS_BH, STATS_COUNTER_DELETE) >= 1,
+                "BH delete stat recorded");
+    TEST_ASSERT(stats_get_event_count(STATS_SUBSYS_IRQ, STATS_COUNTER_DELETE) >= 1,
+                "IRQ release stat recorded");
+#else
+    TEST_ASSERT(1, "IRQ/BH diagnostics disabled");
+#endif
+
+    test_pass("IRQ/BH trace/stats");
 }
 
 /*============================================================================
@@ -260,6 +357,8 @@ static void test_irq_module(void) {
     test_isr_pool();
     test_isr_context();
     test_bh_lifecycle();
+    test_bh_delete_while_running();
+    test_irq_bh_trace_stats();
 #if IRQ_THREADED_ENABLE
     test_threaded_irq();
 #endif

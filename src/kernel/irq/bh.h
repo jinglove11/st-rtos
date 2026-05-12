@@ -35,6 +35,13 @@ int16_t bh_create(bh_handler_t handler, void *arg);
 kern_err_t bh_schedule(int16_t bh_id);
 
 /**
+ * @brief 取消尚未执行的底半部
+ * @param bh_id 底半部 ID
+ * @return KERN_OK 成功, 其他失败
+ */
+kern_err_t bh_cancel(int16_t bh_id);
+
+/**
  * @brief 删除底半部
  * @param bh_id 底半部 ID
  * @return KERN_OK 成功, 其他失败

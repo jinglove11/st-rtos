@@ -26,6 +26,30 @@ typedef struct {
     uint32_t total_syscalls;
 } kern_stats_t;
 
+typedef enum {
+    STATS_SUBSYS_TIMER = 0,
+    STATS_SUBSYS_IRQ,
+    STATS_SUBSYS_BH,
+    STATS_SUBSYS_DEV,
+    STATS_SUBSYS_MEM,
+    STATS_SUBSYS_IPC,
+    STATS_SUBSYS_CAP,
+    STATS_SUBSYS_VFS,
+    STATS_SUBSYS_MAX
+} stats_subsys_t;
+
+typedef enum {
+    STATS_COUNTER_OK = 0,
+    STATS_COUNTER_ERROR,
+    STATS_COUNTER_QUEUE_FULL,
+    STATS_COUNTER_TIMEOUT,
+    STATS_COUNTER_DELETE,
+    STATS_COUNTER_CANCEL,
+    STATS_COUNTER_BUSY,
+    STATS_COUNTER_NOEXIST,
+    STATS_COUNTER_MAX
+} stats_counter_t;
+
 /*============================================================================
  * API
  *============================================================================*/
@@ -52,6 +76,15 @@ void stats_record_syscall(uint8_t task_id);
 
 /** @brief 记录一次 fault */
 void stats_record_fault(void);
+
+/** @brief 记录一次子系统事件 */
+kern_err_t stats_record_event(uint8_t subsystem, uint8_t counter);
+
+/** @brief 读取子系统事件计数 */
+uint32_t stats_get_event_count(uint8_t subsystem, uint8_t counter);
+
+/** @brief 清空子系统事件计数 */
+void stats_clear_events(void);
 
 /** @brief 获取全局统计 */
 const kern_stats_t *stats_get_kern_stats(void);

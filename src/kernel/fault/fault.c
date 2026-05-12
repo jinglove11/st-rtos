@@ -221,7 +221,7 @@ void fault_handler_c(uint32_t fault_type, void *exc_frame, uint32_t exc_return) 
 
     if (is_user_fault) {
         /* 用户任务 fault → 终止任务 */
-        task_terminate(current);
+        (void)task_terminate_with_result(current, KERN_ERR_FAULT);
 
         /* 修改异常帧的 PC，使其指向 task_fault_exit */
         frame->pc = (uint32_t)(uintptr_t)task_fault_exit | 1U;

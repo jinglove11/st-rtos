@@ -21,6 +21,7 @@
 typedef char cap_slot_bits_fit[(CAP_MAX_COUNT_VAL <= (1U << CAP_SLOT_BITS)) ? 1 : -1];
 
 static cap_entry_t cap_pool[CAP_MAX_COUNT_VAL];
+static cap_cleanup_fn_t cap_cleanup_table[CAP_OBJ_TYPE_MAX];
 
 #define CAP_TASK_CSPACE_SLOTS \
     ((int)(sizeof(((tcb_t *)0)->cap_set) / sizeof(((tcb_t *)0)->cap_set[0])))
@@ -213,6 +214,8 @@ static void cap_unlink_from_parent(int slot) {
 
 static void cap_clear_slot(int slot) {
     cap_id_t cap = cap_encode((uint16_t)slot, cap_pool[slot].generation);
+    void *object = cap_pool[slot].object;
+    uint8_t obj_type = cap_pool[slot].obj_type;
     if (cap != CAP_INVALID) {
         cap_remove_from_owner(cap_pool[slot].owner, cap);
     }
@@ -225,6 +228,12 @@ static void cap_clear_slot(int slot) {
     cap_pool[slot].parent = CAP_NO_SLOT;
     cap_pool[slot].first_child = CAP_NO_SLOT;
     cap_pool[slot].next_sibling = CAP_NO_SLOT;
+
+    if (obj_type < CAP_OBJ_TYPE_MAX &&
+        cap_cleanup_table[obj_type] != NULL &&
+        cap_object_refcount(object, obj_type) == 0) {
+        cap_cleanup_table[obj_type](object, obj_type);
+    }
 }
 
 static void cap_revoke_slot_tree(int slot) {
@@ -236,6 +245,7 @@ static void cap_revoke_slot_tree(int slot) {
 
 void cap_init(void) {
     memset(cap_pool, 0, sizeof(cap_pool));
+    memset(cap_cleanup_table, 0, sizeof(cap_cleanup_table));
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         cap_pool[i].generation = 1;
         cap_pool[i].parent = CAP_NO_SLOT;
@@ -478,6 +488,29 @@ kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap) {
 
 kern_err_t cap_revoke(cap_id_t cap) {
     return cap_revoke_for(sched_get_current(), cap);
+}
+
+uint16_t cap_object_refcount(void *object, uint8_t obj_type) {
+    uint16_t refs = 0;
+
+    for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
+        if (cap_pool[i].in_use &&
+            cap_pool[i].object == object &&
+            cap_pool[i].obj_type == obj_type) {
+            refs++;
+        }
+    }
+
+    return refs;
+}
+
+kern_err_t cap_register_cleanup(uint8_t obj_type, cap_cleanup_fn_t cleanup) {
+    if (obj_type >= CAP_OBJ_TYPE_MAX) {
+        return KERN_ERR_PARAM;
+    }
+
+    cap_cleanup_table[obj_type] = cleanup;
+    return KERN_OK;
 }
 
 #endif /* CAP_ENABLE */

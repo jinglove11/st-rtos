@@ -12,6 +12,7 @@
 #include "kernel.h"
 #include "task.h"
 #include "scheduler.h"
+#include "stats.h"
 
 #if KERN_TASK_STATS && TEST_MODULE_STATS
 
@@ -113,6 +114,39 @@ static void test_idle_cpu_usage(void) {
 }
 
 /*============================================================================
+ * Test 4: subsystem event counters
+ *============================================================================*/
+
+static void test_subsystem_counters(void) {
+    test_section("Test 4: subsystem event counters");
+
+    stats_clear_events();
+    TEST_ASSERT_EQ(0, (int)stats_get_event_count(STATS_SUBSYS_TIMER,
+                                                 STATS_COUNTER_QUEUE_FULL),
+                   "timer queue-full counter starts at 0");
+
+    kern_err_t err = stats_record_event(STATS_SUBSYS_TIMER,
+                                        STATS_COUNTER_QUEUE_FULL);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "record timer queue-full");
+    err = stats_record_event(STATS_SUBSYS_TIMER,
+                             STATS_COUNTER_QUEUE_FULL);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "record timer queue-full again");
+    err = stats_record_event(STATS_SUBSYS_BH, STATS_COUNTER_CANCEL);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "record bh cancel");
+
+    TEST_ASSERT_EQ(2, (int)stats_get_event_count(STATS_SUBSYS_TIMER,
+                                                 STATS_COUNTER_QUEUE_FULL),
+                   "timer queue-full counter increments");
+    TEST_ASSERT_EQ(1, (int)stats_get_event_count(STATS_SUBSYS_BH,
+                                                 STATS_COUNTER_CANCEL),
+                   "bh cancel counter increments");
+
+    err = stats_record_event(STATS_SUBSYS_MAX, STATS_COUNTER_OK);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, (int)err,
+                   "invalid subsystem rejected");
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -120,6 +154,7 @@ static void test_stats_module(void) {
     test_cpu_usage_basic();
     test_cpu_usage_sum();
     test_idle_cpu_usage();
+    test_subsystem_counters();
 }
 
 TEST_MODULE_REGISTER(stats, test_stats_module);

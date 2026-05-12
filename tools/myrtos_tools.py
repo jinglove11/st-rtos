@@ -43,6 +43,14 @@ TRACE_EVENT_NAMES = {
     5: "IPC_RCV",
     6: "BH",
     7: "FAULT",
+    8: "TIMER",
+    9: "IRQ",
+    10: "BH2",
+    11: "DEV",
+    12: "MEM",
+    13: "IPC_EVT",
+    14: "CAP_EVT",
+    15: "VFS_EVT",
 }
 
 FAULT_TYPE_NAMES = {

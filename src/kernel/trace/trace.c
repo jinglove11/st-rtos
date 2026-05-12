@@ -61,6 +61,34 @@ void trace_record(uint8_t event, uint8_t task_id, uint16_t data) {
     }
 }
 
+uint16_t trace_pack(uint8_t object_id, uint8_t result) {
+    return (uint16_t)(((uint16_t)object_id << 8) | result);
+}
+
+void trace_timer(uint8_t task_id, uint8_t timer_id, uint8_t action, uint8_t result) {
+    trace_record(TRACE_TIMER, task_id, trace_pack(timer_id, (uint8_t)((action << 4) | (result & 0x0F))));
+}
+
+void trace_irq(uint8_t task_id, uint8_t irq_num, uint8_t action, uint8_t result) {
+    trace_record(TRACE_IRQ, task_id, trace_pack(irq_num, (uint8_t)((action << 4) | (result & 0x0F))));
+}
+
+void trace_bh(uint8_t task_id, uint8_t bh_id, uint8_t action, uint8_t result) {
+    trace_record(TRACE_BH, task_id, trace_pack(bh_id, (uint8_t)((action << 4) | (result & 0x0F))));
+}
+
+void trace_dev(uint8_t task_id, uint8_t dev_id, uint8_t action, uint8_t result) {
+    trace_record(TRACE_DEV, task_id, trace_pack(dev_id, (uint8_t)((action << 4) | (result & 0x0F))));
+}
+
+void trace_mem(uint8_t task_id, uint8_t mem_id, uint8_t action, uint8_t result) {
+    trace_record(TRACE_MEM, task_id, trace_pack(mem_id, (uint8_t)((action << 4) | (result & 0x0F))));
+}
+
+void trace_ipc_event(uint8_t task_id, uint8_t ipc_id, uint8_t action, uint8_t result) {
+    trace_record(TRACE_IPC_EVENT, task_id, trace_pack(ipc_id, (uint8_t)((action << 4) | (result & 0x0F))));
+}
+
 uint16_t trace_get_count(void) {
     return trace_count;
 }

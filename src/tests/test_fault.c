@@ -8,6 +8,13 @@
 #include "task.h"
 #include "scheduler.h"
 #include "hal.h"
+#include "user_api.h"
+#if CAP_ENABLE
+#include "capability.h"
+#endif
+#if VFS_ENABLE
+#include "vfs.h"
+#endif
 
 #if FAULT_ENABLE && TEST_MODULE_FAULT
 
@@ -98,7 +105,7 @@ static void test_user_memmanage_null(void) {
 
     void *retval = NULL;
     kern_err_t err = task_join(tid, &retval, 2000);
-    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "task_join returns OK (task terminated)");
+    TEST_ASSERT_EQ((int)KERN_ERR_FAULT, (int)err, "task_join returns FAULT");
     /* retval 不是 0xBAD — 说明不是正常退出 */
     TEST_ASSERT(retval != (void *)0xBAD, "task did not exit normally");
 #else
@@ -144,7 +151,7 @@ static void test_user_usagefault_divzero(void) {
 
     void *retval = NULL;
     kern_err_t err = task_join(tid, &retval, 2000);
-    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "task_join returns OK (task terminated)");
+    TEST_ASSERT_EQ((int)KERN_ERR_FAULT, (int)err, "task_join returns FAULT");
     TEST_ASSERT(retval != (void *)0xBAD, "task did not exit normally");
 
     /* 恢复 CCR */
@@ -234,6 +241,106 @@ static void test_crash_dump_after_fault(void) {
 }
 
 /*============================================================================
+ * Test 9: 用户 fault 后释放打开的 fd
+ *============================================================================*/
+
+#if MPU_ENABLE && VFS_ENABLE
+static void fault_task_open_fd_then_fault(void *arg) {
+    (void)arg;
+
+    (void)open("/tmp/fault_fd_cleanup", O_RDWR);
+    sys_call1(SYSCALL_TASK_DELAY, 20);
+
+    volatile uint32_t *p = (volatile uint32_t *)0xBBBBBBBB;
+    *p = 0xDEAD;
+    task_exit((void *)0xBAD);
+}
+#endif
+
+static void test_fault_releases_fd_refs(void) {
+    test_section("Test 9: fault releases fd refs");
+
+#if MPU_ENABLE && VFS_ENABLE
+    int setup = vfs_open("/tmp/fault_fd_cleanup", O_RDWR | O_CREAT);
+    TEST_ASSERT(setup >= 0, "create fault fd cleanup file");
+    if (setup >= 0) {
+        vfs_close(setup);
+    }
+
+    inode_t *ino = vfs_lookup("/tmp/fault_fd_cleanup");
+    TEST_ASSERT_NOT_NULL(ino, "lookup fault fd cleanup inode");
+    if (!ino) return;
+
+    uint32_t base_ref = ino->refcount;
+
+    task_id_t tid = task_create_user("f_fd", fault_task_open_fd_then_fault,
+                                     NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "fault fd task created");
+    if (tid < 0) {
+        inode_put(ino);
+        return;
+    }
+
+    task_start(tid);
+    task_delay(5);
+
+    TEST_ASSERT_EQ((int)(base_ref + 1), (int)ino->refcount,
+                   "fault task fd holds inode ref");
+
+    void *retval = NULL;
+    kern_err_t err = task_join(tid, &retval, 2000);
+    TEST_ASSERT_EQ((int)KERN_ERR_FAULT, (int)err, "fault fd task joined as fault");
+    TEST_ASSERT_EQ((int)base_ref, (int)ino->refcount,
+                   "fault cleanup released fd inode ref");
+
+    inode_put(ino);
+#else
+    test_skip("MPU or VFS not enabled");
+#endif
+}
+
+/*============================================================================
+ * Test 10: 用户 fault 后撤销该任务拥有的 cap
+ *============================================================================*/
+
+static void test_fault_releases_caps(void) {
+    test_section("Test 10: fault releases caps");
+
+#if MPU_ENABLE && CAP_ENABLE
+    static int fault_cap_object;
+
+    uint16_t base_refs = cap_object_refcount(&fault_cap_object, CAP_OBJ_SEMAPHORE);
+    task_id_t tid = task_create_user("f_cap", fault_task_null_write,
+                                     NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "fault cap task created");
+    if (tid < 0) return;
+
+    cap_id_t cap = cap_create(&fault_cap_object, CAP_OBJ_SEMAPHORE,
+                              CAP_FULL, (uint8_t)tid);
+    TEST_ASSERT(cap != ((cap_id_t)-1), "owned cap created for fault task");
+    if (cap == ((cap_id_t)-1)) {
+        (void)task_delete(tid);
+        return;
+    }
+
+    TEST_ASSERT_EQ((int)(base_refs + 1),
+                   (int)cap_object_refcount(&fault_cap_object, CAP_OBJ_SEMAPHORE),
+                   "fault task owns test cap");
+
+    task_start(tid);
+
+    void *retval = NULL;
+    kern_err_t err = task_join(tid, &retval, 2000);
+    TEST_ASSERT_EQ((int)KERN_ERR_FAULT, (int)err, "fault cap task joined as fault");
+    TEST_ASSERT_EQ((int)base_refs,
+                   (int)cap_object_refcount(&fault_cap_object, CAP_OBJ_SEMAPHORE),
+                   "fault cleanup revoked owned cap");
+#else
+    test_skip("MPU or CAP not enabled");
+#endif
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -246,6 +353,8 @@ static void test_fault_module(void) {
     test_user_usagefault_divzero();
     test_kernel_survives_user_fault();
     test_crash_dump_after_fault();
+    test_fault_releases_fd_refs();
+    test_fault_releases_caps();
 }
 
 TEST_MODULE_REGISTER(fault, test_fault_module);

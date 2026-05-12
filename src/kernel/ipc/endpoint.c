@@ -40,7 +40,7 @@ typedef struct {
     uint16_t    tail;
     uint16_t    count;
 
-    tcb_t      *current_sender;    // 当前正在处理的请求发送者
+    uint32_t    next_request_gen;  // request generation
 
     uint8_t     in_use;
 } endpoint_t;
@@ -59,7 +59,11 @@ static tcb_t *ep_sender_buffers[KERN_MAX_ENDPOINTS][KERN_EP_MAX_PENDING];
 
 /* 每任务: 客户端的 msg 指针 (用于 reply 写回) */
 static void *ep_client_msg[KERNEL_MAX_TASKS];
+static uint32_t ep_client_gen[KERNEL_MAX_TASKS];
 static tcb_t *ep_server_sender[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
+static uint32_t ep_server_gen[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
+static uint8_t ep_server_dead[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
+static uint32_t ep_request_gen_buffers[KERN_MAX_ENDPOINTS][KERN_EP_MAX_PENDING];
 static ipc_cap_xfer_t ep_cap_xfer_buffers[KERN_MAX_ENDPOINTS]
                                           [KERN_EP_MAX_PENDING]
                                           [IPC_CAPS_MAX];
@@ -99,6 +103,8 @@ static void endpoint_clear_server_bindings(ep_id_t ep_id, tcb_t *sender) {
     for (task_id_t tid = 0; tid < KERNEL_MAX_TASKS; tid++) {
         if (ep_server_sender[ep_id][tid] == sender) {
             ep_server_sender[ep_id][tid] = NULL;
+            ep_server_gen[ep_id][tid] = 0;
+            ep_server_dead[ep_id][tid] = 1;
         }
     }
 }
@@ -120,6 +126,7 @@ static void endpoint_cancel_sender(ep_id_t ep_id, endpoint_t *ep, tcb_t *sender)
             }
             ep->sender_buf[src_idx] = NULL;
             ep_cap_count_buffers[ep_id][src_idx] = 0;
+            ep_request_gen_buffers[ep_id][src_idx] = 0;
             continue;
         }
 
@@ -132,10 +139,13 @@ static void endpoint_cancel_sender(ep_id_t ep_id, endpoint_t *ep, tcb_t *sender)
             ep->sender_buf[src_idx] = NULL;
             ep_cap_count_buffers[ep_id][dst_idx] =
                 ep_cap_count_buffers[ep_id][src_idx];
+            ep_request_gen_buffers[ep_id][dst_idx] =
+                ep_request_gen_buffers[ep_id][src_idx];
             memcpy(ep_cap_xfer_buffers[ep_id][dst_idx],
                    ep_cap_xfer_buffers[ep_id][src_idx],
                    sizeof(ep_cap_xfer_buffers[ep_id][dst_idx]));
             ep_cap_count_buffers[ep_id][src_idx] = 0;
+            ep_request_gen_buffers[ep_id][src_idx] = 0;
         }
         kept++;
     }
@@ -146,6 +156,7 @@ static void endpoint_cancel_sender(ep_id_t ep_id, endpoint_t *ep, tcb_t *sender)
 
     if (sender->id >= 0 && sender->id < KERNEL_MAX_TASKS) {
         ep_client_msg[sender->id] = NULL;
+        ep_client_gen[sender->id] = 0;
     }
 }
 
@@ -157,7 +168,11 @@ void endpoint_init(void) {
     memset(ep_pool, 0, sizeof(ep_pool));
     ep_used_bitmap = 0;
     memset(ep_client_msg, 0, sizeof(ep_client_msg));
+    memset(ep_client_gen, 0, sizeof(ep_client_gen));
     memset(ep_server_sender, 0, sizeof(ep_server_sender));
+    memset(ep_server_gen, 0, sizeof(ep_server_gen));
+    memset(ep_server_dead, 0, sizeof(ep_server_dead));
+    memset(ep_request_gen_buffers, 0, sizeof(ep_request_gen_buffers));
     memset(ep_cap_xfer_buffers, 0, sizeof(ep_cap_xfer_buffers));
     memset(ep_cap_count_buffers, 0, sizeof(ep_cap_count_buffers));
 }
@@ -190,7 +205,7 @@ ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pendin
     ep->head         = 0;
     ep->tail         = 0;
     ep->count        = 0;
-    ep->current_sender = NULL;
+    ep->next_request_gen = 1;
     ep->in_use       = 1;
 
     wait_queue_init(&ep->recv_waiters);
@@ -244,6 +259,9 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     }
 
     memset(ep_server_sender[ep_id], 0, sizeof(ep_server_sender[ep_id]));
+    memset(ep_server_gen[ep_id], 0, sizeof(ep_server_gen[ep_id]));
+    memset(ep_server_dead[ep_id], 0, sizeof(ep_server_dead[ep_id]));
+    memset(ep_request_gen_buffers[ep_id], 0, sizeof(ep_request_gen_buffers[ep_id]));
     memset(ep_cap_xfer_buffers[ep_id], 0, sizeof(ep_cap_xfer_buffers[ep_id]));
     memset(ep_cap_count_buffers[ep_id], 0, sizeof(ep_cap_count_buffers[ep_id]));
     memset(ep, 0, sizeof(endpoint_t));
@@ -265,18 +283,16 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
     wait_queue_remove_safe(&ep->reply_waiters, tcb);
     endpoint_cancel_sender((ep_id_t)(ep - ep_pool), ep, tcb);
 
-    if (ep->current_sender == tcb) {
-        ep->current_sender = NULL;
-    }
-
     for (uint16_t i = 0; i < ep->max_pending; i++) {
         if (ep->sender_buf[i] == tcb) {
             ep->sender_buf[i] = NULL;
+            ep_request_gen_buffers[(ep_id_t)(ep - ep_pool)][i] = 0;
         }
     }
 
     if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
         ep_client_msg[tcb->id] = NULL;
+        ep_client_gen[tcb->id] = 0;
     }
 }
 
@@ -356,6 +372,11 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
     uint8_t *dst = ep->msg_buf + (slot * ep->msg_size);
     memcpy(dst, msg, ep->msg_size);
     ep->sender_buf[slot] = current;
+    uint32_t request_gen = ep->next_request_gen++;
+    if (ep->next_request_gen == 0) {
+        ep->next_request_gen = 1;
+    }
+    ep_request_gen_buffers[ep_id][slot] = request_gen;
     ep_cap_count_buffers[ep_id][slot] = cap_count;
     if (cap_count > 0) {
         memcpy(ep_cap_xfer_buffers[ep_id][slot],
@@ -368,6 +389,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
 
     /* 保存客户端 msg 指针，reply 时写回 */
     ep_client_msg[current->id] = msg;
+    ep_client_gen[current->id] = request_gen;
 
     /* 如果有服务端在等待接收，唤醒它 */
     if (ep->recv_waiters.count > 0) {
@@ -502,12 +524,15 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
     uint16_t slot = ep->tail;
     uint8_t *src = ep->msg_buf + (slot * ep->msg_size);
     memcpy(msg, src, ep->msg_size);
-    ep->current_sender = ep->sender_buf[slot];
+    tcb_t *sender = ep->sender_buf[slot];
+    uint32_t request_gen = ep_request_gen_buffers[ep_id][slot];
+    if (current->id >= 0 && current->id < KERNEL_MAX_TASKS) {
+        ep_server_dead[ep_id][current->id] = 0;
+    }
 
     uint8_t cap_count = ep_cap_count_buffers[ep_id][slot];
     if (cap_count > 0) {
         if (out_caps == NULL || out_cap_count == NULL) {
-            tcb_t *sender = ep->current_sender;
             if (sender != NULL) {
                 wait_queue_remove_safe(&ep->reply_waiters, sender);
                 sender->block_result = KERN_ERR_RESOURCE;
@@ -518,18 +543,16 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             ep->tail = (ep->tail + 1) % ep->max_pending;
             ep->count--;
             ep->pending_count--;
-            ep->current_sender = NULL;
             hal_exit_critical(crit);
             return KERN_ERR_RESOURCE;
         }
 
-        kern_err_t xfer_err = ipc_transfer_caps(ep->current_sender,
+        kern_err_t xfer_err = ipc_transfer_caps(sender,
                                                 current,
                                                 ep_cap_xfer_buffers[ep_id][slot],
                                                 cap_count,
                                                 out_caps);
         if (xfer_err != KERN_OK) {
-            tcb_t *sender = ep->current_sender;
             if (sender != NULL) {
                 wait_queue_remove_safe(&ep->reply_waiters, sender);
                 sender->block_result = xfer_err;
@@ -540,7 +563,6 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             ep->tail = (ep->tail + 1) % ep->max_pending;
             ep->count--;
             ep->pending_count--;
-            ep->current_sender = NULL;
             hal_exit_critical(crit);
             return xfer_err;
         }
@@ -550,9 +572,11 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
     }
 
     if (current->id >= 0 && current->id < KERNEL_MAX_TASKS) {
-        ep_server_sender[ep_id][current->id] = ep->current_sender;
+        ep_server_sender[ep_id][current->id] = sender;
+        ep_server_gen[ep_id][current->id] = request_gen;
     }
     ep_cap_count_buffers[ep_id][slot] = 0;
+    ep_request_gen_buffers[ep_id][slot] = 0;
     ep->tail = (ep->tail + 1) % ep->max_pending;
     ep->count--;
     ep->pending_count--;
@@ -594,24 +618,31 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
 
     tcb_t *server = sched_get_current();
     tcb_t *sender = NULL;
+    uint32_t request_gen = 0;
     if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS) {
         sender = ep_server_sender[ep_id][server->id];
+        request_gen = ep_server_gen[ep_id][server->id];
     }
     if (sender == NULL) {
-        sender = ep->current_sender;
-    }
-    if (sender == NULL) {
+        if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS &&
+            ep_server_dead[ep_id][server->id] != 0) {
+            ep_server_dead[ep_id][server->id] = 0;
+            hal_exit_critical(crit);
+            return KERN_ERR_NOEXIST;
+        }
         hal_exit_critical(crit);
         return KERN_ERR_STATE;
     }
     if (sender->state != TASK_STATE_BLOCKED ||
         sender->block_obj != ep ||
-        sender->block_reason != BLOCK_REASON_EP_SEND) {
+        sender->block_reason != BLOCK_REASON_EP_SEND ||
+        sender->id < 0 ||
+        sender->id >= KERNEL_MAX_TASKS ||
+        ep_client_gen[sender->id] != request_gen) {
         if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS) {
             ep_server_sender[ep_id][server->id] = NULL;
-        }
-        if (ep->current_sender == sender) {
-            ep->current_sender = NULL;
+            ep_server_gen[ep_id][server->id] = 0;
+            ep_server_dead[ep_id][server->id] = 1;
         }
         hal_exit_critical(crit);
         return KERN_ERR_NOEXIST;
@@ -623,10 +654,13 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
         memcpy(client_buf, msg, ep->msg_size);
     }
 
-    ep->current_sender = NULL;
     if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS) {
         ep_server_sender[ep_id][server->id] = NULL;
+        ep_server_gen[ep_id][server->id] = 0;
+        ep_server_dead[ep_id][server->id] = 0;
     }
+    ep_client_msg[sender->id] = NULL;
+    ep_client_gen[sender->id] = 0;
 
     /* 从 reply_waiters 移除并唤醒客户端 */
     wait_queue_remove_safe(&ep->reply_waiters, sender);

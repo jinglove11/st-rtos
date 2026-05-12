@@ -2,6 +2,17 @@
 
 > 范围说明：当前计划以 STM32F767 为唯一主线目标。现阶段不处理 RP2350，不改默认构建目标，不把多板配置系统作为前置任务。所有改造都以当前 `make` 能直接编译 767 的工作流为基础。
 
+## 当前阶段状态
+
+- P0: completed.
+- P1: completed.
+- P2: completed and archived in `P2_COMPLETION_REPORT.md`.
+- P3: brief execution plan available in `P3_MICROKERNEL_SERVICE_PLAN.md`.
+
+P3 对应本文件中的阶段 2、阶段 3、阶段 5、阶段 7 的前置收敛工作：
+先补 usercopy/syscall 边界、fault cleanup、request/reply IPC 和最小服务启动模型，
+再推进完整 name server、driver server、FS server 迁移。
+
 ## 目标
 
 把当前系统从“带微内核特性的 RTOS”逐步改造成“最小内核 + 用户态服务”的结构。

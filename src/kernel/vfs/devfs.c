@@ -5,12 +5,79 @@
 
 #include "devfs.h"
 #include "mem.h"
+#include "trace.h"
+#include "stats.h"
+#include "scheduler.h"
 #include <string.h>
 
 #if VFS_ENABLE
 
 #if DRIVER_ENABLE
 #include "device.h"
+#endif
+
+#ifndef TRACE_DEV_OPEN
+#define TRACE_DEV_OPEN        1
+#define TRACE_DEV_READ        2
+#define TRACE_DEV_WRITE       3
+#define TRACE_DEV_IOCTL       4
+#define TRACE_DEV_REMOVE      5
+#endif
+
+#ifndef STATS_COUNTER_OK
+#define STATS_COUNTER_OK         0
+#define STATS_COUNTER_ERROR      1
+#define STATS_COUNTER_DELETE     4
+#define STATS_COUNTER_BUSY       6
+#define STATS_COUNTER_NOEXIST    7
+#endif
+
+#if DRIVER_ENABLE
+static uint8_t devfs_current_task_id(void) {
+    tcb_t *current = sched_get_current();
+    return current ? (uint8_t)current->id : 0xFFU;
+}
+
+#if TRACE_ENABLE
+static uint8_t devfs_trace_result(int32_t result) {
+    if (result >= 0) return TRACE_RESULT_OK;
+    switch ((kern_err_t)result) {
+        case KERN_ERR_BUSY:
+            return TRACE_RESULT_BUSY;
+        case KERN_ERR_NOEXIST:
+            return TRACE_RESULT_NOEXIST;
+        case KERN_ERR_RESOURCE:
+        case KERN_ERR_OVERFLOW:
+            return TRACE_RESULT_FULL;
+        default:
+            return TRACE_RESULT_ERR;
+    }
+}
+#endif
+
+static uint8_t devfs_stats_counter(int32_t result) {
+    if (result >= 0) return STATS_COUNTER_OK;
+    if ((kern_err_t)result == KERN_ERR_BUSY) return STATS_COUNTER_BUSY;
+    if ((kern_err_t)result == KERN_ERR_NOEXIST) return STATS_COUNTER_NOEXIST;
+    return STATS_COUNTER_ERROR;
+}
+
+static void devfs_record_event(device_t *dev, uint8_t action, int32_t result) {
+#if TRACE_ENABLE
+    int16_t id = device_get_id(dev);
+    uint8_t object_id = (id >= 0) ? (uint8_t)id : 0xFFU;
+    trace_dev(devfs_current_task_id(), object_id, action,
+              devfs_trace_result(result));
+#else
+    (void)dev;
+    (void)action;
+#endif
+
+#if KERN_TASK_STATS
+    (void)stats_record_event(STATS_SUBSYS_DEV, devfs_stats_counter(result));
+#endif
+    (void)result;
+}
 #endif
 
 /*============================================================================
@@ -56,7 +123,15 @@ static device_t null_device = {
 static kern_err_t cdev_open(inode_t *inode, uint32_t flags) {
 #if DRIVER_ENABLE
     device_t *dev = (device_t *)inode->private_data;
-    if (dev && dev->ops && dev->ops->open) return dev->ops->open(dev->priv, flags);
+    if (!dev || !dev->ops) {
+        devfs_record_event(dev, TRACE_DEV_OPEN, KERN_ERR_NOEXIST);
+        return KERN_ERR_NOEXIST;
+    }
+    kern_err_t err = KERN_OK;
+    if (dev->ops->open) err = dev->ops->open(dev->priv, flags);
+    if (err == KERN_OK) dev->open_count++;
+    devfs_record_event(dev, TRACE_DEV_OPEN, err);
+    return err;
 #else
     dev_ops_t *ops = (dev_ops_t *)inode->private_data;
     if (ops && ops->open) return ops->open(NULL, flags);
@@ -67,7 +142,11 @@ static kern_err_t cdev_open(inode_t *inode, uint32_t flags) {
 static kern_err_t cdev_close(inode_t *inode) {
 #if DRIVER_ENABLE
     device_t *dev = (device_t *)inode->private_data;
-    if (dev && dev->ops && dev->ops->close) return dev->ops->close(dev->priv);
+    if (!dev || !dev->ops) return KERN_ERR_NOEXIST;
+    kern_err_t err = KERN_OK;
+    if (dev->ops->close) err = dev->ops->close(dev->priv);
+    if (err == KERN_OK && dev->open_count > 0) dev->open_count--;
+    return err;
 #else
     dev_ops_t *ops = (dev_ops_t *)inode->private_data;
     if (ops && ops->close) return ops->close(NULL);
@@ -78,8 +157,13 @@ static kern_err_t cdev_close(inode_t *inode) {
 static int32_t cdev_read(inode_t *inode, void *buf, uint32_t offset, uint32_t size) {
 #if DRIVER_ENABLE
     device_t *dev = (device_t *)inode->private_data;
-    if (!dev || !dev->ops || !dev->ops->read) return KERN_ERR;
-    return dev->ops->read(dev->priv, buf, offset, size);
+    if (!dev || !dev->ops || !dev->ops->read) {
+        devfs_record_event(dev, TRACE_DEV_READ, KERN_ERR_NOEXIST);
+        return KERN_ERR;
+    }
+    int32_t result = dev->ops->read(dev->priv, buf, offset, size);
+    devfs_record_event(dev, TRACE_DEV_READ, result);
+    return result;
 #else
     dev_ops_t *ops = (dev_ops_t *)inode->private_data;
     if (!ops || !ops->read) return KERN_ERR;
@@ -90,8 +174,13 @@ static int32_t cdev_read(inode_t *inode, void *buf, uint32_t offset, uint32_t si
 static int32_t cdev_write(inode_t *inode, const void *buf, uint32_t offset, uint32_t size) {
 #if DRIVER_ENABLE
     device_t *dev = (device_t *)inode->private_data;
-    if (!dev || !dev->ops || !dev->ops->write) return KERN_ERR;
-    return dev->ops->write(dev->priv, buf, offset, size);
+    if (!dev || !dev->ops || !dev->ops->write) {
+        devfs_record_event(dev, TRACE_DEV_WRITE, KERN_ERR_NOEXIST);
+        return KERN_ERR;
+    }
+    int32_t result = dev->ops->write(dev->priv, buf, offset, size);
+    devfs_record_event(dev, TRACE_DEV_WRITE, result);
+    return result;
 #else
     dev_ops_t *ops = (dev_ops_t *)inode->private_data;
     if (!ops || !ops->write) return KERN_ERR;
@@ -102,8 +191,35 @@ static int32_t cdev_write(inode_t *inode, const void *buf, uint32_t offset, uint
 static kern_err_t cdev_ioctl(inode_t *inode, uint32_t cmd, void *arg) {
 #if DRIVER_ENABLE
     device_t *dev = (device_t *)inode->private_data;
-    if (!dev || !dev->ops || !dev->ops->ioctl) return KERN_ERR;
-    return dev->ops->ioctl(dev->priv, cmd, arg);
+    if (!dev || !dev->ops) {
+        devfs_record_event(dev, TRACE_DEV_IOCTL, KERN_ERR_NOEXIST);
+        return KERN_ERR;
+    }
+
+    if (cmd == DEVICE_IOCTL_GET_EVENTS) {
+        if (!arg) {
+            devfs_record_event(dev, TRACE_DEV_IOCTL, KERN_ERR_PARAM);
+            return KERN_ERR_PARAM;
+        }
+        *(uint32_t *)arg = device_get_events(dev);
+        devfs_record_event(dev, TRACE_DEV_IOCTL, KERN_OK);
+        return KERN_OK;
+    }
+
+    if (cmd == DEVICE_IOCTL_CLEAR_EVENTS) {
+        uint32_t events = arg ? *(uint32_t *)arg : 0xFFFFFFFFU;
+        kern_err_t err = device_clear_events(dev, events);
+        devfs_record_event(dev, TRACE_DEV_IOCTL, err);
+        return err;
+    }
+
+    if (!dev->ops->ioctl) {
+        devfs_record_event(dev, TRACE_DEV_IOCTL, KERN_ERR_NOEXIST);
+        return KERN_ERR;
+    }
+    kern_err_t err = dev->ops->ioctl(dev->priv, cmd, arg);
+    devfs_record_event(dev, TRACE_DEV_IOCTL, err);
+    return err;
 #else
     dev_ops_t *ops = (dev_ops_t *)inode->private_data;
     if (!ops || !ops->ioctl) return KERN_ERR;
@@ -180,5 +296,26 @@ kern_err_t devfs_register_device(const char *name, dev_ops_t *ops) {
     return KERN_OK;
 }
 #endif
+
+kern_err_t devfs_unregister_device(const char *name) {
+    if (!name || !devfs_root) return KERN_ERR_PARAM;
+
+    inode_t *inode = inode_lookup_child(devfs_root, name);
+    if (!inode) return KERN_ERR_NOEXIST;
+    if (inode->type != INODE_TYPE_CHRDEV) return KERN_ERR_PARAM;
+    if (inode->refcount > 2) return KERN_ERR_BUSY;
+
+#if DRIVER_ENABLE
+    device_t *dev = (device_t *)inode->private_data;
+    if (dev && dev->open_count > 0) return KERN_ERR_BUSY;
+    devfs_record_event(dev, TRACE_DEV_REMOVE, KERN_OK);
+#endif
+
+    kern_err_t err = inode_remove_child(devfs_root, name);
+    if (err != KERN_OK) return err;
+
+    inode_put(inode);
+    return KERN_OK;
+}
 
 #endif /* VFS_ENABLE */

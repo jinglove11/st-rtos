@@ -21,6 +21,7 @@ kern_err_t devfs_register_device(const char *name, device_t *dev);
 #else
 kern_err_t devfs_register_device(const char *name, dev_ops_t *ops);
 #endif
+kern_err_t devfs_unregister_device(const char *name);
 
 #endif /* VFS_ENABLE */
 #endif /* DEVFS_H */

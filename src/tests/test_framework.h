@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 /* 最大注册模块数量 */
-#define TEST_MAX_MODULES        16
+#define TEST_MAX_MODULES        20
 
 typedef void (*test_module_func_t)(void);
 

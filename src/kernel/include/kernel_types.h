@@ -31,6 +31,7 @@ typedef enum {
     KERN_ERR_PERM       = -12,   // 权限不足
     KERN_ERR_NOTDIR     = -13,   // 不是目录
     KERN_ERR_ISDIR      = -14,   // 是目录 (不可作为文件操作)
+    KERN_ERR_FAULT      = -15,   // 任务因 fault 终止
 } kern_err_t;
 
 /*============================================================================
@@ -288,7 +289,7 @@ typedef struct {
     uint8_t         one_shot;                   // 单次触发标志
     uint8_t         in_use;                     // 使用标志
     uint8_t         stop_pending;               // 回调中请求了 stop
-    uint8_t         reserved;                   // 对齐填充
+    uint8_t         delete_pending;             // 删除已请求
 } timer_t;
 
 /**
@@ -333,6 +334,8 @@ typedef struct {
     uint8_t     priority;              // 线程优先级
     uint8_t     in_use;                // 使用标志
     uint8_t     pending;               // ISR 已触发的待处理标志
+    uint8_t     running;               // 线程 handler 正在执行
+    uint8_t     stopping;              // release 已请求停止
 } irq_thread_t;
 #endif
 
@@ -347,6 +350,8 @@ typedef struct {
     void        *arg;                  // 参数
     uint8_t      pending;              // 待处理标志
     uint8_t      in_use;               // 使用标志
+    uint8_t      running;              // handler 正在执行
+    uint8_t      delete_pending;       // 运行中删除，返回后释放
 } bh_t;
 
 /*============================================================================

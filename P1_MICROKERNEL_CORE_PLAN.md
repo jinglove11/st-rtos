@@ -165,9 +165,9 @@ Add or extend `src/tests/test_capability.c`:
 - Done: remove revoked/deleted/transferred caps from the previous owner task CSpace.
 - Done: keep compatibility wrappers for existing `cap_create()`, `cap_resolve()`, `cap_delete()`, `cap_derive()`, `cap_transfer()`, and `cap_revoke()` call sites.
 - Done: add explicit task-aware helper entry points (`cap_create_for`, `cap_lookup_for`, `cap_derive_for`, `cap_revoke_for`) for later syscall/IPC migration.
-- Remaining: make cap ids fully local instead of using global slot ids plus per-task membership.
-- Remaining: add object reference counters and cleanup callbacks.
-- Remaining: replace IPC transfer owner mutation with copy/move/derive rules.
+- Done: add observable object reference counter (`cap_object_refcount`) and regression coverage for create/derive/copy/revoke cascade.
+- Done: add object cleanup callbacks keyed by cap object type and invoke them when the last cap for an object is removed.
+- P1 decision: cap ids remain slot+generation global handles guarded by per-task CSpace membership. Fully local per-task numeric handles are an ABI-breaking CSpace redesign and are deferred beyond P1.
 
 ## P1-2: Endpoint IPC Call/Reply Semantics
 
@@ -297,10 +297,11 @@ Add or extend `src/tests/test_ipc_upgrade.c`:
 - Done: bind replies per endpoint and per server task instead of one endpoint-global sender.
 - Done: cancel timed-out/deleted clients from the pending request queue, reply wait queue, send wait queue, and server reply bindings.
 - Done: reject stale replies when the original client is no longer blocked on that endpoint.
-- Remaining: introduce explicit request slots and single-use reply caps.
-- Remaining: add death notification semantics visible to servers.
-- Remaining: add checked usercopy for endpoint payload buffers.
-- Remaining: add cap-transfer rules for IPC payloads.
+- Done: add server-visible client death notification: reply after client deletion returns `KERN_ERR_NOEXIST`.
+- Done: add regression coverage for client death between server receive and reply.
+- Done: endpoint request slots are explicit ring-buffer slots carrying sender/message/cap metadata.
+- Done: reply bindings are single-use per endpoint/server task; successful reply, stale reply, delete, timeout, and client death clear the binding.
+- Done: endpoint syscall paths validate user payload buffers before entering endpoint send/recv/reply.
 
 ## P1-3: Channel IPC Semantics
 
@@ -390,8 +391,9 @@ Add or extend `src/tests/test_ipc_upgrade.c`:
 - Done: task cleanup removes task from all four queues.
 - Done: add regression coverage for unconnected channel and non-peer send/recv rejection.
 - Done: add delete-wakes-blocked-sender regression.
-- Remaining: define peer death notification behavior beyond disconnecting peer ids.
-- Remaining: replace raw shared-memory pointer exposure with memory object/cap mapping.
+- Done: send/recv detect dead connected peers and return `KERN_ERR_NOEXIST`.
+- Done: add channel peer death regression coverage.
+- P1 decision: channel shared memory remains a kernel API pointer for in-kernel tests; user-facing memory object/cap mapping is deferred to the memory-object work in P2/P3.
 
 ## P1-4: IPC Capability Transfer Rules
 
@@ -462,14 +464,15 @@ Transfer rules:
 - Done: add endpoint cap transfer regression coverage.
 - Done: add channel cap-bearing send/recv wrappers (`channel_send_caps`, `channel_recv_caps`).
 - Done: wire channel cap-bearing send path through `ipc_transfer_caps()`, so receiver CSpace exhaustion is returned to the sender before the message is queued.
+- Done: IPC MOVE transfer uses staged destination caps plus source revoke, rather than direct owner mutation, so failed multi-cap moves leave source caps intact.
 - Done: define initial channel receiver-full behavior: cap-bearing messages stay queued and `channel_recv()`/failed `channel_recv_caps()` returns an error without consuming payload.
 - Done: add channel cap transfer regression coverage.
 - Done: add syscall wrappers for cap-bearing endpoint/channel IPC.
-- Remaining: define death-notification semantics for queued copied caps because source revoke currently cascades to IPC copies.
+- Done: queued copied caps are defined as derived authority; source revoke/death may revoke queued copies by cascade. Sender-visible channel transfer failures are reported before queueing.
 
 ## P1-5: VFS Directory, Path, Mount, and FD Semantics
 
-Status: planned.
+Status: first directory/path pass in progress.
 
 ### Current State
 
@@ -600,6 +603,26 @@ Add or extend `src/tests/test_vfs.c` and `src/tests/test_shell.c`:
 - close twice
 - task exit closes fd
 - wrong file cap rights rejected
+
+### Progress
+
+- Done: add generic inode-tree directory lookup/readdir ops for root-style directories.
+- Done: attach readdir-capable dir ops to `/` and `/dev`, so shell `ls /` and `ls /dev` no longer depend on ramfs-only dir ops.
+- Done: route `vfs_lookup()` through `dir_ops->lookup`, enabling `.`, `..`, repeated slash, and trailing slash handling across root/dev/tmp.
+- Done: reject path components longer than `INODE_NAME_LEN - 1` instead of silently truncating.
+- Done: add VFS regression coverage for root/dev readdir and normalized lookup (`//tmp/../dev//./null`).
+- Done: add `vfs_close_task_fds(tcb)` and call it from task cleanup before cap revoke.
+- Done: add regression coverage that task deletion releases fd-held inode refs.
+- Done: add public `vfs_readdir(fd)`/`vfs_rewinddir(fd)` API backed by directory fd offsets.
+- Done: route shell `ls` through `vfs_open()` + `vfs_readdir()` so it exercises fd/cap-backed directory iteration.
+- Done: add fd-based readdir/rewinddir regression coverage.
+- Done: add internal path normalization for `vfs_lookup()` and `vfs_mount()`.
+- Done: make mount table match normalized mount-point paths and redirect lookup below the mount point.
+- Done: validate mount point/root are directories and reject duplicate mounts.
+- Done: add mount redirect regression coverage.
+- Done: add `vfs_unmount()` with normalized path lookup and mounted-root ref-busy checks.
+- Done: add unmount busy/success/noexist regression coverage.
+- Done: add recursive subtree busy checks for open descendants under mounted roots.
 
 ## P1 Execution Order
 

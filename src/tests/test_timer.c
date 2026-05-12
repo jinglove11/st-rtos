@@ -16,6 +16,8 @@
 #include "timer.h"
 #include "task.h"
 #include "kernel.h"
+#include "trace.h"
+#include "stats.h"
 
 /*============================================================================
  * 测试数据
@@ -251,6 +253,80 @@ static void test_timer_state(void) {
     test_pass("Timer state");
 }
 
+#if TRACE_ENABLE && KERN_TASK_STATS
+static void timer_trace_count_cb(const trace_entry_t *entry, void *ctx) {
+    (void)entry;
+    (void)ctx;
+}
+#endif
+
+/*============================================================================
+ * 测试 8: Timer trace / stats
+ *============================================================================*/
+
+static void test_timer_trace_stats(void) {
+    test_section("Test 8: Timer Trace/Stats");
+
+#if TRACE_ENABLE && KERN_TASK_STATS
+    test_flag = 0;
+    trace_clear();
+    stats_clear_events();
+
+    timer_id_t tid = timer_create("diag", callback_set_flag, (void *)&test_flag, 0);
+    TEST_ASSERT(tid >= 0, "Timer create for diagnostics");
+
+    kern_err_t err = timer_start(tid, 3);
+    TEST_ASSERT(err == KERN_OK, "Timer start for diagnostics");
+
+    task_delay(8);
+    TEST_ASSERT(test_flag == 1, "Diagnostic timer fired");
+
+    err = timer_delete(tid);
+    TEST_ASSERT(err == KERN_OK, "Timer delete for diagnostics");
+    task_delay(1);
+
+    uint16_t timer_events = trace_filter(TRACE_TIMER, timer_trace_count_cb, NULL);
+    TEST_ASSERT(timer_events >= 4, "Timer trace events recorded");
+    TEST_ASSERT(stats_get_event_count(STATS_SUBSYS_TIMER, STATS_COUNTER_OK) >= 4,
+                "Timer stats ok events recorded");
+#else
+    TEST_ASSERT(1, "Timer diagnostics disabled");
+#endif
+
+    test_pass("Timer trace/stats");
+}
+
+static timer_id_t timer_self_delete_id;
+static volatile int timer_self_delete_count;
+
+static void callback_delete_self(void *arg) {
+    (void)arg;
+    timer_self_delete_count++;
+    (void)timer_delete(timer_self_delete_id);
+}
+
+/*============================================================================
+ * 测试 9: 回调运行中请求删除
+ *============================================================================*/
+
+static void test_timer_delete_while_running(void) {
+    test_section("Test 9: Timer delete while running");
+
+    timer_self_delete_count = 0;
+    timer_self_delete_id = timer_create("selfdel", callback_delete_self, NULL, 2);
+    TEST_ASSERT(timer_self_delete_id >= 0, "self-delete timer created");
+    if (timer_self_delete_id < 0) return;
+
+    kern_err_t err = timer_start(timer_self_delete_id, 1);
+    TEST_ASSERT_EQ(KERN_OK, err, "self-delete timer started");
+
+    task_delay(8);
+    TEST_ASSERT_EQ(1, timer_self_delete_count, "self-delete timer fired once");
+
+    err = timer_start(timer_self_delete_id, 1);
+    TEST_ASSERT_NE(KERN_OK, err, "deleted running timer cannot restart");
+}
+
 /*============================================================================
  * 定时器测试模块入口
  *============================================================================*/
@@ -268,6 +344,8 @@ static void test_timer_module(void) {
     test_timer_change_period();
     test_multiple_timers();
     test_timer_state();
+    test_timer_trace_stats();
+    test_timer_delete_while_running();
 }
 
 /*============================================================================

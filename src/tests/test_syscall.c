@@ -9,6 +9,7 @@
 #include "user_api.h"
 #include "task.h"
 #include "semaphore.h"
+#include "endpoint.h"
 
 #if CAP_ENABLE
 #include "capability.h"
@@ -158,6 +159,98 @@ static void test_syscall_bad_user_pointers(void) {
 #if VFS_ENABLE
     err = sys_call2(SYSCALL_OPEN, (int)(uintptr_t)0xBBBBBBBBu, 0);
     TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad open path pointer rejected");
+
+    err = sys_call3(SYSCALL_READ, 0, (int)(uintptr_t)0xBBBBBBBBu, 4);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad read buffer pointer rejected");
+
+    err = sys_call3(SYSCALL_WRITE, 0, (int)(uintptr_t)0xBBBBBBBBu, 4);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad write buffer pointer rejected");
+#endif
+}
+
+/*============================================================================
+ * 测试 9: 用户态服务通过非阻塞 endpoint syscall 处理请求
+ *============================================================================*/
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+static void user_endpoint_service_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *req = (uint32_t *)msg_buf;
+    int err = KERN_ERR_TIMEOUT;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    for (int i = 0; i < 50; i++) {
+        err = sys_ep_recv(ep_cap, msg_buf, 0);
+        if (err == KERN_OK) {
+            break;
+        }
+        (void)sys_task_yield();
+    }
+
+    if (err == KERN_OK) {
+        *req += 100;
+        err = sys_ep_reply(ep_cap, msg_buf);
+    }
+
+    sys_task_exit((void *)(uintptr_t)err);
+}
+#endif
+
+static void test_user_endpoint_service_nonblocking(void) {
+    test_section("Test 9: User endpoint service nonblocking");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_svc", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "service endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "service endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ep_svc",
+                                         user_endpoint_service_task,
+                                         (void *)(uintptr_t)ep_cap,
+                                         20, 512);
+    TEST_ASSERT(service >= 0, "user endpoint service created");
+    if (service < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "service endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(service);
+
+    uint32_t msg = 23;
+    err = endpoint_send(ep, &msg, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel client endpoint send OK");
+    TEST_ASSERT_EQ(123, (int)msg, "user service replied through endpoint");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "user service joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(uintptr_t)retval,
+                   "user service syscall result OK");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
 #endif
 }
 
@@ -174,6 +267,7 @@ static void test_syscall_module(void) {
     test_syscall_args();
     test_syscall_r2_integrity();
     test_syscall_bad_user_pointers();
+    test_user_endpoint_service_nonblocking();
 }
 
 TEST_MODULE_REGISTER(syscall, test_syscall_module);

@@ -51,7 +51,6 @@ void BusFault_Handler(void);
 void UsageFault_Handler(void);
 void HardFault_Handler(void);
 
-void task_terminate(tcb_t *tcb);
 void task_fault_exit(void);
 
 #endif /* FAULT_ENABLE */

@@ -154,7 +154,7 @@ static void test_cmd_table_complete(void) {
 static void test_expected_commands(void) {
     test_section("Test 8: expected commands present");
 
-    const char *expected[] = {"help", "ls", "cat", "echo", "clear", "ps", "free", "hexdump"};
+    const char *expected[] = {"help", "ls", "cat", "echo", "clear", "ps", "free", "hexdump", "dev"};
     int exp_count = (int)(sizeof(expected) / sizeof(expected[0]));
 
     for (int e = 0; e < exp_count; e++) {

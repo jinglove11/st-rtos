@@ -8,8 +8,24 @@
 
 #include "mem.h"
 #include "kernel_config.h"
+#include "trace.h"
+#include "stats.h"
+#include "scheduler.h"
+#include "capability.h"
 #include "hal.h"
 #include <string.h>
+
+#ifndef TRACE_MEM_ALLOC
+#define TRACE_MEM_ALLOC       1
+#define TRACE_MEM_FREE        2
+#define TRACE_MEM_FAIL        3
+#endif
+
+#ifndef STATS_COUNTER_OK
+#define STATS_COUNTER_OK         0
+#define STATS_COUNTER_ERROR      1
+#define STATS_COUNTER_QUEUE_FULL 2
+#endif
 
 #define MEM_ALIGN_SIZE      8
 #define MEM_ALIGN_MASK      (MEM_ALIGN_SIZE - 1)
@@ -37,6 +53,40 @@ static uint8_t mem_heap[MEM_HEAP_SIZE] __attribute__((aligned(MEM_ALIGN_SIZE)));
 
 static mem_block_t *free_list = NULL;
 static mem_stats_t mem_stats;
+
+static uint8_t mem_current_task_id(void) {
+    tcb_t *current = sched_get_current();
+    return current ? (uint8_t)current->id : 0xFFU;
+}
+
+static uint8_t mem_object_id(const void *ptr) {
+    return (uint8_t)(((uintptr_t)ptr >> 3) & 0xFFU);
+}
+
+static void mem_record_event(const void *ptr, uint8_t action,
+                             kern_err_t err, uint8_t counter) {
+#if TRACE_ENABLE
+    uint8_t object_id = ptr ? mem_object_id(ptr) : 0xFFU;
+    uint8_t result = (err == KERN_OK) ? TRACE_RESULT_OK :
+                     (err == KERN_ERR_RESOURCE ? TRACE_RESULT_FULL :
+                      TRACE_RESULT_ERR);
+    trace_mem(mem_current_task_id(), object_id, action, result);
+#else
+    (void)ptr;
+    (void)action;
+#endif
+
+#if KERN_TASK_STATS
+    if (err != KERN_OK) {
+        counter = (err == KERN_ERR_RESOURCE) ? STATS_COUNTER_QUEUE_FULL :
+                                               STATS_COUNTER_ERROR;
+    }
+    (void)stats_record_event(STATS_SUBSYS_MEM, counter);
+#else
+    (void)counter;
+#endif
+    (void)err;
+}
 
 static uint32_t crit_enter(void) {
     return hal_irq_save();
@@ -149,7 +199,11 @@ void mem_init(void) {
 }
 
 void *kmalloc(size_t size) {
-    if (size == 0) return NULL;
+    if (size == 0) {
+        mem_record_event(NULL, TRACE_MEM_ALLOC, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
+        return NULL;
+    }
     
     size = MEM_ALIGN_UP(size);
     if (size < MEM_ALIGN_SIZE) {
@@ -169,6 +223,8 @@ void *kmalloc(size_t size) {
     if (!block) {
         mem_stats.fail_count++;
         crit_exit(crit);
+        mem_record_event(NULL, TRACE_MEM_FAIL, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
         return NULL;
     }
     
@@ -190,6 +246,7 @@ void *kmalloc(size_t size) {
     mem_stats.used_size += block->size;
     mem_stats.free_size -= block->size;
     mem_stats.alloc_count++;
+    mem_stats.outstanding_allocs++;
     
     if (mem_stats.used_size > mem_stats.max_used) {
         mem_stats.max_used = mem_stats.used_size;
@@ -197,7 +254,9 @@ void *kmalloc(size_t size) {
     
     crit_exit(crit);
     
-    return block_to_ptr(block);
+    void *ptr = block_to_ptr(block);
+    mem_record_event(ptr, TRACE_MEM_ALLOC, KERN_OK, STATS_COUNTER_OK);
+    return ptr;
 }
 
 void kfree(void *ptr) {
@@ -208,7 +267,10 @@ void kfree(void *ptr) {
     mem_block_t *block = ptr_to_block(ptr);
     
     if (!block_is_valid(block) || block->flags == MEM_BLOCK_FREE) {
+        mem_stats.invalid_free_count++;
         crit_exit(crit);
+        mem_record_event(ptr, TRACE_MEM_FREE, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return;
     }
     
@@ -217,6 +279,9 @@ void kfree(void *ptr) {
     mem_stats.used_size -= block->size;
     mem_stats.free_size += block->size;
     mem_stats.free_count++;
+    if (mem_stats.outstanding_allocs > 0) {
+        mem_stats.outstanding_allocs--;
+    }
     
     free_list_insert(block);
     
@@ -228,6 +293,7 @@ void kfree(void *ptr) {
     }
     
     crit_exit(crit);
+    mem_record_event(ptr, TRACE_MEM_FREE, KERN_OK, STATS_COUNTER_OK);
 }
 
 void *krealloc(void *ptr, size_t size) {
@@ -305,3 +371,54 @@ size_t mem_get_free(void) {
 size_t mem_get_used(void) {
     return mem_stats.used_size;
 }
+
+uint32_t mem_get_outstanding_allocs(void) {
+    return mem_stats.outstanding_allocs;
+}
+
+uint32_t mem_get_fail_count(void) {
+    return mem_stats.fail_count;
+}
+
+#if CAP_ENABLE
+
+static void kmem_cap_cleanup(void *object, uint8_t obj_type) {
+    if (obj_type == CAP_OBJ_MEMBLOCK) {
+        kfree(object);
+    }
+}
+
+cap_id_t kmem_alloc_cap(size_t size, uint8_t rights) {
+    if (rights == 0) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE;
+    }
+
+    void *ptr = kmalloc(size);
+    if (!ptr) {
+        return KERN_INVALID_ID;
+    }
+
+    (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, kmem_cap_cleanup);
+    cap_id_t cap = cap_create(ptr, CAP_OBJ_MEMBLOCK, rights, 0);
+    if (cap == KERN_INVALID_ID) {
+        kfree(ptr);
+        return KERN_INVALID_ID;
+    }
+    return cap;
+}
+
+void *kmem_resolve_cap(cap_id_t cap, uint8_t required_rights) {
+    return cap_resolve(cap, CAP_OBJ_MEMBLOCK, required_rights);
+}
+
+kern_err_t kmem_free_cap(cap_id_t cap) {
+    void *ptr = cap_resolve(cap, CAP_OBJ_MEMBLOCK, CAP_MANAGE);
+    if (!ptr) {
+        return KERN_ERR_CAP;
+    }
+
+    (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, kmem_cap_cleanup);
+    return cap_revoke(cap);
+}
+
+#endif

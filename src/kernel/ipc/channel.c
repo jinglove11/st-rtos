@@ -108,10 +108,16 @@ static kern_err_t channel_get_side(channel_t *ch, tcb_t *current, int *is_a) {
         return KERN_ERR_STATE;
     }
     if (current->id == ch->peer_a) {
+        if (task_get_tcb(ch->peer_b) == NULL) {
+            return KERN_ERR_NOEXIST;
+        }
         *is_a = 1;
         return KERN_OK;
     }
     if (current->id == ch->peer_b) {
+        if (task_get_tcb(ch->peer_a) == NULL) {
+            return KERN_ERR_NOEXIST;
+        }
         *is_a = 0;
         return KERN_OK;
     }

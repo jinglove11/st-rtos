@@ -7,8 +7,9 @@
  * 2. buffer 满了以后 wrap-around 正确
  * 3. trace_clear 清零
  * 4. trace_get_count 在写入后递增
- * 5. 所有 8 种事件类型可记录
+ * 5. 基础事件类型可记录
  * 6. trace_filter 过滤功能
+ * 7. P2 typed helpers keep trace ABI stable
  */
 
 #include "test_framework.h"
@@ -188,6 +189,36 @@ static void test_trace_filter(void) {
 }
 
 /*============================================================================
+ * Test 7: P2 typed trace helpers
+ *============================================================================*/
+
+static void test_trace_typed_helpers(void) {
+    test_section("Test 7: typed trace helpers");
+
+    trace_clear();
+    trace_timer(3, 7, TRACE_TIMER_QUEUE_FULL, TRACE_RESULT_FULL);
+    trace_irq(4, 11, TRACE_IRQ_FIRE, TRACE_RESULT_OK);
+    trace_bh(5, 2, TRACE_BH_CANCEL, TRACE_RESULT_CANCEL);
+    trace_dev(6, 1, TRACE_DEV_IOCTL, TRACE_RESULT_ERR);
+    trace_mem(7, 9, TRACE_MEM_FAIL, TRACE_RESULT_FULL);
+    trace_ipc_event(8, 4, TRACE_IPC_DEATH, TRACE_RESULT_NOEXIST);
+
+    TEST_ASSERT_EQ(6, trace_get_count(), "typed helper entries recorded");
+
+    const trace_entry_t *e = trace_get_entry(0);
+    TEST_ASSERT_NOT_NULL(e, "timer helper entry exists");
+    if (e) {
+        TEST_ASSERT_EQ(TRACE_TIMER, e->event, "timer helper event");
+        TEST_ASSERT_EQ(3, e->task_id, "timer helper task");
+        TEST_ASSERT_EQ((int)trace_pack(7, (uint8_t)((TRACE_TIMER_QUEUE_FULL << 4) | TRACE_RESULT_FULL)),
+                       (int)e->data, "timer helper packed data");
+    }
+
+    uint16_t matched = trace_filter(TRACE_MEM, filter_callback, NULL);
+    TEST_ASSERT_EQ(1, matched, "filter sees MEM event");
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -198,6 +229,7 @@ static void test_trace_module(void) {
     test_trace_count_increments();
     test_trace_all_event_types();
     test_trace_filter();
+    test_trace_typed_helpers();
 }
 
 TEST_MODULE_REGISTER(trace, test_trace_module);

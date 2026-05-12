@@ -1,229 +1,145 @@
 # My-RTOS Diagnostic Guide
 
-> How to use the diagnostic ecosystem for debugging and analysis.
+This guide covers the on-device shell diagnostics and host-side tools used to
+debug P1/P2 kernel behavior.
 
-## Overview
+## On-Device Commands
 
-The diagnostic system has three tiers:
+### `crash`
 
-| Tier | Component | Location |
-|------|-----------|----------|
-| On-device | Shell commands | `crash`, `stats`, `mem`, `trace`, `ps` |
-| On-device | Trace buffer | Ring buffer, 256 entries × 8 bytes |
-| Host-side | Python tools | `tools/trace_parser.py`, `tools/crash_analyzer.py` |
+Shows the last captured fault frame and system fault registers.
 
----
+Use this first for HardFault, MemManage, BusFault, and UsageFault issues. The
+most useful fields are `PC`, `LR`, `CFSR`, `MMFAR`, `BFAR`, and `Task ID`.
 
-## 1. Shell Diagnostic Commands
+### `stats [clear]`
 
-### `crash` — Last Crash Dump
+Shows global kernel counters and P2 subsystem event counters.
 
-Displays the decoded crash_dump_t from the last fault.
+The subsystem table includes:
 
-```
-$ crash
+- `ok`: successful operations
+- `err`: generic errors
+- `full`: queue/resource exhaustion
+- `timeout`: timeout paths
+- `del`: delete/remove paths
+- `cancel`: cancel paths
+- `busy`: busy objects
+- `noexist`: deleted or missing objects
 
-=== Crash Dump Analysis ===
-Fault Type:  MemManage (1)
-Task ID:     5
+Use `stats clear` to clear only the subsystem event counters.
 
-── Exception Frame ──
-PC:     0x08004A32
-LR:     0x08004A1C
-SP:     0x2000A3E0
-xPSR:   0x61000000
+### `mem`
 
-── Fault Registers ──
-CFSR:  0x00000082  (MMFSR=0x82, BFSR=0x00, UFSR=0x0000)
-HFSR:  0x40000000
-MMFAR: 0xE000ED34
-BFAR:  0x00000000
+Shows heap usage, peak usage, live allocation count, OOM failure count, invalid
+free count, and per-task stack usage. Stack entries marked with `*` are over
+80% used.
 
-── Stack Pointers ──
-MSP:   0x2000B000
-PSP:   0x2000A3E0
+### `free`
 
-── CFSR Decode ──
-MMFSR (MemManage):
-  [MMARVALID] [DACCVIOL]
-BFSR (BusFault):
-UFSR (UsageFault):
-```
+Compact heap summary: total, used, free, peak, alloc/free/fail counts, and live
+allocation count.
 
-**Common fault scenarios:**
+### `trace [n] [event]`
 
-| Symptom | CFSR Bits | Likely Cause |
-|---------|-----------|--------------|
-| DACCVIOL + MMFAR=MPU region | MMFSR[0] | User task accessed outside MPU region |
-| IACCVIOL | MMFSR[1] | User task tried to execute code outside MPU region |
-| UNDEFINSTR | UFSR[0] | Corrupted stack or bad function pointer |
-| INVSTATE | UFSR[1] | Jump to non-Thumb code (bit 0 of PC = 0) |
-| STKERR | BFSR[4] or MMFSR[4] | Stack overflow during exception entry |
-| DIVBYZERO | UFSR[9] | Integer division by zero |
+Shows recent trace entries. Output is bounded: without `n`, the shell prints the
+latest 20 entries. `n` is capped to the trace buffer size.
 
-### `stats` — Kernel Statistics
+Examples:
 
-Displays global kernel counters.
-
-```
-$ stats
-
-=== Kernel Statistics ===
-Uptime:           12345 ticks (12.3 s)
-Context Switches: 8234
-IRQs:             1024
-Max IRQ Latency:  12 ticks
-Faults:           1
-Syscalls:         4096
+```text
+trace
+trace 50
+trace mem
+trace 40 timer
+trace clear
 ```
 
-- **Max IRQ Latency**: The longest time from IRQ entry to handler execution. High values indicate interrupt-disabled regions are too long.
-- **Faults**: Incremented on every fault (MemManage, BusFault, UsageFault, HardFault).
+Supported filters:
 
-### `mem` — Memory Layout
-
-Displays heap usage and per-task stack watermarks.
-
-```
-$ mem
-
-=== Memory Layout ===
-
-Heap: 1024 / 4096 (25%)
-
---- Tasks ---
-  ID  Name            Stack           Usage  Status
-   1  idle            256             15%     READY
-   2  shell           2048            42%     RUNNING
-   3  timer           512             28%     BLOCKED
-   5  user_task       1024            87% *   BLOCKED
+```text
+switch isr syscall ipc bh fault timer irq dev mem cap vfs
 ```
 
-Tasks marked with `*` have stack usage > 80% — increase their stack size.
+P2 event classes use the trace `data` field as:
 
-### `trace` — Trace Buffer Viewer
-
-```
-$ trace              # Show all entries
-$ trace fault        # Filter by FAULT events
-$ trace syscall      # Filter by SYSCALL events
-$ trace isr          # Filter by ISR events
-$ trace ipc          # Filter by IPC events
-$ trace clear        # Clear the buffer
+```text
+high byte = object id
+low byte  = action/result packed by typed trace helper
 ```
 
-**Event legend:**
+### `dev`
 
-| Display | Event | data field |
-|---------|-------|------------|
-| SW | TASK_SWITCH | 0 |
-| ISR+ | ISR_ENTER | irq_num |
-| ISR- | ISR_EXIT | irq_num |
-| SVC | SYSCALL | syscall_num |
-| IPC+ | IPC_SEND | ep/ch id |
-| IPC- | IPC_RECV | ep/ch id |
-| BH | BH_SCHEDULE | bh_id |
-| FLT | FAULT | fault_type |
+Lists registered devices:
 
----
+```text
+ID  NAME  TYPE  OPEN  IRQ
+```
 
-## 2. Host-Side Analysis Tools
+Use this to confirm devfs/device binding and open reference counts before
+testing `device_remove()`.
 
-### trace_parser.py
+### `ps` / `top`
 
-Parses the trace buffer from a raw memory dump.
+`ps` lists task state and stack usage. `top` adds CPU usage when
+`KERN_TASK_STATS` is enabled.
+
+## Host Tools
+
+### Trace Parser
 
 ```bash
-# From ELF (shows metadata only — trace_buf is in BSS)
 python3 tools/trace_parser.py build/stm32f767/my-rtos-stm32f767.elf
-
-# From raw dump (captured via GDB/OpenOCD)
-python3 tools/trace_parser.py trace_dump.bin --raw --filter FAULT
-
-# CSV output for spreadsheet analysis
+python3 tools/trace_parser.py trace_dump.bin --raw --filter MEM
 python3 tools/trace_parser.py trace_dump.bin --raw --csv
 ```
 
-**Capturing the trace buffer:**
-
-In GDB:
-```
-(gdb) dump binary memory trace_dump.bin &trace_buf &trace_buf + sizeof(trace_buf)
-```
-
-In OpenOCD:
-```
-> dump_image trace_dump.bin 0x20009B7C 2048
-```
-
-### crash_analyzer.py
-
-Decodes crash_dump_t with symbol resolution.
+### Crash Analyzer
 
 ```bash
-# From ELF (.crash_dump section)
 python3 tools/crash_analyzer.py build/stm32f767/my-rtos-stm32f767.elf
-
-# From raw dump with symbol resolution
 python3 tools/crash_analyzer.py crash_dump.bin --raw --elf build/stm32f767/my-rtos-stm32f767.elf
-
-# JSON output for automation
-python3 tools/crash_analyzer.py crash_dump.bin --raw --json
 ```
 
-**Capturing the crash dump:**
+## Common Workflows
 
-In GDB:
-```
-(gdb) dump binary memory crash_dump.bin &crash_dump &crash_dump + 116
-```
+### Queue or Resource Exhaustion
 
----
+1. Run `stats`.
+2. Check `full` under `timer`, `bh`, `dev`, or `mem`.
+3. Run `trace 50 timer`, `trace 50 dev`, or `trace 50 mem` to inspect the
+   recent object-level sequence.
 
-## 3. Common Diagnostic Workflows
+### Device Removal Problems
 
-### Debugging a MemManage Fault
+1. Run `dev` and check the `OPEN` count.
+2. If remove returns busy, close the fd owner or let task cleanup run.
+3. Run `stats` and check `dev busy/del/noexist`.
 
-1. Run `crash` in the shell → note PC, MMFAR, CFSR
-2. Run `crash_analyzer.py` with --elf for PC → function name
-3. Check MMFAR against MPU region addresses
-4. If MMFAR points to MPU peripheral region: task tried to access protected hardware
-5. If MMFAR is near stack boundary: stack overflow into guard region
+### Memory Leaks or OOM
 
-### Mapping a Panic PC to Source
+1. Run `mem`.
+2. Check `Live`, `OOM`, and `BadFree`.
+3. Run `trace 50 mem` for recent alloc/free/fail events.
 
-Kernel panic output prints PC/LR and the recent trace tail before entering
-`kern_panic()`. Use the ELF from the same build:
+### Fault or Random Crash
+
+1. Run `crash`.
+2. Run `trace 50` for the recent system sequence.
+3. Use `tools/crash_analyzer.py` with the matching ELF.
+4. Use `addr2line` for PC/LR if needed:
 
 ```bash
 tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/arm-none-eabi-addr2line \
   -e build/stm32f767/my-rtos-stm32f767.elf -f -C 0x08004A32 0x08004A1C
 ```
 
-Use PC first. LR is useful when PC points into a common fault/panic path.
+## Configuration
 
-### Debugging Performance Issues
-
-1. Run `stats` → note IRQ latency max and syscall count
-2. Run `trace clear` then `trace` after a delay → review trace entries
-3. Use `trace_parser.py --csv` for timeline analysis
-4. High syscall count + high IRQ latency = contention in interrupt-disabled section
-
-### Debugging a Stack Overflow
-
-1. Run `mem` → check for tasks with `*` (over 80%)
-2. Increase `KERN_TASK_STACK_SIZE` or `KERNEL_IDLE_STACK_SIZE` in defconfig
-3. Rebuild and verify with `mem` again
-
----
-
-## 4. Configuration Reference
-
-| Kconfig Option | Default | Description |
-|----------------|---------|-------------|
-| `TRACE_ENABLE` | y | Enable trace buffer |
-| `TRACE_BUFFER_SIZE` | 256 | Number of trace entries |
-| `KERN_TASK_STATS` | y | Enable CPU usage + IRQ statistics |
-| `FAULT_ENABLE` | y | Enable crash dump capture |
-| `FAULT_CRASH_DUMP` | y | Store crash_dump_t in .crash_dump |
-| `SHELL_ENABLE` | y | Shell with diagnostic commands |
+| Option | Purpose |
+|--------|---------|
+| `TRACE_ENABLE` | Enables trace buffer and shell trace command |
+| `TRACE_BUFFER_SIZE` | Trace entry count, default 256 |
+| `KERN_TASK_STATS` | Enables CPU/global/subsystem stats |
+| `FAULT_ENABLE` | Enables crash dump capture |
+| `SHELL_ENABLE` | Enables diagnostic shell |

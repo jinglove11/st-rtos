@@ -21,6 +21,7 @@ inode_t *vfs_lookup(const char *path);
 /* fd 管理 */
 int      fd_alloc(tcb_t *task, inode_t *inode, uint32_t flags);
 void     fd_free(tcb_t *task, int fd_index);
+void     vfs_close_task_fds(tcb_t *task);
 
 /* 文件操作 (通过 fd) */
 int      vfs_open(const char *path, uint32_t flags);
@@ -29,9 +30,12 @@ int32_t  vfs_read(int fd, void *buf, uint32_t size);
 int32_t  vfs_write(int fd, const void *buf, uint32_t size);
 kern_err_t vfs_ioctl(int fd, uint32_t cmd, void *arg);
 int32_t  vfs_lseek(int fd, int32_t offset, int whence);
+kern_err_t vfs_readdir(int fd, dirent_t *entry);
+kern_err_t vfs_rewinddir(int fd);
 
 /* 挂载 */
 kern_err_t vfs_mount(const char *path, inode_t *root_inode);
+kern_err_t vfs_unmount(const char *path);
 
 #endif /* VFS_ENABLE */
 #endif /* VFS_H */

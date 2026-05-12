@@ -179,6 +179,169 @@ static void test_vfs_lookup_paths(void) {
 }
 
 /*============================================================================
+ * Test 5b: root/dev directory readdir + normalized lookup
+ *============================================================================*/
+
+static void test_vfs_root_readdir_and_normalize(void) {
+    test_section("Test 5b: root/dev readdir and path normalization");
+
+    inode_t *root = vfs_lookup("/");
+    TEST_ASSERT_NOT_NULL(root, "root lookup OK");
+    TEST_ASSERT(root && root->dir_ops && root->dir_ops->readdir,
+                "root readdir supported");
+
+    int saw_dev = 0;
+    int saw_tmp = 0;
+    if (root && root->dir_ops && root->dir_ops->readdir) {
+        dirent_t entry;
+        for (uint32_t i = 0; i < 8; i++) {
+            if (root->dir_ops->readdir(root, i, &entry) != KERN_OK) {
+                break;
+            }
+            if (strcmp(entry.name, "dev") == 0) saw_dev = 1;
+            if (strcmp(entry.name, "tmp") == 0) saw_tmp = 1;
+        }
+    }
+    TEST_ASSERT(saw_dev == 1, "root readdir sees dev");
+    TEST_ASSERT(saw_tmp == 1, "root readdir sees tmp");
+    if (root) inode_put(root);
+
+    inode_t *dev = vfs_lookup("/dev");
+    TEST_ASSERT_NOT_NULL(dev, "/dev lookup OK");
+    TEST_ASSERT(dev && dev->dir_ops && dev->dir_ops->readdir,
+                "/dev readdir supported");
+
+    int saw_null = 0;
+    if (dev && dev->dir_ops && dev->dir_ops->readdir) {
+        dirent_t entry;
+        for (uint32_t i = 0; i < 8; i++) {
+            if (dev->dir_ops->readdir(dev, i, &entry) != KERN_OK) {
+                break;
+            }
+            if (strcmp(entry.name, "null") == 0) saw_null = 1;
+        }
+    }
+    TEST_ASSERT(saw_null == 1, "/dev readdir sees null");
+    if (dev) inode_put(dev);
+
+    inode_t *null_dev = vfs_lookup("//tmp/../dev//./null");
+    TEST_ASSERT_NOT_NULL(null_dev, "normalized path resolves /dev/null");
+    if (null_dev) {
+        TEST_ASSERT_EQ((int)INODE_TYPE_CHRDEV, (int)null_dev->type,
+                       "normalized /dev/null is CHRDEV");
+        inode_put(null_dev);
+    }
+}
+
+/*============================================================================
+ * Test 5c: fd-based directory iteration
+ *============================================================================*/
+
+static void test_vfs_fd_readdir(void) {
+    test_section("Test 5c: fd-based readdir");
+
+    int fd = vfs_open("/dev", O_RDONLY);
+    TEST_ASSERT(fd >= 0, "open /dev directory");
+    if (fd < 0) return;
+
+    dirent_t entry;
+    kern_err_t err = vfs_readdir(fd, &entry);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "readdir first entry OK");
+    TEST_ASSERT_EQ(0, strcmp(entry.name, "."), "first entry is '.'");
+
+    int saw_null = 0;
+    for (int i = 0; i < 8; i++) {
+        err = vfs_readdir(fd, &entry);
+        if (err != KERN_OK) {
+            break;
+        }
+        if (strcmp(entry.name, "null") == 0) {
+            saw_null = 1;
+        }
+    }
+    TEST_ASSERT(saw_null == 1, "fd readdir sees null");
+
+    err = vfs_rewinddir(fd);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "rewinddir OK");
+    err = vfs_readdir(fd, &entry);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "readdir after rewind OK");
+    TEST_ASSERT_EQ(0, strcmp(entry.name, "."), "rewind returns to '.'");
+
+    vfs_close(fd);
+}
+
+/*============================================================================
+ * Test 5d: mount point lookup redirects to mounted root
+ *============================================================================*/
+
+static void test_vfs_mount_redirect(void) {
+    test_section("Test 5d: mount redirect");
+
+    inode_t *tmp = vfs_lookup("/tmp");
+    TEST_ASSERT_NOT_NULL(tmp, "/tmp exists for mount test");
+    if (!tmp) return;
+
+    inode_t *src = ramfs_create_dir(tmp, "mnt_src");
+    inode_t *dst = ramfs_create_dir(tmp, "mnt_dst");
+    TEST_ASSERT_NOT_NULL(src, "mount source dir created");
+    TEST_ASSERT_NOT_NULL(dst, "mount point dir created");
+
+    inode_t *file = NULL;
+    if (src) {
+        file = ramfs_create_file(src, "inside");
+    }
+    TEST_ASSERT_NOT_NULL(file, "mounted file created");
+
+    kern_err_t err = vfs_mount("//tmp/./mnt_dst", src);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "mount source on destination");
+
+    inode_t *found = vfs_lookup("/tmp/mnt_dst/inside");
+    TEST_ASSERT_NOT_NULL(found, "lookup through mount finds file");
+    if (found && file) {
+        TEST_ASSERT_EQ((uintptr_t)file, (uintptr_t)found,
+                       "mounted lookup returns source child");
+    }
+    if (found) inode_put(found);
+
+    err = vfs_mount("/tmp/mnt_dst", src);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, (int)err, "duplicate mount rejected");
+
+    int fd = vfs_open("/tmp/mnt_dst", O_RDONLY);
+    TEST_ASSERT(fd >= 0, "open mounted root directory");
+    if (fd >= 0) {
+        err = vfs_unmount("/tmp/mnt_dst");
+        TEST_ASSERT_EQ((int)KERN_ERR_BUSY, (int)err,
+                       "unmount busy while mounted root open");
+        vfs_close(fd);
+    }
+
+    fd = vfs_open("/tmp/mnt_dst/inside", O_RDONLY);
+    TEST_ASSERT(fd >= 0, "open file below mounted root");
+    if (fd >= 0) {
+        err = vfs_unmount("/tmp/mnt_dst");
+        TEST_ASSERT_EQ((int)KERN_ERR_BUSY, (int)err,
+                       "unmount busy while mounted child open");
+        vfs_close(fd);
+    }
+
+    err = vfs_unmount("//tmp/./mnt_dst");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "unmount after close OK");
+
+    found = vfs_lookup("/tmp/mnt_dst/inside");
+    TEST_ASSERT_NULL(found, "lookup through unmounted path fails");
+    if (found) inode_put(found);
+
+    err = vfs_unmount("/tmp/mnt_dst");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)err,
+                   "duplicate unmount rejected");
+
+    if (file) inode_put(file);
+    if (src) inode_put(src);
+    if (dst) inode_put(dst);
+    inode_put(tmp);
+}
+
+/*============================================================================
  * Test 6: fd table operations
  *============================================================================*/
 
@@ -558,6 +721,66 @@ static void test_lseek_boundary(void) {
 }
 
 /*============================================================================
+ * Test 16: task cleanup closes fd table entries
+ *============================================================================*/
+
+static volatile int fd_cleanup_ready;
+static volatile int fd_cleanup_cap;
+
+static void fd_cleanup_worker(void *arg) {
+    (void)arg;
+
+    fd_cleanup_cap = vfs_open("/tmp/fd_cleanup", O_RDWR);
+    fd_cleanup_ready = 1;
+
+    while (1) {
+        task_delay(1);
+    }
+}
+
+static void test_task_fd_cleanup(void) {
+    test_section("Test 16: task fd cleanup");
+
+    int setup = vfs_open("/tmp/fd_cleanup", O_RDWR | O_CREAT);
+    TEST_ASSERT(setup >= 0, "create fd_cleanup file");
+    if (setup >= 0) {
+        vfs_close(setup);
+    }
+
+    inode_t *ino = vfs_lookup("/tmp/fd_cleanup");
+    TEST_ASSERT_NOT_NULL(ino, "lookup fd_cleanup inode");
+    if (!ino) return;
+
+    uint32_t base_ref = ino->refcount;
+    fd_cleanup_ready = 0;
+    fd_cleanup_cap = KERN_ERR;
+
+    task_id_t tid = task_create("fd_clean", fd_cleanup_worker, NULL, 12, 0);
+    TEST_ASSERT(tid >= 0, "fd cleanup worker created");
+    if (tid < 0) {
+        inode_put(ino);
+        return;
+    }
+
+    task_start(tid);
+    for (int i = 0; i < 50 && fd_cleanup_ready == 0; i++) {
+        task_delay(1);
+    }
+
+    TEST_ASSERT(fd_cleanup_ready == 1, "worker opened fd");
+    TEST_ASSERT(fd_cleanup_cap >= 0, "worker vfs_open returned cap");
+    TEST_ASSERT_EQ((int)(base_ref + 1), (int)ino->refcount,
+                   "open fd holds inode ref");
+
+    kern_err_t err = task_delete(tid);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "delete worker OK");
+    TEST_ASSERT_EQ((int)base_ref, (int)ino->refcount,
+                   "task delete released fd inode ref");
+
+    inode_put(ino);
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -568,6 +791,9 @@ static void test_vfs_module(void) {
     test_inode_tree();
     test_inode_pool();          /* VFS init — depends on vfs_init() called */
     test_vfs_lookup_paths();
+    test_vfs_root_readdir_and_normalize();
+    test_vfs_fd_readdir();
+    test_vfs_mount_redirect();
     test_fd_table_ops();
     test_dev_null();
     test_devfs_register();
@@ -578,6 +804,7 @@ static void test_vfs_module(void) {
     test_dot_entries();
     test_o_trunc();
     test_lseek_boundary();
+    test_task_fd_cleanup();
 }
 
 TEST_MODULE_REGISTER(vfs, test_vfs_module);

@@ -134,6 +134,7 @@ typedef struct inode {
 typedef struct {
     char      path[64];
     inode_t  *root_inode;
+    uint32_t  root_ref_at_mount;
     uint8_t   in_use;
 } mount_entry_t;
 

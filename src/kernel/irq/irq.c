@@ -11,6 +11,24 @@
 #include "stats.h"
 #include <string.h>
 
+#ifndef TRACE_IRQ_REGISTER
+#define TRACE_IRQ_REGISTER    1
+#define TRACE_IRQ_FIRE        2
+#define TRACE_IRQ_RELEASE     3
+#define TRACE_IRQ_SPURIOUS    4
+#define TRACE_IRQ_MASK        5
+#define TRACE_IRQ_UNMASK      6
+#endif
+
+#ifndef STATS_COUNTER_OK
+#define STATS_COUNTER_OK         0
+#define STATS_COUNTER_ERROR      1
+#define STATS_COUNTER_QUEUE_FULL 2
+#define STATS_COUNTER_DELETE     4
+#define STATS_COUNTER_BUSY       6
+#define STATS_COUNTER_NOEXIST    7
+#endif
+
 /*============================================================================
  * 内部类型和常量
  *============================================================================*/
@@ -44,6 +62,60 @@ static void _threaded_irq_task(void *arg);
 #endif
 
 /*============================================================================
+ * Trace / Stats
+ *============================================================================*/
+
+static uint8_t irq_current_task_id(void) {
+    tcb_t *current = sched_get_current();
+    return current ? (uint8_t)current->id : 0xFFU;
+}
+
+#if TRACE_ENABLE
+static uint8_t irq_trace_result(kern_err_t err) {
+    switch (err) {
+        case KERN_OK:
+            return TRACE_RESULT_OK;
+        case KERN_ERR_BUSY:
+            return TRACE_RESULT_BUSY;
+        case KERN_ERR_NOEXIST:
+            return TRACE_RESULT_NOEXIST;
+        case KERN_ERR_RESOURCE:
+        case KERN_ERR_OVERFLOW:
+            return TRACE_RESULT_FULL;
+        default:
+            return TRACE_RESULT_ERR;
+    }
+}
+#endif
+
+static void irq_record_event(int16_t irq, uint8_t action,
+                             kern_err_t err, uint8_t counter) {
+#if TRACE_ENABLE
+    uint8_t object_id = (irq >= 0) ? (uint8_t)irq : 0xFFU;
+    trace_irq(irq_current_task_id(), object_id, action, irq_trace_result(err));
+#else
+    (void)irq;
+    (void)action;
+#endif
+
+#if KERN_TASK_STATS
+    if (err != KERN_OK) {
+        if (err == KERN_ERR_NOEXIST) {
+            counter = STATS_COUNTER_NOEXIST;
+        } else if (err == KERN_ERR_BUSY) {
+            counter = STATS_COUNTER_BUSY;
+        } else {
+            counter = STATS_COUNTER_ERROR;
+        }
+    }
+    (void)stats_record_event(STATS_SUBSYS_IRQ, counter);
+#else
+    (void)counter;
+#endif
+    (void)err;
+}
+
+/*============================================================================
  * 初始化
  *============================================================================*/
 
@@ -70,9 +142,13 @@ void irq_service_start(void) {
 
 kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX || handler == NULL) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
     if (priority > 14) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
 
@@ -82,6 +158,8 @@ kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_descriptors[i].in_use && irq_descriptors[i].irq_num == irq) {
             hal_exit_critical(crit);
+            irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_BUSY,
+                             STATS_COUNTER_BUSY);
             return KERN_ERR_BUSY;
         }
     }
@@ -96,6 +174,8 @@ kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
     }
     if (slot < 0) {
         hal_exit_critical(crit);
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
     }
 
@@ -111,11 +191,14 @@ kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
     hal_irq_enable_irq((uint32_t)irq);
 
     hal_exit_critical(crit);
+    irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
 
 kern_err_t irq_unregister(int16_t irq) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
 
@@ -127,27 +210,37 @@ kern_err_t irq_unregister(int16_t irq) {
             hal_irq_set_vector((uint32_t)irq, &_default_handler);
             memset(&irq_descriptors[i], 0, sizeof(irq_desc_t));
             hal_exit_critical(crit);
+            irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_OK,
+                             STATS_COUNTER_DELETE);
             return KERN_OK;
         }
     }
 
     hal_exit_critical(crit);
+    irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_ERR_NOEXIST,
+                     STATS_COUNTER_NOEXIST);
     return KERN_ERR_NOEXIST;
 }
 
 kern_err_t irq_enable(int16_t irq) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_UNMASK, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
     hal_irq_enable_irq((uint32_t)irq);
+    irq_record_event(irq, TRACE_IRQ_UNMASK, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
 
 kern_err_t irq_disable(int16_t irq) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_MASK, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
     hal_irq_disable_irq((uint32_t)irq);
+    irq_record_event(irq, TRACE_IRQ_MASK, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
 
@@ -179,7 +272,11 @@ int kern_irq_context(void) {
  */
 static void _threaded_isr_dispatch(void) {
     int irq = (int)hal_irq_get_active();
-    if (irq < 0) return;
+    if (irq < 0) {
+        irq_record_event((int16_t)irq, TRACE_IRQ_SPURIOUS, KERN_ERR_NOEXIST,
+                         STATS_COUNTER_NOEXIST);
+        return;
+    }
 
     hal_irq_disable_irq((uint32_t)irq);
     hal_irq_clear_pending((uint32_t)irq);
@@ -187,6 +284,7 @@ static void _threaded_isr_dispatch(void) {
     for (int i = 0; i < IRQ_THREADED_MAX; i++) {
         irq_thread_t *it = &irq_threads[i];
         if (!it->in_use) continue;
+        if (it->stopping) continue;
         if (it->irq_num != (int16_t)irq) continue;
 
         /* 标记待处理 (ISR 上下文无需临界区) */
@@ -196,8 +294,12 @@ static void _threaded_isr_dispatch(void) {
         if (tcb) {
             sched_wakeup(tcb, KERN_OK);
         }
+        irq_record_event((int16_t)irq, TRACE_IRQ_FIRE, KERN_OK,
+                         STATS_COUNTER_OK);
         return;
     }
+    irq_record_event((int16_t)irq, TRACE_IRQ_SPURIOUS, KERN_ERR_NOEXIST,
+                     STATS_COUNTER_NOEXIST);
 }
 
 /**
@@ -209,6 +311,11 @@ static void _threaded_irq_task(void *arg) {
     while (1) {
         /* 原子检查 pending 标志 */
         uint32_t crit = hal_enter_critical();
+        if (it->stopping) {
+            memset(it, 0, sizeof(irq_thread_t));
+            hal_exit_critical(crit);
+            task_exit(NULL);
+        }
         int was_pending = it->pending;
         it->pending = 0;
         hal_exit_critical(crit);
@@ -218,20 +325,39 @@ static void _threaded_irq_task(void *arg) {
             sched_block(BLOCK_REASON_IRQ, it, 1);
         }
 
-        if (it->handler) {
+        crit = hal_enter_critical();
+        task_func_t handler = it->handler;
+        void *handler_arg = it->arg;
+        int16_t irq_num = it->irq_num;
+        if (handler != NULL && !it->stopping) {
+            it->running = 1;
+        }
+        hal_exit_critical(crit);
+
+        if (handler) {
 #if KERN_TASK_STATS
             uint32_t t0 = sched_get_tick_count();
 #endif
-            trace_record(TRACE_ISR_ENTER, 0, (uint16_t)it->irq_num);
-            it->handler(it->arg);
-            trace_record(TRACE_ISR_EXIT, 0, (uint16_t)it->irq_num);
+            trace_record(TRACE_ISR_ENTER, 0, (uint16_t)irq_num);
+            handler(handler_arg);
+            trace_record(TRACE_ISR_EXIT, 0, (uint16_t)irq_num);
 #if KERN_TASK_STATS
             stats_record_irq(sched_get_tick_count() - t0);
 #endif
         }
 
+        crit = hal_enter_critical();
+        it->running = 0;
+        if (it->stopping) {
+            memset(it, 0, sizeof(irq_thread_t));
+            hal_exit_critical(crit);
+            task_exit(NULL);
+        }
+        irq_num = it->irq_num;
+        hal_exit_critical(crit);
+
         /* 重新使能硬件中断 */
-        hal_irq_enable_irq((uint32_t)it->irq_num);
+        hal_irq_enable_irq((uint32_t)irq_num);
     }
 }
 
@@ -239,6 +365,8 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
                                 void *arg, uint8_t priority,
                                 uint32_t stack_size) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX || handler == NULL) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
 
@@ -248,6 +376,8 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
     for (int i = 0; i < IRQ_THREADED_MAX; i++) {
         if (irq_threads[i].in_use && irq_threads[i].irq_num == irq) {
             hal_exit_critical(crit);
+            irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_BUSY,
+                             STATS_COUNTER_BUSY);
             return KERN_ERR_BUSY;
         }
     }
@@ -262,6 +392,8 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
     }
     if (slot < 0) {
         hal_exit_critical(crit);
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
     }
 
@@ -287,6 +419,8 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
     task_id_t tid = task_create(name, _threaded_irq_task, it, priority, stack_size);
     if (tid < 0) {
         hal_exit_critical(crit);
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
     }
 
@@ -296,6 +430,9 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
     it->arg      = arg;
     it->priority = priority;
     it->in_use   = 1;
+    it->pending  = 0;
+    it->running  = 0;
+    it->stopping = 0;
 
     /* 注册 ISR (所有线程化 IRQ 共用一个调度桩) */
     hal_irq_set_vector((uint32_t)irq, _threaded_isr_dispatch);
@@ -303,11 +440,14 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
     hal_irq_enable_irq((uint32_t)irq);
 
     hal_exit_critical(crit);
+    irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
 
 kern_err_t irq_release_threaded(int16_t irq) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
 
@@ -323,15 +463,32 @@ kern_err_t irq_release_threaded(int16_t irq) {
         hal_irq_disable_irq((uint32_t)irq);
         hal_irq_set_vector((uint32_t)irq, &_default_handler);
 
+        it->pending = 0;
+        it->stopping = 1;
+        it->handler = NULL;
+        it->arg = NULL;
+
+        tcb_t *tcb = task_get_tcb(it->task_id);
+        if (tcb == sched_get_current()) {
+            hal_exit_critical(crit);
+            irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_OK,
+                             STATS_COUNTER_DELETE);
+            return KERN_OK;
+        }
+
         /* 删除关联任务 */
         task_delete(it->task_id);
 
         memset(it, 0, sizeof(irq_thread_t));
         hal_exit_critical(crit);
+        irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_OK,
+                         STATS_COUNTER_DELETE);
         return KERN_OK;
     }
 
     hal_exit_critical(crit);
+    irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_ERR_NOEXIST,
+                     STATS_COUNTER_NOEXIST);
     return KERN_ERR_NOEXIST;
 }
 

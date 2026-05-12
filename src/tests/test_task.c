@@ -218,6 +218,42 @@ static void test_delete_blocked_task(void) {
 }
 
 /*============================================================================
+ * Test 9: task_terminate_with_result propagates join reason
+ *============================================================================*/
+
+static void terminate_reason_task(void *arg) {
+    (void)arg;
+    while (1) {
+        task_delay(10);
+    }
+}
+
+static void test_terminate_join_result(void) {
+    test_section("Test 9: terminate result reaches join");
+
+    task_id_t tid = task_create("term_res", terminate_reason_task, NULL, 10, 0);
+    TEST_ASSERT(tid >= 0, "terminate target created");
+    if (tid < 0) return;
+
+    task_start(tid);
+    task_delay(10);
+
+    tcb_t *tcb = task_get_tcb(tid);
+    TEST_ASSERT_NOT_NULL(tcb, "terminate target tcb exists");
+    if (!tcb) return;
+
+    kern_err_t err = task_terminate_with_result(tcb, KERN_ERR_FAULT);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "terminate with result OK");
+
+    void *retval = (void *)0x1234;
+    err = task_join(tid, &retval, 0);
+    TEST_ASSERT_EQ((int)KERN_ERR_FAULT, (int)err, "join sees fault result");
+    TEST_ASSERT(retval == NULL, "terminate result has no retval");
+
+    (void)task_delete(tid);
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -230,6 +266,7 @@ static void test_task_module(void) {
     test_sys_task_create();
     test_exit_no_double_free();
     test_delete_blocked_task();
+    test_terminate_join_result();
 }
 
 TEST_MODULE_REGISTER(task, test_task_module);

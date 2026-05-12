@@ -62,6 +62,8 @@ typedef struct {
     int16_t     next_sibling;/* next child under same parent */
 } cap_entry_t;
 
+typedef void (*cap_cleanup_fn_t)(void *object, uint8_t obj_type);
+
 /*============================================================================
  * API
  *============================================================================*/
@@ -81,6 +83,8 @@ cap_id_t cap_derive_for(tcb_t *owner, cap_id_t cap, uint8_t subset_rights);
 cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights);
 kern_err_t cap_move_to(tcb_t *src, cap_id_t cap, tcb_t *dst, cap_id_t *out_dst);
 kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap);
+uint16_t cap_object_refcount(void *object, uint8_t obj_type);
+kern_err_t cap_register_cleanup(uint8_t obj_type, cap_cleanup_fn_t cleanup);
 
 #endif /* CAP_ENABLE */
 #endif /* CAPABILITY_H */

@@ -10,12 +10,17 @@
 
 #if DRIVER_ENABLE
 
+static device_t *uart0_dev;
+
 /*============================================================================
  * UART dev_ops 实现
  *============================================================================*/
 
 static kern_err_t uart_dev_open(void *priv, uint32_t flags) {
     (void)priv; (void)flags;
+    if (uart0_dev && uart_writable(NUCLEO_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+    }
     return KERN_OK;
 }
 
@@ -36,6 +41,17 @@ static int32_t uart_dev_read(void *priv, void *buf, uint32_t offset, uint32_t si
         p[count++] = uart_getc(NUCLEO_DEFAULT_UART);
     }
 
+    if (uart0_dev) {
+        if (uart_readable(NUCLEO_DEFAULT_UART)) {
+            (void)device_notify_events(uart0_dev, DEVICE_EVENT_READABLE);
+        } else {
+            (void)device_clear_events(uart0_dev, DEVICE_EVENT_READABLE);
+        }
+        if (uart_writable(NUCLEO_DEFAULT_UART)) {
+            (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+        }
+    }
+
     return (int32_t)count;
 }
 
@@ -46,6 +62,10 @@ static int32_t uart_dev_write(void *priv, const void *buf, uint32_t offset, uint
     const char *p = (const char *)buf;
     for (uint32_t i = 0; i < size; i++) {
         uart_putc(NUCLEO_DEFAULT_UART, p[i]);
+    }
+
+    if (uart0_dev && uart_writable(NUCLEO_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
     }
 
     return (int32_t)size;
@@ -63,8 +83,6 @@ static dev_ops_t uart_dev_ops = {
  * UART 设备注册
  *============================================================================*/
 
-static device_t *uart0_dev;
-
 device_t *uart_dev_register(void) {
     uart0_dev = device_alloc("uart0", DEVICE_TYPE_CHAR);
     if (!uart0_dev) return NULL;
@@ -72,6 +90,12 @@ device_t *uart_dev_register(void) {
     uart0_dev->ops    = &uart_dev_ops;
     uart0_dev->priv   = (void *)NUCLEO_DEFAULT_UART;
     uart0_dev->irq_num = 0;
+    if (uart_writable(NUCLEO_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+    }
+    if (uart_readable(NUCLEO_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_READABLE);
+    }
 
     return uart0_dev;
 }

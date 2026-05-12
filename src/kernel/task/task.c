@@ -15,6 +15,7 @@
 #include "wait_queue.h"
 #include "endpoint.h"
 #include "channel.h"
+#include "vfs.h"
 
 /*
  * PendSV/SVC 汇编直接按偏移访问 tcb_t::state 和 tcb_t::attrs。
@@ -58,6 +59,7 @@ tcb_t task_pool[KERNEL_MAX_TASKS];
  * task_join 读取后清除对应条目。
  */
 static void *exit_retain[KERNEL_MAX_TASKS];
+static kern_err_t exit_retain_result[KERNEL_MAX_TASKS];
 static uint32_t exit_retain_bitmap = 0;
 
 /* 任务栈池 */
@@ -163,10 +165,25 @@ static void task_wake_joiners(tcb_t *tcb, kern_err_t result) {
     tcb->joiners = NULL;
 }
 
+static void task_record_exit(tcb_t *tcb, void *retval, kern_err_t result) {
+    if (tcb == NULL || tcb->id < 0 || tcb->id >= KERNEL_MAX_TASKS) {
+        return;
+    }
+
+    tcb->exit_value = retval;
+    exit_retain[tcb->id] = retval;
+    exit_retain_result[tcb->id] = result;
+    exit_retain_bitmap |= (1U << tcb->id);
+}
+
 static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
     if (tcb == NULL || tcb->id < 0) {
         return;
     }
+
+#if VFS_ENABLE
+    vfs_close_task_fds(tcb);
+#endif
 
 #if CAP_ENABLE
     cap_revoke_all((uint8_t)tcb->id);
@@ -278,6 +295,9 @@ void task_init(void) {
     memset(task_stacks, 0, sizeof(task_stacks));
 
     task_used_bitmap = 0;
+    memset(exit_retain, 0, sizeof(exit_retain));
+    memset(exit_retain_result, 0, sizeof(exit_retain_result));
+    exit_retain_bitmap = 0;
 
     /* 初始化空闲任务 */
     memset(&idle_task, 0, sizeof(idle_task));
@@ -324,6 +344,7 @@ task_id_t task_create(const char   *name,
 
     /* 清除保留表条目 (ID 可能被复用) */
     exit_retain[id] = NULL;
+    exit_retain_result[id] = KERN_OK;
     exit_retain_bitmap &= ~(1U << id);
 
     tcb_t *tcb = &task_pool[id];
@@ -409,14 +430,7 @@ kern_err_t task_exit_request(void *retval) {
         return KERN_ERR_STATE;
     }
 
-    /* 保存退出值 */
-    current->exit_value = retval;
-
-    /* 同时保存到保留表，防止 task_reclaim 清零 TCB 后丢失 */
-    if (current->id >= 0 && current->id < KERNEL_MAX_TASKS) {
-        exit_retain[current->id] = retval;
-        exit_retain_bitmap |= (1U << current->id);
-    }
+    task_record_exit(current, retval, KERN_OK);
 
     /* 设置为终止状态 */
     current->state = TASK_STATE_TERMINATED;
@@ -537,6 +551,7 @@ kern_err_t task_delete(task_id_t task_id) {
 
     if (!task_id_is_used(task_id)) {
         if (exit_retain_bitmap & (1U << task_id)) {
+            exit_retain_result[task_id] = KERN_OK;
             exit_retain_bitmap &= ~(1U << task_id);
             exit_retain[task_id] = NULL;
             hal_exit_critical(crit);
@@ -563,7 +578,13 @@ kern_err_t task_delete(task_id_t task_id) {
     // 从就绪队列移除
     sched_remove_ready(tcb);
 
-    task_cleanup_resources(tcb, KERN_ERR_NOEXIST);
+    if (tcb->state != TASK_STATE_TERMINATED) {
+        task_cleanup_resources(tcb, KERN_ERR_NOEXIST);
+    } else if (task_id >= 0 && task_id < KERNEL_MAX_TASKS) {
+        exit_retain_bitmap &= ~(1U << task_id);
+        exit_retain[task_id] = NULL;
+        exit_retain_result[task_id] = KERN_OK;
+    }
 
     // 先撤销可见性，再清零 TCB，避免扫描路径看到半清理槽位
     free_task_id(task_id);
@@ -687,8 +708,11 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     if (!task_id_is_used(task_id)) {
         if (exit_retain_bitmap & (1U << task_id)) {
             if (retval) *retval = exit_retain[task_id];
+            kern_err_t result = exit_retain_result[task_id];
             exit_retain_bitmap &= ~(1U << task_id);
-            return KERN_OK;
+            exit_retain[task_id] = NULL;
+            exit_retain_result[task_id] = KERN_OK;
+            return result;
         }
         return KERN_ERR_NOEXIST;
     }
@@ -703,9 +727,13 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     /* 已终止 — 直接取 retval */
     if (tcb->state == TASK_STATE_TERMINATED) {
         if (retval) *retval = tcb->exit_value;
+        kern_err_t result = (exit_retain_bitmap & (1U << task_id))
+                            ? exit_retain_result[task_id] : KERN_OK;
         /* 清除保留表条目 */
         exit_retain_bitmap &= ~(1U << task_id);
-        return KERN_OK;
+        exit_retain[task_id] = NULL;
+        exit_retain_result[task_id] = KERN_OK;
+        return result;
     }
 
     /*
@@ -715,12 +743,18 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
      * 从保留表中读取 exit_value。
      */
     if (!task_id_is_used(task_id)) {
+        kern_err_t result = KERN_OK;
         if (retval) {
             *retval = (exit_retain_bitmap & (1U << task_id))
                       ? exit_retain[task_id] : NULL;
         }
+        if (exit_retain_bitmap & (1U << task_id)) {
+            result = exit_retain_result[task_id];
+        }
         exit_retain_bitmap &= ~(1U << task_id);
-        return KERN_OK;
+        exit_retain[task_id] = NULL;
+        exit_retain_result[task_id] = KERN_OK;
+        return result;
     }
 
     /* 挂入 joiner 链表 */
@@ -730,9 +764,23 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     /* 阻塞等待 */
     kern_err_t err = sched_block(BLOCK_REASON_JOIN, tcb, timeout);
 
-    /* 被唤醒后取 retval */
-    if (err == KERN_OK && retval)
-        *retval = tcb->exit_value;
+    if (err == KERN_OK) {
+        kern_err_t result = KERN_OK;
+        if (exit_retain_bitmap & (1U << task_id)) {
+            result = exit_retain_result[task_id];
+            if (retval) {
+                *retval = exit_retain[task_id];
+            }
+            exit_retain_bitmap &= ~(1U << task_id);
+            exit_retain[task_id] = NULL;
+            exit_retain_result[task_id] = KERN_OK;
+            return result;
+        }
+
+        if (retval) {
+            *retval = tcb->exit_value;
+        }
+    }
 
     return err;
 }
@@ -872,17 +920,27 @@ void task_reclaim_expired(void) {
     }
 }
 
-void task_terminate(tcb_t *tcb) {
+kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result) {
     if (tcb == NULL || tcb->id < 0) {
-        return;
+        return KERN_ERR_PARAM;
+    }
+
+    if (tcb->state == TASK_STATE_TERMINATED) {
+        return KERN_OK;
     }
 
     if (tcb->state == TASK_STATE_BLOCKED) {
         (void)task_unlink_blocked(tcb);
     }
 
+    task_record_exit(tcb, NULL, result);
     tcb->state = TASK_STATE_TERMINATED;
-    task_cleanup_resources(tcb, KERN_OK);
+    task_cleanup_resources(tcb, result);
+    return KERN_OK;
+}
+
+void task_terminate(tcb_t *tcb) {
+    (void)task_terminate_with_result(tcb, KERN_OK);
 }
 
 /*============================================================================

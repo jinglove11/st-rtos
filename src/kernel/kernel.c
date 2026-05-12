@@ -16,6 +16,7 @@
 #include "timer.h"
 #include "irq.h"
 #include "bh.h"
+#include "stats.h"
 #include "capability.h"
 #include "vfs/vfs.h"
 #if DRIVER_ENABLE
@@ -32,6 +33,9 @@ void kern_init(void) {
     irq_init();
     bh_init();
     timer_init();
+#if KERN_TASK_STATS
+    stats_init();
+#endif
 #if CAP_ENABLE
     cap_init();
 #endif

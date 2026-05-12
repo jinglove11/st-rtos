@@ -623,6 +623,92 @@ static void test_ipc_cap_move_rollback(void) {
 }
 
 /*============================================================================
+ * Test 25: object refcount tracks caps for the same kernel object
+ *============================================================================*/
+
+static void test_cap_object_refcount(void) {
+    test_section("Test 25: cap object refcount");
+
+    task_id_t src_id = task_create("caprefs", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("caprefd", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "create refcount tasks");
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    TEST_ASSERT(src != NULL && dst != NULL, "get refcount TCBs");
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int obj = 1101;
+    cap_id_t parent = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
+                                     CAP_READ | CAP_TRANSFER | CAP_GRANT);
+    TEST_ASSERT(parent != ((cap_id_t)-1), "create parent cap");
+    TEST_ASSERT_EQ(1, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "one cap references object");
+
+    cap_id_t derived = cap_derive_for(src, parent, CAP_READ);
+    TEST_ASSERT(derived != ((cap_id_t)-1), "derive second cap");
+    TEST_ASSERT_EQ(2, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "derive increments object refs");
+
+    cap_id_t copied = cap_copy_to(src, parent, dst, CAP_READ);
+    TEST_ASSERT(copied != ((cap_id_t)-1), "copy third cap");
+    TEST_ASSERT_EQ(3, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "copy increments object refs");
+
+    kern_err_t err = cap_revoke_for(src, derived);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "revoke derived cap");
+    TEST_ASSERT_EQ(2, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "revoke decrements object refs");
+
+    err = cap_revoke_for(src, parent);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "revoke parent cap");
+    TEST_ASSERT_EQ(0, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "parent cascade clears all refs");
+
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+}
+
+/*============================================================================
+ * Test 26: object cleanup callback fires when last cap is revoked
+ *============================================================================*/
+
+static volatile int cap_cleanup_count;
+
+static void cap_test_cleanup(void *object, uint8_t obj_type) {
+    (void)object;
+    if (obj_type == CAP_OBJ_MEMBLOCK) {
+        cap_cleanup_count++;
+    }
+}
+
+static void test_cap_cleanup_callback(void) {
+    test_section("Test 26: cap object cleanup callback");
+
+    int obj = 1201;
+    cap_cleanup_count = 0;
+    kern_err_t err = cap_register_cleanup(CAP_OBJ_MEMBLOCK, cap_test_cleanup);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "register cleanup callback");
+
+    cap_id_t parent = cap_create(&obj, CAP_OBJ_MEMBLOCK,
+                                 CAP_READ | CAP_GRANT, 1);
+    TEST_ASSERT(parent != ((cap_id_t)-1), "create cleanup parent");
+    cap_id_t child = cap_derive(parent, CAP_READ);
+    TEST_ASSERT(child != ((cap_id_t)-1), "derive cleanup child");
+
+    err = cap_revoke(child);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "revoke child");
+    TEST_ASSERT_EQ(0, cap_cleanup_count, "cleanup not called while parent remains");
+
+    err = cap_revoke(parent);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "revoke last cap");
+    TEST_ASSERT_EQ(1, cap_cleanup_count, "cleanup called at last ref");
+
+    (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, NULL);
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -651,6 +737,8 @@ static void test_capability_module(void) {
     test_cap_move_to_task();
     test_ipc_cap_transfer_rollback();
     test_ipc_cap_move_rollback();
+    test_cap_object_refcount();
+    test_cap_cleanup_callback();
 }
 
 TEST_MODULE_REGISTER(capability, test_capability_module);

@@ -99,6 +99,26 @@ static void test_trace_cmd_exists(void) {
 }
 
 /*============================================================================
+ * Test 4b: trace help mentions bounded output
+ *============================================================================*/
+
+static void test_trace_help_bounded(void) {
+    test_section("Test 4b: trace command help");
+
+    int found = 0;
+    for (int i = 0; i < cmd_count; i++) {
+        if (strcmp(cmd_table[i].name, "trace") == 0) {
+            found = 1;
+            TEST_ASSERT(cmd_table[i].help[0] == '[' &&
+                        cmd_table[i].help[1] == 'n',
+                        "trace help mentions count");
+            break;
+        }
+    }
+    TEST_ASSERT(found, "'trace' help checked");
+}
+
+/*============================================================================
  * Test 5: crash_dump 数据结构可访问
  *============================================================================*/
 
@@ -145,14 +165,35 @@ static void test_trace_event_names(void) {
     /* Verify the shell can translate event IDs */
     const char *names[] = {
         "SW", "ISR+", "ISR-", "SVC",
-        "IPC+", "IPC-", "BH", "FLT"
+        "IPC+", "IPC-", "BH", "FLT",
+        "TMR", "IRQ", "BH2", "DEV",
+        "MEM", "IPC", "CAP", "VFS"
     };
 
-    /* Spot-check that we have 8 event types */
-    for (int i = 0; i < 8; i++) {
+    /* Spot-check that we have all shell-visible event groups */
+    for (int i = 0; i < 16; i++) {
         TEST_ASSERT(names[i] != NULL, "event name exists");
         TEST_ASSERT(strlen(names[i]) > 0, "event name not empty");
     }
+}
+
+/*============================================================================
+ * Test 8: dev 命令存在
+ *============================================================================*/
+
+static void test_dev_cmd_exists(void) {
+    test_section("Test 8: dev command exists");
+
+    int found = 0;
+    for (int i = 0; i < cmd_count; i++) {
+        if (strcmp(cmd_table[i].name, "dev") == 0) {
+            found = 1;
+            TEST_ASSERT(strlen(cmd_table[i].help) > 0, "dev has help text");
+            TEST_ASSERT_NOT_NULL((void *)(uintptr_t)cmd_table[i].func, "dev has handler");
+            break;
+        }
+    }
+    TEST_ASSERT(found, "'dev' in command table");
 }
 
 /*============================================================================
@@ -164,9 +205,11 @@ static void test_diag_module(void) {
     test_stats_cmd_exists();
     test_mem_cmd_exists();
     test_trace_cmd_exists();
+    test_trace_help_bounded();
     test_crash_dump_structure();
     test_stats_structure();
     test_trace_event_names();
+    test_dev_cmd_exists();
 }
 
 TEST_MODULE_REGISTER(diag, test_diag_module);

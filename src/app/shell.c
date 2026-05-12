@@ -12,6 +12,7 @@
 #include "uart.h"
 #include "hal.h"
 #include "fault.h"
+#include "device.h"
 #include <string.h>
 
 #if TRACE_ENABLE
@@ -131,10 +132,19 @@ static void cmd_ls(int argc, char **argv) {
         inode_put(dir);
         return;
     }
+    inode_put(dir);
+
+    int fd = vfs_open(path, O_RDONLY);
+    if (fd < 0) {
+        sh_puts("ls: ");
+        sh_puts(path);
+        sh_puts(": open failed\r\n");
+        return;
+    }
 
     dirent_t entry;
-    for (uint32_t idx = 0; ; idx++) {
-        if (dir->dir_ops->readdir(dir, idx, &entry) != KERN_OK)
+    while (1) {
+        if (vfs_readdir(fd, &entry) != KERN_OK)
             break;
 
         sh_putdec_width(entry.ino, 6);
@@ -153,7 +163,7 @@ static void cmd_ls(int argc, char **argv) {
         sh_puts("\r\n");
     }
 
-    inode_put(dir);
+    vfs_close(fd);
 }
 
 /*============================================================================
@@ -307,6 +317,8 @@ static void cmd_free(int argc, char **argv) {
     sh_putdec(st.free_count);
     sh_puts("  Fails: ");
     sh_putdec(st.fail_count);
+    sh_puts("  Live: ");
+    sh_putdec(st.outstanding_allocs);
     sh_puts("\r\n");
 }
 
@@ -534,8 +546,48 @@ static void cmd_crash(int argc, char **argv) {
 
 #if KERN_TASK_STATS
 
+static const char *stats_subsys_name(uint8_t id) {
+    switch (id) {
+    case STATS_SUBSYS_TIMER: return "timer";
+    case STATS_SUBSYS_IRQ:   return "irq";
+    case STATS_SUBSYS_BH:    return "bh";
+    case STATS_SUBSYS_DEV:   return "dev";
+    case STATS_SUBSYS_MEM:   return "mem";
+    case STATS_SUBSYS_IPC:   return "ipc";
+    case STATS_SUBSYS_CAP:   return "cap";
+    case STATS_SUBSYS_VFS:   return "vfs";
+    default:                 return "?";
+    }
+}
+
+static void stats_print_subsys(uint8_t id) {
+    sh_puts("  ");
+    sh_puts(stats_subsys_name(id));
+    for (int i = (int)strlen(stats_subsys_name(id)); i < 6; i++) sh_putc(' ');
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_OK));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_ERROR));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_QUEUE_FULL));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_TIMEOUT));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_DELETE));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_CANCEL));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_BUSY));
+    sh_puts("   ");
+    sh_putdec(stats_get_event_count(id, STATS_COUNTER_NOEXIST));
+    sh_puts("\r\n");
+}
+
 static void cmd_stats(int argc, char **argv) {
-    (void)argc; (void)argv;
+    if (argc >= 2 && strcmp(argv[1], "clear") == 0) {
+        stats_clear_events();
+        sh_puts("Stats event counters cleared.\r\n");
+        return;
+    }
 
     sh_puts("=== Kernel Statistics ===\r\n");
     sh_puts("Uptime:          ");
@@ -562,6 +614,12 @@ static void cmd_stats(int argc, char **argv) {
     sh_puts("Syscalls:        ");
     sh_putdec(ks->total_syscalls);
     sh_puts("\r\n");
+
+    sh_puts("\r\nSubsystem Events:\r\n");
+    sh_puts("  name   ok err full timeout del cancel busy noexist\r\n");
+    for (uint8_t id = 0; id < STATS_SUBSYS_MAX; id++) {
+        stats_print_subsys(id);
+    }
 }
 
 #endif /* KERN_TASK_STATS */
@@ -591,6 +649,18 @@ static void cmd_mem(int argc, char **argv) {
     sh_puts("Peak:    ");
     sh_putdec((uint32_t)st.max_used);
     sh_puts(" bytes\r\n");
+
+    sh_puts("Live:    ");
+    sh_putdec(st.outstanding_allocs);
+    sh_puts(" allocs\r\n");
+
+    sh_puts("OOM:     ");
+    sh_putdec(st.fail_count);
+    sh_puts(" fails\r\n");
+
+    sh_puts("BadFree: ");
+    sh_putdec(st.invalid_free_count);
+    sh_puts("\r\n");
 
     sh_puts("\r\nPer-task stack:\r\n");
     sh_puts("  ID  NAME            STACK USAGE\r\n");
@@ -660,25 +730,39 @@ static void cmd_reset(int argc, char **argv) {
 
 static const char *trace_event_name(uint8_t ev) {
     switch (ev) {
-    case 0: return "SWITCH";
-    case 1: return "ISR_IN";
-    case 2: return "ISR_OUT";
-    case 3: return "SYSCALL";
-    case 4: return "IPC_SND";
-    case 5: return "IPC_RCV";
-    case 6: return "BH";
-    case 7: return "FAULT";
+    case TRACE_TASK_SWITCH: return "SWITCH";
+    case TRACE_ISR_ENTER:   return "ISR_IN";
+    case TRACE_ISR_EXIT:    return "ISR_OUT";
+    case TRACE_SYSCALL:     return "SYSCALL";
+    case TRACE_IPC_SEND:    return "IPC_SND";
+    case TRACE_IPC_RECV:    return "IPC_RCV";
+    case TRACE_BH_SCHEDULE: return "BH";
+    case TRACE_FAULT:       return "FAULT";
+    case TRACE_TIMER:       return "TIMER";
+    case TRACE_IRQ:         return "IRQ";
+    case TRACE_BH:          return "BH2";
+    case TRACE_DEV:         return "DEV";
+    case TRACE_MEM:         return "MEM";
+    case TRACE_IPC_EVENT:   return "IPC_EVT";
+    case TRACE_CAP_EVENT:   return "CAP_EVT";
+    case TRACE_VFS_EVENT:   return "VFS_EVT";
     default: return "?";
     }
 }
 
 static int8_t parse_trace_event(const char *name) {
-    if      (strcmp(name, "switch")  == 0) return 0;
-    else if (strcmp(name, "isr")     == 0) return 1;
-    else if (strcmp(name, "syscall") == 0) return 3;
-    else if (strcmp(name, "ipc")     == 0) return 4;
-    else if (strcmp(name, "bh")      == 0) return 6;
-    else if (strcmp(name, "fault")   == 0) return 7;
+    if      (strcmp(name, "switch")  == 0) return TRACE_TASK_SWITCH;
+    else if (strcmp(name, "isr")     == 0) return TRACE_ISR_ENTER;
+    else if (strcmp(name, "syscall") == 0) return TRACE_SYSCALL;
+    else if (strcmp(name, "ipc")     == 0) return TRACE_IPC_SEND;
+    else if (strcmp(name, "bh")      == 0) return TRACE_BH;
+    else if (strcmp(name, "fault")   == 0) return TRACE_FAULT;
+    else if (strcmp(name, "timer")   == 0) return TRACE_TIMER;
+    else if (strcmp(name, "irq")     == 0) return TRACE_IRQ;
+    else if (strcmp(name, "dev")     == 0) return TRACE_DEV;
+    else if (strcmp(name, "mem")     == 0) return TRACE_MEM;
+    else if (strcmp(name, "cap")     == 0) return TRACE_CAP_EVENT;
+    else if (strcmp(name, "vfs")     == 0) return TRACE_VFS_EVENT;
     else return -1;
 }
 
@@ -704,12 +788,23 @@ static void cmd_trace(int argc, char **argv) {
     }
 
     int8_t filter = -1;
-    if (argc >= 2) {
-        filter = parse_trace_event(argv[1]);
+    uint16_t limit = 20;
+    int argi = 1;
+
+    if (argc > argi && argv[argi][0] >= '0' && argv[argi][0] <= '9') {
+        uint32_t parsed = parse_dec(argv[argi]);
+        if (parsed > 0) {
+            limit = (parsed > TRACE_BUFFER_SIZE) ? TRACE_BUFFER_SIZE : (uint16_t)parsed;
+        }
+        argi++;
+    }
+
+    if (argc > argi) {
+        filter = parse_trace_event(argv[argi]);
         if (filter < 0) {
             sh_puts("trace: unknown filter '");
-            sh_puts(argv[1]);
-            sh_puts("' (try: switch/isr/syscall/ipc/bh/fault)\r\n");
+            sh_puts(argv[argi]);
+            sh_puts("' (try: switch/isr/syscall/ipc/bh/fault/timer/irq/dev/mem/cap/vfs)\r\n");
             return;
         }
     }
@@ -728,7 +823,7 @@ static void cmd_trace(int argc, char **argv) {
     if (filter >= 0) {
         trace_filter((uint8_t)filter, trace_print_entry, NULL);
     } else {
-        uint16_t start = (count > 20) ? (count - 20) : 0;
+        uint16_t start = (count > limit) ? (count - limit) : 0;
         for (uint16_t i = start; i < count; i++) {
             const trace_entry_t *e = trace_get_entry(i);
             if (!e) continue;
@@ -738,6 +833,49 @@ static void cmd_trace(int argc, char **argv) {
 }
 
 #endif /* TRACE_ENABLE */
+
+/*============================================================================
+ * 内置命令: dev
+ *============================================================================*/
+
+#if DRIVER_ENABLE
+
+static const char *device_type_name(device_type_t type) {
+    switch (type) {
+    case DEVICE_TYPE_CHAR:  return "char";
+    case DEVICE_TYPE_BLOCK: return "block";
+    default:                return "?";
+    }
+}
+
+static void cmd_dev(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    sh_puts("  ID  NAME            TYPE   OPEN IRQ\r\n");
+    sh_puts("  --- --------------- ------ ---- ---\r\n");
+
+    for (uint16_t i = 0; i < DEVICE_MAX; i++) {
+        device_t *dev = device_get_by_index(i);
+        if (!dev) continue;
+
+        sh_putc(' ');
+        sh_putdec_width(i, 3);
+        sh_puts("  ");
+        sh_puts(dev->name);
+        for (int j = (int)strlen(dev->name); j < 16; j++) sh_putc(' ');
+
+        const char *type = device_type_name(dev->type);
+        sh_puts(type);
+        for (int j = (int)strlen(type); j < 7; j++) sh_putc(' ');
+
+        sh_putdec_width(dev->open_count, 4);
+        sh_putc(' ');
+        sh_putdec(dev->irq_num);
+        sh_puts("\r\n");
+    }
+}
+
+#endif /* DRIVER_ENABLE */
 
 /*============================================================================
  * 命令表
@@ -754,12 +892,15 @@ const shell_cmd_t cmd_table[] = {
     { "top",      "Task CPU usage",             cmd_top      },
 #endif
 #if TRACE_ENABLE
-    { "trace",    "[event|clear] Trace events", cmd_trace    },
+    { "trace",    "[n] [event]|clear Trace",    cmd_trace    },
 #endif
     { "crash",    "Last crash dump",            cmd_crash    },
     { "mem",      "Memory layout & stacks",     cmd_mem      },
 #if KERN_TASK_STATS
-    { "stats",    "Kernel statistics",          cmd_stats    },
+    { "stats",    "[clear] Kernel statistics",  cmd_stats    },
+#endif
+#if DRIVER_ENABLE
+    { "dev",      "List devices",               cmd_dev      },
 #endif
     { "free",     "Memory usage",               cmd_free     },
     { "hexdump",  "<addr> <len> Hex dump",      cmd_hexdump  },
