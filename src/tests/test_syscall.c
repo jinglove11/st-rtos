@@ -169,7 +169,7 @@ static void test_syscall_bad_user_pointers(void) {
 }
 
 /*============================================================================
- * 测试 9: 用户态服务通过非阻塞 endpoint syscall 处理请求
+ * 测试 9: 用户态服务通过 sleepable endpoint syscall 处理请求
  *============================================================================*/
 
 #if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
@@ -177,19 +177,13 @@ static void user_endpoint_service_task(void *arg) {
     int ep_cap = (int)(uintptr_t)arg;
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *req = (uint32_t *)msg_buf;
-    int err = KERN_ERR_TIMEOUT;
+    int err;
 
     for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
         msg_buf[i] = 0;
     }
 
-    for (int i = 0; i < 50; i++) {
-        err = sys_ep_recv(ep_cap, msg_buf, 0);
-        if (err == KERN_OK) {
-            break;
-        }
-        (void)sys_task_yield();
-    }
+    err = sys_ep_recv(ep_cap, msg_buf, 1000);
 
     if (err == KERN_OK) {
         *req += 100;
@@ -198,10 +192,72 @@ static void user_endpoint_service_task(void *arg) {
 
     sys_task_exit((void *)(uintptr_t)err);
 }
+
+static void user_endpoint_recv_timeout_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    err = sys_ep_recv(ep_cap, msg_buf, 2);
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_client_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    *msg = 77;
+
+    err = sys_ep_send(ep_cap, msg_buf, 1000);
+    if (err == KERN_OK && *msg != 177) {
+        err = KERN_ERR;
+    }
+
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_send_wait_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    *msg = 55;
+
+    err = sys_ep_send(ep_cap, msg_buf, 20);
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_send_nowait_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    *msg = 66;
+
+    err = sys_ep_send(ep_cap, msg_buf, 0);
+    sys_task_exit((void *)(uintptr_t)err);
+}
 #endif
 
 static void test_user_endpoint_service_nonblocking(void) {
-    test_section("Test 9: User endpoint service nonblocking");
+    test_section("Test 9: User endpoint service sleepable recv");
 
 #if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
     ep_id_t ep = endpoint_create("u_svc", sizeof(uint32_t), 2);
@@ -219,7 +275,7 @@ static void test_user_endpoint_service_nonblocking(void) {
     task_id_t service = task_create_user("u_ep_svc",
                                          user_endpoint_service_task,
                                          (void *)(uintptr_t)ep_cap,
-                                         20, 512);
+                                         5, 512);
     TEST_ASSERT(service >= 0, "user endpoint service created");
     if (service < 0) {
         cap_delete(ep_cap);
@@ -254,6 +310,308 @@ static void test_user_endpoint_service_nonblocking(void) {
 #endif
 }
 
+static void test_user_endpoint_recv_sleep_timeout(void) {
+    test_section("Test 10: User endpoint recv sleep timeout");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_svc_to", sizeof(uint32_t), 1);
+    TEST_ASSERT(ep >= 0, "timeout endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "timeout endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ep_to",
+                                         user_endpoint_recv_timeout_task,
+                                         (void *)(uintptr_t)ep_cap,
+                                         5, 512);
+    TEST_ASSERT(service >= 0, "timeout user receiver created");
+    if (service < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "timeout endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(service);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "timeout receiver joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)(intptr_t)retval,
+                   "sleepable recv returned timeout");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_send_sleep_reply(void) {
+    test_section("Test 11: User endpoint send sleep reply");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_cli", sizeof(uint32_t), 1);
+    TEST_ASSERT(ep >= 0, "client endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "client endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t client = task_create_user("u_ep_cli",
+                                        user_endpoint_client_task,
+                                        (void *)(uintptr_t)ep_cap,
+                                        5, 512);
+    TEST_ASSERT(client >= 0, "user endpoint client created");
+    if (client < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "client endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(client);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(client);
+
+    uint32_t msg = 0;
+    err = endpoint_recv(ep, &msg, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel server received user request");
+    TEST_ASSERT_EQ(77, (int)msg, "kernel server saw user payload");
+    msg += 100;
+    err = endpoint_reply(ep, &msg);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel server replied to user client");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(client, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "user client joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "sleepable send returned reply OK");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_send_sleep_timeout(void) {
+    test_section("Test 12: User endpoint send sleep timeout");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_cli_to", sizeof(uint32_t), 1);
+    TEST_ASSERT(ep >= 0, "send-timeout endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "send-timeout endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t client = task_create_user("u_ep_sto",
+                                        user_endpoint_send_wait_task,
+                                        (void *)(uintptr_t)ep_cap,
+                                        5, 512);
+    TEST_ASSERT(client >= 0, "send-timeout user client created");
+    if (client < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send-timeout cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(client);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(client);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(client, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "send-timeout client joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)(intptr_t)retval,
+                   "sleepable send returned timeout");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_send_sleep_delete(void) {
+    test_section("Test 13: User endpoint send sleep delete");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_cli_del", sizeof(uint32_t), 1);
+    TEST_ASSERT(ep >= 0, "send-delete endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "send-delete endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t client = task_create_user("u_ep_sdel",
+                                        user_endpoint_send_wait_task,
+                                        (void *)(uintptr_t)ep_cap,
+                                        5, 512);
+    TEST_ASSERT(client >= 0, "send-delete user client created");
+    if (client < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send-delete cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(client);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(client);
+    task_delay(1);
+
+    err = endpoint_delete(ep);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "endpoint delete woke send syscall");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(client, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "send-delete client joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)(intptr_t)retval,
+                   "sleepable send returned noexist after delete");
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_send_nowait_timeout(void) {
+    test_section("Test 14: User endpoint send no-wait timeout");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_cli_nw", sizeof(uint32_t), 1);
+    TEST_ASSERT(ep >= 0, "send-nowait endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "send-nowait endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t client = task_create_user("u_ep_snw",
+                                        user_endpoint_send_nowait_task,
+                                        (void *)(uintptr_t)ep_cap,
+                                        5, 512);
+    TEST_ASSERT(client >= 0, "send-nowait user client created");
+    if (client < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send-nowait cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(client);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(client);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(client, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "send-nowait client joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)(intptr_t)retval,
+                   "nowait send returned timeout");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_blocking_ipc_syscalls_rejected(void) {
+    test_section("Test 15: Non-continuation IPC blocking rejected");
+
+    uint8_t ep_msg[KERN_EP_MSG_SIZE];
+    uint8_t ch_msg[KERN_CH_MSG_SIZE];
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    cap_id_t out_caps[IPC_CAPS_MAX];
+    uint8_t out_count = 0;
+
+    for (uint32_t i = 0; i < sizeof(ep_msg); i++) {
+        ep_msg[i] = 0;
+    }
+    for (uint32_t i = 0; i < sizeof(ch_msg); i++) {
+        ch_msg[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        xfers[i].src_cap = KERN_INVALID_ID;
+        xfers[i].rights = 0;
+        xfers[i].flags = 0;
+        out_caps[i] = KERN_INVALID_ID;
+    }
+
+    int err = sys_ep_send_caps(0, ep_msg, xfers, 0, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
+                   "blocking ep_send_caps rejected");
+
+    err = sys_ep_recv_caps(0, ep_msg, out_caps, &out_count, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
+                   "blocking ep_recv_caps rejected");
+
+    err = sys_ch_send(0, ch_msg, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
+                   "blocking ch_send rejected");
+
+    err = sys_ch_recv(0, ch_msg, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
+                   "blocking ch_recv rejected");
+
+    err = sys_ch_send_caps(0, ch_msg, xfers, 0, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
+                   "blocking ch_send_caps rejected");
+
+    err = sys_ch_recv_caps(0, ch_msg, out_caps, &out_count, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
+                   "blocking ch_recv_caps rejected");
+}
+
 /*============================================================================
  * Syscall 测试模块入口
  *============================================================================*/
@@ -268,6 +626,12 @@ static void test_syscall_module(void) {
     test_syscall_r2_integrity();
     test_syscall_bad_user_pointers();
     test_user_endpoint_service_nonblocking();
+    test_user_endpoint_recv_sleep_timeout();
+    test_user_endpoint_send_sleep_reply();
+    test_user_endpoint_send_sleep_timeout();
+    test_user_endpoint_send_sleep_delete();
+    test_user_endpoint_send_nowait_timeout();
+    test_blocking_ipc_syscalls_rejected();
 }
 
 TEST_MODULE_REGISTER(syscall, test_syscall_module);

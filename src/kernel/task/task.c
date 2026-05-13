@@ -285,6 +285,33 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
     return KERN_OK;
 }
 
+static void task_write_saved_svc_r0(tcb_t *tcb, kern_err_t result) {
+    if (tcb == NULL || tcb->sp == NULL) {
+        return;
+    }
+
+    /*
+     * SVC saves R4-R11 below the hardware frame before blocking:
+     *   sp + 0..31  saved R4-R11
+     *   sp + 32     stacked R0
+     */
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
+    *stacked_r0 = (uint32_t)result;
+}
+
+kern_err_t task_cancel_blocked_wait(tcb_t *tcb) {
+    return task_unlink_blocked(tcb);
+}
+
+void task_complete_blocked_syscall(tcb_t *tcb, kern_err_t result) {
+    if (tcb == NULL || tcb->syscall_blocked == 0) {
+        return;
+    }
+
+    task_write_saved_svc_r0(tcb, result);
+    tcb->syscall_blocked = 0;
+}
+
 /*============================================================================
  * 公开接口实现
  *============================================================================*/

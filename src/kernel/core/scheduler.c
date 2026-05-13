@@ -676,6 +676,7 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     tcb->block_reason = BLOCK_REASON_NONE;
     tcb->block_result = result;
     tcb->wake_tick = 0;
+    task_complete_blocked_syscall(tcb, result);
 
     /* 加入就绪队列 */
     tcb->state = TASK_STATE_READY;
@@ -829,6 +830,9 @@ void sched_tick_handler(void) {
         if (tcb && tcb->state == TASK_STATE_BLOCKED &&
             tcb->wake_tick > 0 &&
             tcb->wake_tick <= scheduler.tick_count) {
+            if (tcb->syscall_blocked) {
+                (void)task_cancel_blocked_wait(tcb);
+            }
             sched_wakeup(tcb, KERN_ERR_TIMEOUT);
         }
     }

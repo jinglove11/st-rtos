@@ -38,6 +38,7 @@
     .extern _current_task
     .extern _next_task
     .extern kern_syscall_handler
+    .extern kern_pendsv_handler
     .extern mpu_load_task_regions
 
     .section .text
@@ -124,6 +125,10 @@ SVC_Handler:
     add     sp, sp, #12
     pop     {lr}
 
+    ldr     r1, =-128              /* KERN_SYSCALL_BLOCKED */
+    cmp     r0, r1
+    beq     .L_syscall_blocked
+
     str     r0, [r7]               /* 返回值写入异常帧 R0 */
 
     ldr     r4, =_current_task
@@ -136,6 +141,44 @@ SVC_Handler:
 2:
     ldr     lr, =0xFFFFFFFD
     bx      lr
+
+.L_syscall_blocked:
+    /*
+     * 当前任务已经在 syscall handler 中进入 BLOCKED 状态，且
+     * TCB->sp 指向 saved R4-R11 + hardware exception frame。
+     * 不能返回原用户任务；直接选择下一个任务执行。唤醒方会把最终
+     * 返回值写入该任务保存的异常帧 R0。
+     */
+    push    {lr}
+    bl      kern_pendsv_handler
+    pop     {lr}
+
+    ldr     r0, =_next_task
+    ldr     r0, [r0]
+    cmp     r0, #0
+    beq     .L_svc_halt
+
+    push    {r0, lr}
+    bl      mpu_load_task_regions
+    pop     {r0, lr}
+
+    ldrb    r2, [r0, #96]          /* next_task->attrs */
+    tst     r2, #1                 /* TASK_ATTR_USER? */
+    ite     eq
+    moveq   r2, #2
+    movne   r2, #3
+    msr     control, r2
+    isb
+
+    ldr     r1, [r0]               /* next->sp */
+    ldmia   r1!, {r4-r11}
+    msr     psp, r1
+
+    ldr     lr, =0xFFFFFFFD
+    bx      lr
+
+.L_svc_halt:
+    b       .
 
     .size SVC_Handler, . - SVC_Handler
     .end

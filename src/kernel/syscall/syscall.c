@@ -44,6 +44,16 @@
 #define SYSCALL_PATH_MAX   128
 #define SYSCALL_IO_CHUNK    64
 
+/*
+ * Blocking IPC primitives still resume in their C caller after wakeup.  That is
+ * safe from thread mode, but not from SVC handler mode because PendSV cannot run
+ * while the handler is spinning.  Until P3-7 syscall continuations land, user
+ * IPC syscalls must use nonblocking timeout==0 semantics.
+ */
+static kern_err_t syscall_reject_blocking_ipc(uint32_t timeout) {
+    return (timeout == 0) ? KERN_OK : KERN_ERR_BUSY;
+}
+
 /*============================================================================
  * 任务管理
  *============================================================================*/
@@ -481,57 +491,19 @@ static int sys_ep_send(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return endpoint_send((ep_id_t)((uintptr_t)obj - 1), msg, a3);
+    return endpoint_send_syscall((ep_id_t)((uintptr_t)obj - 1),
+                                 msg,
+                                 (void *)(uintptr_t)a2,
+                                 a3);
 #else
-    return endpoint_send((ep_id_t)a1, msg, a3);
+    return endpoint_send_syscall((ep_id_t)a1, msg, (void *)(uintptr_t)a2, a3);
 #endif
 }
 
 static int sys_ep_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a6);
-    uint8_t cap_count = (uint8_t)a4;
-    uint8_t msg[KERN_EP_MSG_SIZE];
-    ipc_cap_xfer_t caps[IPC_CAPS_MAX];
-    const ipc_cap_xfer_t *caps_arg = NULL;
-
-    if (cap_count > IPC_CAPS_MAX) {
-        return KERN_ERR_PARAM;
-    }
-    if (!user_access_ok((const void *)(uintptr_t)a2, KERN_EP_MSG_SIZE, USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-    if (cap_count > 0 &&
-        !user_access_ok((const void *)(uintptr_t)a3,
-                        sizeof(ipc_cap_xfer_t) * cap_count,
-                        USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-    kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
-                                         sizeof(msg));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
-    if (cap_count > 0) {
-        copy_err = copy_from_user(caps, (const void *)(uintptr_t)a3,
-                                  sizeof(ipc_cap_xfer_t) * cap_count);
-        if (copy_err != KERN_OK) {
-            return copy_err;
-        }
-        caps_arg = caps;
-    }
-#if CAP_ENABLE
-    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
-    if (!obj) return KERN_ERR_CAP;
-    return endpoint_send_caps((ep_id_t)((uintptr_t)obj - 1),
-                              msg,
-                              caps_arg,
-                              cap_count, a5);
-#else
-    return endpoint_send_caps((ep_id_t)a1, msg,
-                              caps_arg,
-                              cap_count, a5);
-#endif
+    U6;
+    return KERN_ERR_BUSY;
 }
 
 static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -542,6 +514,18 @@ static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
     if (!user_access_ok((void *)(uintptr_t)a2, KERN_EP_MSG_SIZE, USER_ACCESS_WRITE)) {
         return KERN_ERR_PARAM;
     }
+
+    if (a3 != 0) {
+#if CAP_ENABLE
+        void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
+        if (!obj) return KERN_ERR_CAP;
+        return endpoint_recv_syscall((ep_id_t)((uintptr_t)obj - 1),
+                                     (void *)(uintptr_t)a2, a3);
+#else
+        return endpoint_recv_syscall((ep_id_t)a1, (void *)(uintptr_t)a2, a3);
+#endif
+    }
+
     memset(msg, 0, sizeof(msg));
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
@@ -558,46 +542,8 @@ static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_ep_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a6);
-    uint8_t msg[KERN_EP_MSG_SIZE];
-    cap_id_t caps[IPC_CAPS_MAX];
-    uint8_t cap_count = 0;
-
-    if (!user_access_ok((void *)(uintptr_t)a2, KERN_EP_MSG_SIZE, USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-    if (!user_access_ok((void *)(uintptr_t)a3,
-                        sizeof(cap_id_t) * IPC_CAPS_MAX,
-                        USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-    if (!user_access_ok((void *)(uintptr_t)a4, sizeof(uint8_t),
-                        USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-    memset(msg, 0, sizeof(msg));
-    memset(caps, 0, sizeof(caps));
-#if CAP_ENABLE
-    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
-    if (!obj) return KERN_ERR_CAP;
-    kern_err_t ret = endpoint_recv_caps((ep_id_t)((uintptr_t)obj - 1), msg,
-                                        caps, &cap_count, a5);
-#else
-    kern_err_t ret = endpoint_recv_caps((ep_id_t)a1, msg,
-                                        caps, &cap_count, a5);
-#endif
-    if (ret != KERN_OK) {
-        return ret;
-    }
-    ret = copy_to_user((void *)(uintptr_t)a2, msg, sizeof(msg));
-    if (ret != KERN_OK) {
-        return ret;
-    }
-    ret = copy_to_user((void *)(uintptr_t)a3, caps, sizeof(caps));
-    if (ret != KERN_OK) {
-        return ret;
-    }
-    return copy_to_user((void *)(uintptr_t)a4, &cap_count, sizeof(cap_count));
+    U6;
+    return KERN_ERR_BUSY;
 }
 
 static int sys_ep_reply(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -682,6 +628,10 @@ static int sys_ch_send(uint32_t a1, uint32_t a2, uint32_t a3,
     if (copy_err != KERN_OK) {
         return copy_err;
     }
+    kern_err_t sleep_err = syscall_reject_blocking_ipc(a3);
+    if (sleep_err != KERN_OK) {
+        return sleep_err;
+    }
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
@@ -693,49 +643,8 @@ static int sys_ch_send(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_ch_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a6);
-    uint8_t cap_count = (uint8_t)a4;
-    uint8_t msg[KERN_CH_MSG_SIZE];
-    ipc_cap_xfer_t caps[IPC_CAPS_MAX];
-    const ipc_cap_xfer_t *caps_arg = NULL;
-
-    if (cap_count > IPC_CAPS_MAX) {
-        return KERN_ERR_PARAM;
-    }
-    if (!user_access_ok((const void *)(uintptr_t)a2, KERN_CH_MSG_SIZE, USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-    if (cap_count > 0 &&
-        !user_access_ok((const void *)(uintptr_t)a3,
-                        sizeof(ipc_cap_xfer_t) * cap_count,
-                        USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-    kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
-                                         sizeof(msg));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
-    if (cap_count > 0) {
-        copy_err = copy_from_user(caps, (const void *)(uintptr_t)a3,
-                                  sizeof(ipc_cap_xfer_t) * cap_count);
-        if (copy_err != KERN_OK) {
-            return copy_err;
-        }
-        caps_arg = caps;
-    }
-#if CAP_ENABLE
-    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
-    if (!obj) return KERN_ERR_CAP;
-    return channel_send_caps((ch_id_t)((uintptr_t)obj - 1),
-                             msg,
-                             caps_arg,
-                             cap_count, a5);
-#else
-    return channel_send_caps((ch_id_t)a1, msg,
-                             caps_arg,
-                             cap_count, a5);
-#endif
+    U6;
+    return KERN_ERR_BUSY;
 }
 
 static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -745,6 +654,10 @@ static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 
     if (!user_access_ok((void *)(uintptr_t)a2, KERN_CH_MSG_SIZE, USER_ACCESS_WRITE)) {
         return KERN_ERR_PARAM;
+    }
+    kern_err_t sleep_err = syscall_reject_blocking_ipc(a3);
+    if (sleep_err != KERN_OK) {
+        return sleep_err;
     }
     memset(msg, 0, sizeof(msg));
 #if CAP_ENABLE
@@ -762,46 +675,8 @@ static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_ch_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a6);
-    uint8_t msg[KERN_CH_MSG_SIZE];
-    cap_id_t caps[IPC_CAPS_MAX];
-    uint8_t cap_count = 0;
-
-    if (!user_access_ok((void *)(uintptr_t)a2, KERN_CH_MSG_SIZE, USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-    if (!user_access_ok((void *)(uintptr_t)a3,
-                        sizeof(cap_id_t) * IPC_CAPS_MAX,
-                        USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-    if (!user_access_ok((void *)(uintptr_t)a4, sizeof(uint8_t),
-                        USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-    memset(msg, 0, sizeof(msg));
-    memset(caps, 0, sizeof(caps));
-#if CAP_ENABLE
-    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
-    if (!obj) return KERN_ERR_CAP;
-    kern_err_t ret = channel_recv_caps((ch_id_t)((uintptr_t)obj - 1), msg,
-                                       caps, &cap_count, a5);
-#else
-    kern_err_t ret = channel_recv_caps((ch_id_t)a1, msg,
-                                       caps, &cap_count, a5);
-#endif
-    if (ret != KERN_OK) {
-        return ret;
-    }
-    ret = copy_to_user((void *)(uintptr_t)a2, msg, sizeof(msg));
-    if (ret != KERN_OK) {
-        return ret;
-    }
-    ret = copy_to_user((void *)(uintptr_t)a3, caps, sizeof(caps));
-    if (ret != KERN_OK) {
-        return ret;
-    }
-    return copy_to_user((void *)(uintptr_t)a4, &cap_count, sizeof(cap_count));
+    U6;
+    return KERN_ERR_BUSY;
 }
 
 static int sys_ch_get_shm(uint32_t a1, uint32_t a2, uint32_t a3,

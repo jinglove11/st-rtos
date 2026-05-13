@@ -152,7 +152,8 @@ typedef struct tcb {
 
     // --- MPU 内存保护 (Phase 1) ---
     uint8_t     attrs;                // TASK_ATTR_PRIVILEGED / TASK_ATTR_USER
-    uint8_t     _pad1[3];             // 4 字节对齐
+    uint8_t     syscall_blocked;      // blocked inside SVC, resume via saved frame
+    uint8_t     _pad1[2];             // 4 字节对齐
 #if MPU_ENABLE
     uint32_t    mpu_regions[8][2];   // MPU region [RBAR, RASR] x 8
 #endif

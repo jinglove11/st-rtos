@@ -11,6 +11,8 @@
 
 #include "kernel_types.h"
 
+#define KERN_SYSCALL_BLOCKED    (-128)
+
 #if SYSCALL_ENABLE
 
 /*============================================================================

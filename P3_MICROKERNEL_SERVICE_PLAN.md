@@ -1,6 +1,7 @@
 # My-RTOS P3 Microkernel Service Plan
 
-Status: detailed execution plan, P3-1 implementation started.
+Status: P3-1 through P3-7 implemented and board-validated for the current
+STM32F767 scope.
 
 Scope: STM32F767 mainline. P3 starts from the P2 service diagnostics baseline.
 P3 does not move every kernel service to user space at once. It first builds
@@ -112,8 +113,8 @@ kern_err_t strncpy_from_user(char *dst, const char *user_src, uint32_t max_len);
 - Done: added focused `test_usercopy` coverage and bad syscall pointer tests.
 - Done: converted mqueue, endpoint, and channel IPC payload/cap-transfer syscall
   paths to kernel bounce buffers.
-- Remaining: define command-specific `ioctl` pointer policy if device ioctls start
-  accepting user buffers.
+- Deferred: command-specific `ioctl` pointer policy, only needed when device
+  ioctls start accepting user buffers.
 
 ## P3-2: Fault Cleanup And Task Death Contract
 
@@ -172,7 +173,7 @@ kern_err_t task_terminate_with_result(tcb_t *task, kern_err_t result);
 - Done: `task_join()` now reports fault termination distinctly from normal exit.
 - Done: added fd ref cleanup coverage for a faulted user task.
 - Done: added cap revoke coverage for a faulted user task.
-- Remaining: board-run validation for the new fault result contract.
+- Done: board-run validation passed for the fault result and cleanup contract.
 
 ## P3-3: Timer/BH/IRQ Running-State Deletion
 
@@ -242,7 +243,7 @@ Threaded IRQ:
 - Done: delete requested from a timer callback prevents periodic reinsertion
   and blocks later start/reset/change calls.
 - Done: added timer delete-while-running regression coverage.
-- Remaining: board-run validation for timer delete-pending changes.
+- Done: board-run validation passed for timer delete-pending changes.
 
 ## P3-4: Endpoint Request/Reply Contract
 
@@ -382,17 +383,101 @@ using endpoint/cap/syscall contracts, while preserving kernel fallback paths.
 
 ### Progress
 
-- Constraint: blocking endpoint syscalls currently sleep inside the SVC handler
-  path (`endpoint_send/recv` wait loops). This can deadlock because the handler
-  does not return to thread mode before waiting.
-- Reverted: the first user endpoint service regression test was removed until
-  P3-6 adds a safe sleepable-syscall or async IPC syscall contract.
-- Done: adopted the P3-6 phase-A contract: user services use nonblocking IPC
-  syscalls (`timeout == 0`) until sleepable syscall continuations exist.
-- Done: re-enabled the first user endpoint service test with nonblocking
-  `sys_ep_recv`; the kernel test client uses direct endpoint send from thread
-  mode so scheduling remains safe.
-- Remaining: board-run validation for the nonblocking user-space service path.
+- Done: first user endpoint service path was enabled through endpoint syscall
+  contracts.
+- Done: original SVC-handler blocking risk was closed by P3-7 sleepable syscall
+  continuations for normal endpoint send/recv.
+- Done: board-run validation passed for the user-space service path.
+
+## P3-7: Sleepable Syscall Continuations
+
+Priority: P1.
+
+### Problem
+
+Several kernel primitives still block by setting the current task state and then
+spinning in the C caller until wakeup. That is acceptable for kernel thread-mode
+callers, but unsafe for user syscalls because PendSV cannot switch away while
+the CPU is still inside the SVC handler.
+
+### Files
+
+- `src/arch/arm/cortex-m7/svc_handler.S`
+- `src/kernel/syscall/syscall.c`
+- `src/kernel/task/task.c`
+- `src/kernel/task/task.h`
+- `src/kernel/core/scheduler.c`
+- `src/kernel/ipc/endpoint.c`
+- `src/kernel/ipc/channel.c`
+- `src/tests/test_syscall.c`
+
+### Target Model
+
+- A syscall handler may return a distinguished "blocked" internal result after
+  it has placed the current task on an object wait queue.
+- The SVC frame remains stored in `tcb->sp`; the task does not return to user
+  mode until the scheduler wakes it.
+- Wakeup writes the final result into the saved SVC R0 slot.
+- Syscalls that need copy-out after wakeup register a small continuation record
+  owned by the blocked task.
+- Timeout/delete paths call object-specific cancel hooks before wakeup so wait
+  queues do not retain stale tasks.
+
+### Continuation Scope
+
+Initial implementation should cover only endpoint request/reply:
+
+- `sys_ep_send`: request payload copied in before block; reply copied out by
+  endpoint reply or continuation before client wakeup.
+- `sys_ep_recv`: pending receive stores the user output buffer and cap output
+  buffers; sender delivery completes the copy-out before server wakeup.
+- `sys_ep_reply`: remains nonblocking.
+
+Channel, semaphore, mutex, mqueue, event, and VFS blocking syscalls can stay
+nonblocking-only until their continuation ownership rules are explicit.
+
+### Acceptance
+
+- User task can call `sys_ep_recv(ep, buf, timeout)` and sleep without SVC
+  deadlock.
+- User client can call `sys_ep_send(ep, buf, timeout)` and sleep until reply.
+- Timeout removes the task from endpoint wait queues and returns
+  `KERN_ERR_TIMEOUT` through the saved SVC frame.
+- Endpoint delete wakes blocked syscall tasks with `KERN_ERR_NOEXIST`.
+- Existing nonblocking user service test remains valid.
+
+### Progress
+
+- Done: added `KERN_SYSCALL_BLOCKED` as an internal SVC/syscall handoff result.
+- Done: SVC #1 now switches directly to the next task when a syscall blocks,
+  instead of returning to the blocked user task.
+- Done: task wakeup writes the final result into the saved SVC exception frame
+  R0 before the task resumes.
+- Done: endpoint recv syscall can sleep with `timeout > 0`; sender delivery
+  copies the request into the validated user buffer and binds reply authority.
+- Done: endpoint recv timeout path removes stale wait queue state before
+  returning `KERN_ERR_TIMEOUT`.
+- Done: added board-facing tests for sleepable user endpoint recv success and
+  timeout.
+- Done: endpoint send syscall now sleeps until server reply and uses the
+  previously validated user buffer as the reply target.
+- Done: `sys_ep_send(..., timeout == 0)` is fail-fast with
+  `KERN_ERR_TIMEOUT`; nonzero timeout is required for reply wait.
+- Done: added board-facing coverage for user client sleepable send and kernel
+  server reply.
+- Done: endpoint delete clears sleepable send continuation state before waking
+  blocked clients with `KERN_ERR_NOEXIST`.
+- Done: added board-facing coverage for sleepable send timeout and endpoint
+  delete while a user client is waiting for reply.
+- Done: added board-facing coverage that `sys_ep_send(..., timeout == 0)`
+  returns `KERN_ERR_TIMEOUT` without entering the sleepable path.
+- Done: added board-facing coverage that ep caps and channel syscalls reject
+  `timeout > 0` with `KERN_ERR_BUSY` until their continuation ownership rules
+  are implemented.
+- Deferred: endpoint cap-transfer continuation support until cap
+  output ownership and rollback can be represented in the blocked syscall state.
+- Deferred: channel continuation support until peer-buffer and
+  shared-memory ownership rules are explicit.
 
 ## Execution Order
 
@@ -402,6 +487,7 @@ using endpoint/cap/syscall contracts, while preserving kernel fallback paths.
 4. P3-4 endpoint request/reply contract.
 5. P3-5 device event notification.
 6. P3-6 first user-space service candidate.
+7. P3-7 sleepable syscall continuations.
 
 ## Checkpoints
 

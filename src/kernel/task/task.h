@@ -47,6 +47,8 @@ void task_exit(void *retval) __attribute__((noreturn));
 kern_err_t task_exit_request(void *retval);
 kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result);
 void task_terminate(tcb_t *tcb);
+kern_err_t task_cancel_blocked_wait(tcb_t *tcb);
+void task_complete_blocked_syscall(tcb_t *tcb, kern_err_t result);
 
 /**
  * @brief 挂起任务

@@ -17,12 +17,17 @@ void endpoint_init(void);
 ep_id_t    endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pending);
 kern_err_t endpoint_delete(ep_id_t ep_id);
 kern_err_t endpoint_send(ep_id_t ep_id, void *msg, uint32_t timeout);
+kern_err_t endpoint_send_syscall(ep_id_t ep_id,
+                                 const void *msg,
+                                 void *user_reply_msg,
+                                 uint32_t timeout);
 kern_err_t endpoint_send_caps(ep_id_t ep_id,
                               void *msg,
                               const ipc_cap_xfer_t *caps,
                               uint8_t cap_count,
                               uint32_t timeout);
 kern_err_t endpoint_recv(ep_id_t ep_id, void *msg, uint32_t timeout);
+kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout);
 kern_err_t endpoint_recv_caps(ep_id_t ep_id,
                               void *msg,
                               cap_id_t *out_caps,
