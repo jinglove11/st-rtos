@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "syscall.h"
 #include <string.h>
 
 /*============================================================================
@@ -329,6 +330,85 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
 
     return result;
 }
+
+#if SYSCALL_ENABLE
+kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
+    uint32_t crit = hal_enter_critical();
+
+    mutex_t *mutex = mutex_get(mutex_id);
+    if (mutex == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    if (mutex->owner == KERN_INVALID_ID) {
+        mutex->owner = current->id;
+        mutex->lock_count = 1;
+        mutex->owner_original_prio = current->priority;
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (mutex->owner == current->id) {
+        mutex->lock_count++;
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    if (hal_irq_get_active() >= 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_ISR;
+    }
+
+#if MUTEX_DEADLOCK_DETECT
+    if (mutex_would_deadlock(mutex, current)) {
+        hal_exit_critical(crit);
+        return KERN_ERR_DEADLOCK;
+    }
+#endif
+
+#if KERN_MUTEX_PI
+    mutex_priority_inherit(mutex, current);
+
+    extern tcb_t *task_get_tcb(task_id_t task_id);
+    tcb_t *owner = task_get_tcb(mutex->owner);
+    if (owner && owner->state == TASK_STATE_RUNNING) {
+        extern void sched_add_ready(tcb_t *tcb);
+        owner->state = TASK_STATE_READY;
+        sched_add_ready(owner);
+    }
+#endif
+
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_MUTEX;
+    current->block_obj = mutex;
+    current->block_result = KERN_OK;
+    wait_queue_add(&mutex->wait_queue, current);
+
+    sched_remove_ready(current);
+    current->state = TASK_STATE_BLOCKED;
+
+    if (timeout > 0) {
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
 
 kern_err_t mutex_trylock(mutex_id_t mutex_id) {
     uint32_t crit = hal_enter_critical();

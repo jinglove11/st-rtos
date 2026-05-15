@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "syscall.h"
 #include <string.h>
 
 /*============================================================================
@@ -20,6 +21,12 @@ static uint32_t mqueue_used_bitmap;
 // 消息缓冲区池 (每个队列独立缓冲区)
 static uint8_t mqueue_buffers[KERN_MAX_MQUEUES][KERN_MQUEUE_DEPTH * KERN_MSG_MAX_SIZE]
     __attribute__((aligned(4)));
+
+#if SYSCALL_ENABLE
+static uint8_t mqueue_syscall_send_msg[KERNEL_MAX_TASKS][KERN_MSG_MAX_SIZE]
+    __attribute__((aligned(4)));
+static void *mqueue_syscall_recv_msg[KERNEL_MAX_TASKS];
+#endif
 
 /*============================================================================
  * 内部函数
@@ -72,6 +79,65 @@ static void mqueue_do_get(mqueue_t *mq, void *msg) {
     mq->count--;
 }
 
+static void mqueue_wake_recv_waiter(mqueue_t *mq) {
+    if (mq->recv_queue.count == 0 || mq->count == 0) {
+        return;
+    }
+
+    tcb_t *tcb = wait_queue_get_highest(&mq->recv_queue);
+    if (tcb == NULL) {
+        return;
+    }
+
+#if SYSCALL_ENABLE
+    if (tcb->syscall_blocked &&
+        tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS &&
+        mqueue_syscall_recv_msg[tcb->id] != NULL) {
+        mqueue_do_get(mq, mqueue_syscall_recv_msg[tcb->id]);
+        mqueue_syscall_recv_msg[tcb->id] = NULL;
+        wait_queue_remove(&mq->recv_queue, tcb);
+        tcb->block_result = KERN_OK;
+        tcb->block_obj = NULL;
+        sched_wakeup(tcb, KERN_OK);
+        return;
+    }
+#endif
+
+    wait_queue_remove(&mq->recv_queue, tcb);
+    tcb->block_result = KERN_OK;
+    tcb->block_obj = NULL;
+    sched_wakeup(tcb, KERN_OK);
+}
+
+static void mqueue_wake_send_waiter(mqueue_t *mq) {
+    if (mq->send_queue.count == 0 || mq->count >= mq->capacity) {
+        return;
+    }
+
+    tcb_t *tcb = wait_queue_get_highest(&mq->send_queue);
+    if (tcb == NULL) {
+        return;
+    }
+
+#if SYSCALL_ENABLE
+    if (tcb->syscall_blocked &&
+        tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
+        mqueue_do_put(mq, mqueue_syscall_send_msg[tcb->id]);
+        wait_queue_remove(&mq->send_queue, tcb);
+        tcb->block_result = KERN_OK;
+        tcb->block_obj = NULL;
+        sched_wakeup(tcb, KERN_OK);
+        mqueue_wake_recv_waiter(mq);
+        return;
+    }
+#endif
+
+    wait_queue_remove(&mq->send_queue, tcb);
+    tcb->block_result = KERN_OK;
+    tcb->block_obj = NULL;
+    sched_wakeup(tcb, KERN_OK);
+}
+
 /*============================================================================
  * 公开接口实现
  *============================================================================*/
@@ -79,6 +145,10 @@ static void mqueue_do_get(mqueue_t *mq, void *msg) {
 void mqueue_init(void) {
     memset(mqueue_pool, 0, sizeof(mqueue_pool));
     mqueue_used_bitmap = 0;
+#if SYSCALL_ENABLE
+    memset(mqueue_syscall_send_msg, 0, sizeof(mqueue_syscall_send_msg));
+    memset(mqueue_syscall_recv_msg, 0, sizeof(mqueue_syscall_recv_msg));
+#endif
 }
 
 queue_id_t mqueue_create(uint32_t msg_size, uint32_t capacity) {
@@ -130,6 +200,12 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
+#if SYSCALL_ENABLE
+        if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
+            memset(mqueue_syscall_send_msg[tcb->id], 0,
+                   sizeof(mqueue_syscall_send_msg[tcb->id]));
+        }
+#endif
         tcb->block_result = KERN_ERR_NOEXIST;
         tcb->block_obj = NULL;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
@@ -142,6 +218,11 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
+#if SYSCALL_ENABLE
+        if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
+            mqueue_syscall_recv_msg[tcb->id] = NULL;
+        }
+#endif
         tcb->block_result = KERN_ERR_NOEXIST;
         tcb->block_obj = NULL;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
@@ -168,15 +249,7 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
     if (mq->count < mq->capacity) {
         mqueue_do_put(mq, msg);
 
-        if (mq->recv_queue.count > 0) {
-            tcb_t *tcb = wait_queue_get_highest(&mq->recv_queue);
-            if (tcb) {
-                wait_queue_remove(&mq->recv_queue, tcb);
-                tcb->block_result = KERN_OK;
-                tcb->block_obj = NULL;
-                sched_wakeup(tcb, KERN_OK);
-            }
-        }
+        mqueue_wake_recv_waiter(mq);
 
         hal_exit_critical(crit);
         return KERN_OK;
@@ -247,6 +320,67 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
     return result;
 }
 
+#if SYSCALL_ENABLE
+kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
+                               uint32_t timeout) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL || msg == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (mq->count < mq->capacity) {
+        mqueue_do_put(mq, msg);
+        mqueue_wake_recv_waiter(mq);
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    if (hal_irq_get_active() >= 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_ISR;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    memcpy(mqueue_syscall_send_msg[current->id], msg, mq->msg_size);
+
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_QUEUE;
+    current->block_obj = mq;
+    current->block_result = KERN_OK;
+    wait_queue_add(&mq->send_queue, current);
+
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    current->state = TASK_STATE_BLOCKED;
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
+
 kern_err_t mqueue_trysend(queue_id_t queue_id, const void *msg) {
     uint32_t crit = hal_enter_critical();
 
@@ -264,15 +398,7 @@ kern_err_t mqueue_trysend(queue_id_t queue_id, const void *msg) {
     mqueue_do_put(mq, msg);
 
     // 检查是否有任务在等待接收
-    if (mq->recv_queue.count > 0) {
-        tcb_t *tcb = wait_queue_get_highest(&mq->recv_queue);
-        if (tcb) {
-            wait_queue_remove(&mq->recv_queue, tcb);
-            tcb->block_result = KERN_OK;
-            tcb->block_obj = NULL;
-            sched_wakeup(tcb, KERN_OK);
-        }
-    }
+    mqueue_wake_recv_waiter(mq);
 
     hal_exit_critical(crit);
     return KERN_OK;
@@ -290,15 +416,7 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
     if (mq->count > 0) {
         mqueue_do_get(mq, msg);
 
-        if (mq->send_queue.count > 0) {
-            tcb_t *tcb = wait_queue_get_highest(&mq->send_queue);
-            if (tcb) {
-                wait_queue_remove(&mq->send_queue, tcb);
-                tcb->block_result = KERN_OK;
-                tcb->block_obj = NULL;
-                sched_wakeup(tcb, KERN_OK);
-            }
-        }
+        mqueue_wake_send_waiter(mq);
 
         hal_exit_critical(crit);
         return KERN_OK;
@@ -378,6 +496,66 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
     return result;
 }
 
+#if SYSCALL_ENABLE
+kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
+                               uint32_t timeout) {
+    uint32_t crit = hal_enter_critical();
+
+    mqueue_t *mq = get_mqueue(queue_id);
+    if (mq == NULL || user_msg == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (mq->count > 0) {
+        mqueue_do_get(mq, user_msg);
+        mqueue_wake_send_waiter(mq);
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    if (hal_irq_get_active() >= 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_ISR;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    mqueue_syscall_recv_msg[current->id] = user_msg;
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_QUEUE;
+    current->block_obj = mq;
+    current->block_result = KERN_OK;
+    wait_queue_add(&mq->recv_queue, current);
+
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    current->state = TASK_STATE_BLOCKED;
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
+
 kern_err_t mqueue_tryrecv(queue_id_t queue_id, void *msg) {
     uint32_t crit = hal_enter_critical();
 
@@ -395,15 +573,7 @@ kern_err_t mqueue_tryrecv(queue_id_t queue_id, void *msg) {
     mqueue_do_get(mq, msg);
 
     // 检查是否有任务在等待发送
-    if (mq->send_queue.count > 0) {
-        tcb_t *tcb = wait_queue_get_highest(&mq->send_queue);
-        if (tcb) {
-            wait_queue_remove(&mq->send_queue, tcb);
-            tcb->block_result = KERN_OK;
-            tcb->block_obj = NULL;
-            sched_wakeup(tcb, KERN_OK);
-        }
-    }
+    mqueue_wake_send_waiter(mq);
 
     hal_exit_critical(crit);
     return KERN_OK;

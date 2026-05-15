@@ -40,6 +40,17 @@ kern_err_t mqueue_delete(queue_id_t queue_id);
  */
 kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout);
 
+#if SYSCALL_ENABLE
+/**
+ * @brief 发送消息的 syscall continuation 版本
+ *
+ * 用户态阻塞时不能停在 SVC 调用栈内等待；该接口会保存必要状态并返回
+ * KERN_SYSCALL_BLOCKED，后续由调度器写回 syscall 返回值。
+ */
+kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
+                               uint32_t timeout);
+#endif
+
 /**
  * @brief 尝试发送消息 (非阻塞)
  * @param queue_id 消息队列 ID
@@ -56,6 +67,14 @@ kern_err_t mqueue_trysend(queue_id_t queue_id, const void *msg);
  * @return KERN_OK 成功, KERN_ERR_TIMEOUT 超时, 其他失败
  */
 kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout);
+
+#if SYSCALL_ENABLE
+/**
+ * @brief 接收消息的 syscall continuation 版本
+ */
+kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
+                               uint32_t timeout);
+#endif
 
 /**
  * @brief 尝试接收消息 (非阻塞)

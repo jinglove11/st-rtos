@@ -830,10 +830,13 @@ void sched_tick_handler(void) {
         if (tcb && tcb->state == TASK_STATE_BLOCKED &&
             tcb->wake_tick > 0 &&
             tcb->wake_tick <= scheduler.tick_count) {
+            kern_err_t wake_result =
+                (tcb->block_reason == BLOCK_REASON_SLEEP) ? KERN_OK :
+                                                            KERN_ERR_TIMEOUT;
             if (tcb->syscall_blocked) {
                 (void)task_cancel_blocked_wait(tcb);
             }
-            sched_wakeup(tcb, KERN_ERR_TIMEOUT);
+            sched_wakeup(tcb, wake_result);
         }
     }
 

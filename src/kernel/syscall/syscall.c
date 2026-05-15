@@ -20,6 +20,7 @@
 #include "kernel_config.h"
 #include "mpu.h"
 #include "usercopy.h"
+#include "hal.h"
 #include <string.h>
 
 #if CAP_ENABLE
@@ -44,6 +45,11 @@
 #define SYSCALL_PATH_MAX   128
 #define SYSCALL_IO_CHUNK    64
 
+static int syscall_current_is_user(void) {
+    tcb_t *cur = sched_get_current();
+    return cur != NULL && (cur->attrs & TASK_ATTR_USER) != 0;
+}
+
 /*
  * Blocking IPC primitives still resume in their C caller after wakeup.  That is
  * safe from thread mode, but not from SVC handler mode because PendSV cannot run
@@ -52,6 +58,31 @@
  */
 static kern_err_t syscall_reject_blocking_ipc(uint32_t timeout) {
     return (timeout == 0) ? KERN_OK : KERN_ERR_BUSY;
+}
+
+static kern_err_t syscall_block_sleep(uint32_t ticks) {
+    tcb_t *cur = sched_get_current();
+    if (cur == NULL) {
+        return KERN_ERR_STATE;
+    }
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+    if (ticks == 0) {
+        return KERN_OK;
+    }
+
+    uint32_t crit = hal_enter_critical();
+    sched_remove_ready(cur);
+    cur->syscall_blocked = 1;
+    cur->state = TASK_STATE_BLOCKED;
+    cur->block_reason = BLOCK_REASON_SLEEP;
+    cur->block_obj = NULL;
+    cur->block_result = KERN_OK;
+    cur->wake_tick = sched_get_tick_count() + ticks;
+    hal_exit_critical(crit);
+
+    return KERN_SYSCALL_BLOCKED;
 }
 
 /*============================================================================
@@ -66,7 +97,7 @@ static int sys_task_yield(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_task_delay(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
-    return task_delay(a1);
+    return syscall_block_sleep(a1);
 }
 
 static int sys_task_exit(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -130,19 +161,42 @@ static int sys_task_start(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_task_suspend(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
+    if (!obj) return KERN_ERR_CAP;
+    return task_suspend((task_id_t)((uintptr_t)obj - 1));
+#else
     return task_suspend((task_id_t)a1);
+#endif
 }
 
 static int sys_task_resume(uint32_t a1, uint32_t a2, uint32_t a3,
                                    uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
+    if (!obj) return KERN_ERR_CAP;
+    return task_resume((task_id_t)((uintptr_t)obj - 1));
+#else
     return task_resume((task_id_t)a1);
+#endif
 }
 
 static int sys_task_delete(uint32_t a1, uint32_t a2, uint32_t a3,
                                    uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
+    if (!obj) return KERN_ERR_CAP;
+    task_id_t id = (task_id_t)((uintptr_t)obj - 1);
+    kern_err_t ret = task_delete(id);
+    if (ret == KERN_OK) {
+        cap_delete((cap_id_t)a1);
+    }
+    return ret;
+#else
     return task_delete((task_id_t)a1);
+#endif
 }
 
 static int sys_task_self(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -176,9 +230,9 @@ static int sys_sem_wait(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_SEMAPHORE, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return sem_wait((sem_id_t)((uintptr_t)obj - 1), a2);
+    return sem_wait_syscall((sem_id_t)((uintptr_t)obj - 1), a2);
 #else
-    return sem_wait((sem_id_t)a1, a2);
+    return sem_wait_syscall((sem_id_t)a1, a2);
 #endif
 }
 
@@ -235,9 +289,9 @@ static int sys_mutex_lock(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MUTEX, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return mutex_lock((mutex_id_t)((uintptr_t)obj - 1), a2);
+    return mutex_lock_syscall((mutex_id_t)((uintptr_t)obj - 1), a2);
 #else
-    return mutex_lock((mutex_id_t)a1, a2);
+    return mutex_lock_syscall((mutex_id_t)a1, a2);
 #endif
 }
 
@@ -289,9 +343,9 @@ static int sys_mqueue_send(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return mqueue_send((queue_id_t)((uintptr_t)obj - 1), msg, a3);
+    return mqueue_send_syscall((queue_id_t)((uintptr_t)obj - 1), msg, a3);
 #else
-    return mqueue_send((queue_id_t)a1, msg, a3);
+    return mqueue_send_syscall((queue_id_t)a1, msg, a3);
 #endif
 }
 
@@ -303,6 +357,17 @@ static int sys_mqueue_recv(uint32_t a1, uint32_t a2, uint32_t a3,
     if (!user_access_ok((void *)(uintptr_t)a2, KERN_MSG_MAX_SIZE, USER_ACCESS_WRITE)) {
         return KERN_ERR_PARAM;
     }
+    if (a3 != 0) {
+#if CAP_ENABLE
+        void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_READ);
+        if (!obj) return KERN_ERR_CAP;
+        return mqueue_recv_syscall((queue_id_t)((uintptr_t)obj - 1),
+                                   (void *)(uintptr_t)a2, a3);
+#else
+        return mqueue_recv_syscall((queue_id_t)a1, (void *)(uintptr_t)a2, a3);
+#endif
+    }
+
     memset(msg, 0, sizeof(msg));
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_READ);
@@ -701,6 +766,11 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a5);U(a6);
     char name_buf[TIMER_NAME_LEN];
+
+    if (syscall_current_is_user()) {
+        return KERN_ERR_PERM;
+    }
+
     kern_err_t copy_err = strncpy_from_user(name_buf,
                                             (const char *)(uintptr_t)a1,
                                             sizeof(name_buf));
@@ -785,18 +855,31 @@ static int sys_mem_free(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_irq_register(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a4);U(a5);U(a6);
+    if (syscall_current_is_user()) {
+        return KERN_ERR_PERM;
+    }
     return irq_register((int16_t)a1, (isr_func_t)a2, (uint8_t)a3);
 }
 
 static int sys_bh_create(uint32_t a1, uint32_t a2, uint32_t a3,
                                  uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a3);U(a4);U(a5);U(a6);
+    if (syscall_current_is_user()) {
+        return KERN_ERR_PERM;
+    }
     return (kern_err_t)bh_create((bh_handler_t)a1, (void *)a2);
 }
 
 static int sys_bh_schedule(uint32_t a1, uint32_t a2, uint32_t a3,
                                    uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    if (syscall_current_is_user()) {
+        void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_BH, CAP_WRITE);
+        if (!obj) return KERN_ERR_CAP;
+        return bh_schedule((int16_t)((uintptr_t)obj - 1));
+    }
+#endif
     return bh_schedule((int16_t)a1);
 }
 

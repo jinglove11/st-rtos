@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "syscall.h"
 #include <string.h>
 
 /*============================================================================
@@ -183,6 +184,57 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
 
     return result;
 }
+
+#if SYSCALL_ENABLE
+kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+
+    uint32_t crit = hal_enter_critical();
+
+    sem_t *sem = sem_get(sem_id);
+    if (sem == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (sem->count > 0) {
+        sem->count--;
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_SEM;
+    current->block_obj = sem;
+    current->block_result = KERN_OK;
+    wait_queue_add(&sem->wait_queue, current);
+
+    sched_remove_ready(current);
+    current->state = TASK_STATE_BLOCKED;
+
+    if (timeout > 0) {
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
 
 kern_err_t sem_trywait(sem_id_t sem_id) {
     uint32_t crit = hal_enter_critical();

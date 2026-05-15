@@ -39,6 +39,16 @@ kern_err_t sem_delete(sem_id_t sem_id);
  */
 kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout);
 
+#if SYSCALL_ENABLE
+/**
+ * @brief syscall-safe semaphore wait.
+ *
+ * This may return KERN_SYSCALL_BLOCKED after saving continuation state in the
+ * current task. The SVC handler must switch away instead of returning directly.
+ */
+kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout);
+#endif
+
 /**
  * @brief 尝试获取信号量 (非阻塞)
  * @param sem_id 信号量 ID

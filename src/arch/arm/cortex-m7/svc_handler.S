@@ -61,16 +61,23 @@ SVC_Handler:
     ldrb    r12, [r12, #-2]        /* SVC 立即数 */
 
     cmp     r12, #0
-    beq     .L_first_switch
+    beq     .L_maybe_first_switch
 
     cmp     r12, #1
     beq     .L_general_syscall
 
-    b       .
+    b       .L_bad_svc_param
 
 /*============================================================================
  * SVC #0: 首次任务启动
  *============================================================================*/
+.L_maybe_first_switch:
+    ldr     r1, =_current_task
+    ldr     r1, [r1]
+    cmp     r1, #0
+    bne     .L_bad_svc_state
+    b       .L_first_switch
+
 .L_first_switch:
     ldr     r0, =_next_task
     ldr     r0, [r0]
@@ -140,6 +147,24 @@ SVC_Handler:
     msr     psp, r1
 2:
     ldr     lr, =0xFFFFFFFD
+    bx      lr
+
+.L_bad_svc_param:
+    tst     lr, #4
+    ite     eq
+    mrseq   r12, msp
+    mrsne   r12, psp
+    ldr     r1, =-2               /* KERN_ERR_PARAM */
+    str     r1, [r12]              /* stacked R0 */
+    bx      lr
+
+.L_bad_svc_state:
+    tst     lr, #4
+    ite     eq
+    mrseq   r12, msp
+    mrsne   r12, psp
+    ldr     r1, =-5               /* KERN_ERR_STATE */
+    str     r1, [r12]              /* stacked R0 */
     bx      lr
 
 .L_syscall_blocked:

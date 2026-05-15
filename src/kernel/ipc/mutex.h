@@ -37,6 +37,16 @@ kern_err_t mutex_delete(mutex_id_t mutex_id);
  */
 kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout);
 
+#if SYSCALL_ENABLE
+/**
+ * @brief syscall-safe mutex lock.
+ *
+ * This may return KERN_SYSCALL_BLOCKED after saving continuation state in the
+ * current task. The SVC handler must switch away instead of returning directly.
+ */
+kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout);
+#endif
+
 /**
  * @brief 尝试获取互斥锁 (非阻塞)
  * @param mutex_id 互斥锁 ID
