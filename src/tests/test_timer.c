@@ -14,6 +14,7 @@
 
 #include "test_framework.h"
 #include "timer.h"
+#include "endpoint.h"
 #include "task.h"
 #include "kernel.h"
 #include "trace.h"
@@ -328,6 +329,49 @@ static void test_timer_delete_while_running(void) {
 }
 
 /*============================================================================
+ * 测试 10: 定时器 endpoint 通知
+ *============================================================================*/
+
+static void test_timer_endpoint_notification(void) {
+    test_section("Test 10: Timer endpoint notification");
+
+#if IPC_ENDPOINT
+    ep_id_t ep = endpoint_create("tmr_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "timer notification endpoint created");
+    if (ep < 0) return;
+
+    timer_id_t tid = timer_create("tmr_ntfy", NULL, NULL, 0);
+    TEST_ASSERT(tid >= 0, "notification timer created");
+    if (tid < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = timer_bind_endpoint(tid, ep, 0x54494d52U);
+    TEST_ASSERT_EQ(KERN_OK, err, "timer bound to endpoint");
+
+    err = timer_bind_endpoint(tid, (ep_id_t)KERN_INVALID_ID, 0);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err,
+                   "timer bind rejects invalid endpoint");
+
+    err = timer_start(tid, 3);
+    TEST_ASSERT_EQ(KERN_OK, err, "notification timer started");
+
+    uint32_t msg[2] = {0, 0};
+    err = endpoint_recv(ep, msg, 30);
+    TEST_ASSERT_EQ(KERN_OK, err, "timer endpoint notification received");
+    TEST_ASSERT_EQ((int)0x54494d52U, (int)msg[0],
+                   "timer notification badge copied");
+    TEST_ASSERT_EQ((int)tid, (int)msg[1], "timer notification id copied");
+
+    timer_delete(tid);
+    endpoint_delete(ep);
+#else
+    test_skip("endpoint disabled");
+#endif
+}
+
+/*============================================================================
  * 定时器测试模块入口
  *============================================================================*/
 
@@ -346,6 +390,7 @@ static void test_timer_module(void) {
     test_timer_state();
     test_timer_trace_stats();
     test_timer_delete_while_running();
+    test_timer_endpoint_notification();
 }
 
 /*============================================================================

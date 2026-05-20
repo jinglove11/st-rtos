@@ -1,6 +1,6 @@
 # My-RTOS P4 Microkernel Refactor Plan
 
-Status: Phase 0/1/2 first slice in progress.
+Status: Phase 6 memory-object slice in progress.
 
 Scope: STM32F767 mainline first. Keep the current `make BOARD=stm32f767`
 workflow, board test harness, and UART shell as the validation loop. P4 is a
@@ -769,4 +769,227 @@ This slice closes real security holes without requiring service migration yet.
 - Done: added user-task mqueue recv wake, recv timeout, and send wake
   regression coverage.
 - Done: local `make BOARD=stm32f767` passes for the mqueue continuation slice.
-- Pending: board-run validation for the mqueue continuation slice.
+- Done: board-run validation passed for the mqueue continuation slice.
+- Done: added `event_wait_syscall()` so user `SYSCALL_EVENT_WAIT` can block
+  through a saved SVC continuation rather than spinning in the handler.
+- Done: tightened `event_set()` waiter handling so only valid task wait records
+  are evaluated and completed.
+- Done: added user-task event wait wake and timeout regression coverage.
+- Done: local `make BOARD=stm32f767` passes for the event wait continuation
+  slice.
+- Done: board-run validation passed for the event wait continuation slice.
+- Done: added initial no-cap `channel_send_syscall()` and
+  `channel_recv_syscall()` continuation paths.
+- Done: added user-task channel recv wake, recv timeout, and send wake
+  regression coverage.
+- Done: local `make BOARD=stm32f767` passes for the channel continuation slice.
+- Done: board-run validation passed for the channel continuation slice.
+- Done: added user-task delete-wakeup regression coverage for semaphore, event,
+  and channel recv sleepable syscalls.
+- Done: `event_delete()` and `channel_delete()` now clear per-task syscall
+  continuation scratch state while waking blocked user syscalls.
+- Done: local `make BOARD=stm32f767` passes for the delete-wakeup regression
+  slice.
+- Done: board-run validation passed for the delete-wakeup regression slice.
+- Done: added `CAP_OBJ_REPLY`, endpoint reply objects, and `sys_ep_take_reply()`
+  so a server can receive a request, obtain a reply cap, and reply through that
+  cap.
+- Done: reply caps are invalidated on successful reply, endpoint deletion,
+  sender cleanup, and stale/dead-client reply paths.
+- Done: added user-task reply-cap regression coverage, including single-use
+  reply behavior.
+- Done: local `make BOARD=stm32f767` passes for the reply-cap first slice.
+- Done: board-run validation passed for the reply-cap first slice.
+- Done: added and board-validated reply-cap invalidation coverage for client
+  timeout after the server has received a request.
+- Done: added first sleepable cap-bearing endpoint send syscall path:
+  `sys_ep_send_caps()` can queue user-supplied cap transfers, block through the
+  syscall continuation path, and be received by a kernel server through
+  `endpoint_recv_caps()`.
+- Done: board-run validation passed for sleepable `sys_ep_send_caps()`.
+- Done: fixed `sys_call4/5/6` SVC wrapper stack alignment so Cortex-M exception
+  entry does not insert a padding word that shifts a4/a5/a6.
+- Done: added first sleepable cap-bearing endpoint receive syscall path:
+  `sys_ep_recv_caps()` can block with user output cap buffers and receive caps
+  from a kernel `endpoint_send_caps()` caller.
+- Done: board-run validation passed for sleepable `sys_ep_recv_caps()`.
+- Done: cleaned temporary syscall diagnostic assertions after board validation.
+- Done: added sleepable cap-bearing channel send/receive syscall paths:
+  `sys_ch_send_caps()` can queue user cap transfers while blocked on a full
+  channel slot, and `sys_ch_recv_caps()` can block with user output cap buffers.
+- Done: added user-task channel cap-transfer regression coverage for
+  user-to-kernel `sys_ch_send_caps()` and kernel-to-user `sys_ch_recv_caps()`.
+- Done: local `make BOARD=stm32f767` passes for the channel cap-transfer
+  syscall slice.
+- Done: split capability delete and revoke semantics: `cap_delete()` and
+  task-exit `cap_revoke_all()` now remove owned CSpace entries without
+  cascading into IPC-copied child caps; explicit `cap_revoke()` still cascades.
+- Done: added capability regression coverage that parent `cap_revoke()`
+  invalidates children while parent `cap_delete()` preserves derived children.
+- Done: fixed channel receive-side peer death handling: a message that has
+  already been committed to a channel slot remains receivable even if the
+  sender exits before the receiver resumes; send-side validation still requires
+  a live peer and empty receives still report peer death.
+- Done: added the first timer notification path: `endpoint_notify()` provides
+  one-way endpoint delivery without waiting for a reply, and
+  `timer_bind_endpoint()` sends a badge/timer-id notification when the timer
+  expires.
+- Done: added `SYSCALL_TIMER_BIND` and allowed user tasks to create no-callback
+  timers, bind them to endpoint caps, start them, and receive expiry
+  notifications through `sys_ep_recv()`; user-provided timer callbacks remain
+  rejected.
+- Done: added kernel and user regression coverage for timer endpoint
+  notifications.
+- Done: added first IRQ endpoint notification foundation: `irq_bind_endpoint()`
+  records an IRQ-to-endpoint badge binding and `irq_notify()` delivers a
+  one-way `{badge, irq}` message in task context.
+- Done: added kernel regression coverage for IRQ endpoint notification and
+  unbound IRQ rejection. Real hardware ISR mask/ack delivery remains a later
+  Phase 5 slice.
+- Done: added first BH endpoint notification foundation:
+  notification-only BH objects can bind an endpoint and deliver a one-way
+  `{badge, bh_id}` message when scheduled, while existing kernel callback BHs
+  remain supported.
+- Done: added kernel regression coverage for BH endpoint notification.
+- Done: notification bindings now validate endpoint existence at bind time for
+  timer, IRQ, and BH paths; added negative coverage for invalid endpoint binds.
+- Done: started Phase 6 memory object foundation by changing `CAP_OBJ_MEMBLOCK`
+  from a raw backing pointer to a small memory-object descriptor with recorded
+  base and size.
+- Done: added `kmem_get_bounds()` and regression coverage for memory cap bounds
+  metadata, invalid bounds arguments, and cleanup of both descriptor and backing
+  allocation.
+- Done: added `kmem_get_range()` for capability-checked bounded pointer
+  resolution with offset/length validation; added regression coverage for
+  valid ranges, overflow, zero length, and NULL output arguments.
+- Done: converted memory allocation syscalls to the memblock descriptor model:
+  `sys_mem_alloc()` returns a memory capability, `sys_mem_free()` releases it
+  through `kmem_free_cap()`, and `SYSCALL_MEM_SIZE` exposes descriptor size to
+  user tasks without mapping the backing memory.
+- Done: added user-task regression coverage for memory cap allocation, size
+  query, cleanup, and invalid cap rejection.
+- Done: added local regression coverage for copying a memory capability from a
+  kernel endpoint sender to a user `sys_ep_recv_caps()` service; the service
+  validates the received cap through `sys_mem_size()` and replies over the same
+  endpoint.
+- Done: added first MMIO capability skeleton with `CAP_OBJ_MMIO` and kernel-only
+  `kmmio_create_cap()` / `kmmio_get_bounds()` / `kmmio_delete_cap()` APIs.
+- Done: MMIO caps now strictly reject Flash, SRAM, heap pointers, invalid
+  width/alignment, zero size, and peripheral-window overflow; no user mapping
+  syscall is exposed in this slice.
+- Done: added local regression coverage for MMIO strict rejection and invalid
+  MMIO cap lookup/delete rejection. Valid MMIO cap lifecycle coverage is left
+  for an earlier, controlled capability test because the late `mem` module may
+  run after the global cap pool is under pressure.
+- Done: added controlled `CAP_OBJ_MMIO` lifecycle coverage in the capability
+  module: create a valid peripheral-window MMIO cap, read back base/size/width,
+  delete it, verify stale lookup fails, and verify metadata allocation is
+  cleaned up.
+- Done: changed MMIO descriptors from dynamic heap allocations to a small
+  static kernel descriptor pool, matching MMIO's fixed hardware-resource
+  nature and avoiding heap dependency in capability lifecycle tests.
+- Done: hardened capability slot accounting after MMIO testing exposed
+  `cap_free_count()==128` while `cap_create_for()` could still fail. Free slots
+  with invalid generation are now normalized before allocation, and
+  `cap_free_count()` reports only allocatable free slots.
+- Done: added first shared-memory object skeleton with `CAP_OBJ_SHM` and
+  kernel-only `kshm_create_cap()` / `kshm_get_bounds()` /
+  `kshm_get_range()` / `kshm_delete_cap()` APIs.
+- Done: added local SHM regression coverage for descriptor/backing allocation,
+  bounds metadata, range validation, reduced-rights derived caps, parent revoke
+  invalidating children, and heap cleanup.
+- Done: changed SHM descriptors to a small static kernel descriptor pool while
+  keeping SHM backing memory dynamically allocated; tests now assert only the
+  backing allocation affects heap outstanding count.
+- Done: added endpoint IPC regression coverage for copying SHM capabilities:
+  a client sends a reduced read-only SHM cap to a server, the server validates
+  bounds/range and write rejection, the client keeps its writable source cap,
+  and root revoke invalidates copied caps while restoring heap usage.
+- Done: added `docs/SHM_MAP_DESIGN.md`, defining the first SHM-to-user MPU
+  mapping design, including fixed MPU region usage, rights-to-AP mapping,
+  alignment rules, per-task mapping metadata, task-exit cleanup, failure codes,
+  revocation constraints, and implementation/test order.
+- Done: added per-module test resource diagnostics to the test framework:
+  module pass/fail deltas, `cap_free_count()` before/after, and
+  `mem_get_outstanding_allocs()` before/after are printed after each module so
+  cap/heap leaks and order pollution can be traced to the responsible module.
+- Done: fixed test-suite heap pollution found by resource diagnostics:
+  `ramfs` unlink now frees file private data and buffers, and fault/VFS tests
+  unlink temporary `/tmp` files and mount-test directories after use.
+- Done: added first kernel-only SHM-to-task MPU mapping path:
+  `kshm_create_aligned_cap()` creates MPU-compatible backing,
+  `kshm_map_to_task()` installs read-only or read/write mappings into dynamic
+  task MPU regions `3..7`, `kshm_unmap_from_task()` clears one mapping, and
+  task cleanup calls `kshm_unmap_all_for_task()` before CSpace revocation.
+- Done: added local SHM mapping regression coverage for mapping metadata,
+  MPU AP/XN bits, duplicate map rejection, explicit unmap, task-delete cleanup,
+  and heap outstanding restoration. User-visible SHM map/unmap syscalls remain
+  intentionally deferred until live MPU reload and revoke-race semantics are
+  finalized.
+- Done: exposed user-visible SHM map/unmap for the current user task:
+  `SYSCALL_SHM_MAP` / `SYSCALL_SHM_UNMAP` call the kernel mapper, reload the
+  active MPU before returning to user mode, and allow a user service with a SHM
+  cap to read/write the shared backing memory directly.
+- Done: added user syscall coverage for SHM map/unmap: invalid cap rejection,
+  unsupported rights rejection, read/write through mapped SHM, explicit unmap,
+  double-unmap `KERN_ERR_NOEXIST`, and heap cleanup after root cap deletion.
+- Done: added generic capability revoke hooks and wired SHM into them. Before a
+  SHM cap slot is invalidated or backing memory is released, SHM now walks all
+  tasks, clears matching per-task mapping metadata, disables the MPU region, and
+  reloads the current task MPU if needed.
+- Done: added kernel regression coverage that root SHM revoke clears a mapped
+  child cap from a user task, disables the mapped MPU region, invalidates the
+  child cap, and restores heap outstanding count.
+- Done: added user-path MPU region exhaustion coverage for SHM maps. A user
+  task receives six SHM caps through endpoint cap transfer; the first five
+  consume MPU regions `3..7`, and the sixth `sys_shm_map()` returns
+  `KERN_ERR_RESOURCE`.
+- Done: added conservative `SYSCALL_SHM_CREATE` policy. Kernel/privileged
+  callers can create aligned SHM caps with validated rights and clean them up,
+  while ordinary user tasks are rejected with `KERN_ERR_PERM` until root/init or
+  a dedicated allocator service owns user-visible memory-object creation.
+- Done: started Phase 7 root/init bootstrap with a conservative kernel-side
+  bootstrap record. `root_bootstrap_prepare()` accepts only user tasks, installs
+  an initial `CAP_OBJ_TASK` management cap into root/init's CSpace, records the
+  initial cap set, rejects duplicate bootstrap, and clears bootstrap state when
+  the root task is deleted.
+- Done: added service-model regression coverage for invalid bootstrap inputs,
+  privileged compatibility-task rejection, root/init initial cap lookup, duplicate
+  prepare rejection, task-delete cleanup, and cap-pool restoration.
+- Done: added `root_bootstrap_create()` so root/init user-task creation and
+  initial authority installation are one rollback-safe kernel operation instead
+  of scattered `task_create_user()` plus manual bootstrap calls. Tests now cover
+  NULL entry rejection, duplicate root creation rejection, returned root task id,
+  and cleanup without cap leakage.
+- Done: root/init bootstrap now creates and records an initial endpoint cap for
+  root/init. The endpoint is installed in root/init's CSpace with `CAP_FULL`,
+  `root_bootstrap_info_t` records its endpoint id, and task cleanup deletes the
+  endpoint without relying on a global endpoint-cap cleanup hook.
+- Done: added explicit `root_bootstrap_start()` for starting the prepared
+  root/init task without automatically taking over the existing compatibility
+  boot path. Tests cover missing-root start rejection, not-started/started
+  state reporting, successful start, duplicate start rejection, and cleanup
+  after deleting a started root task.
+- Done: aligned root/init initial task cap with the syscall task-cap ABI by
+  storing `task_id + 1` as the cap object, matching `sys_task_start/delete`.
+- Done: added `root_bootstrap_create_service()` as the first service creation
+  foundation. It requires an active root/init, creates a user service task, and
+  installs a full task-management cap for that service into root/init's CSpace.
+  Tests cover missing-root rejection, NULL service entry rejection, returned
+  service task id/cap, root-side cap lookup, and cleanup without cap leakage.
+- Done: added `root_bootstrap_start_service()` so root/init can start a service
+  through the service task cap it owns, not through a raw task id. Tests cover
+  missing-root rejection, invalid-cap rejection, root self-cap rejection,
+  successful service start, duplicate start rejection, ready-state observation,
+  and cleanup without cap leakage.
+- Done: added `root_bootstrap_create_service_endpoint()` as the first service
+  endpoint bootstrap path. Root validates a service task cap, creates a service
+  endpoint, receives a `CAP_FULL` endpoint cap, and the service receives a
+  reduced `CAP_READ | CAP_WRITE` endpoint cap. Bootstrap tracks service
+  endpoints and deletes them when the service task or root task is cleaned up.
+- Done: added first root-created user-service IPC smoke test. Bootstrap patches
+  the not-yet-started service's initial R0 with its endpoint cap, root starts the
+  service through the service task cap, the kernel test sends one request over
+  the service endpoint, the user service receives through `sys_ep_recv()` and
+  replies through `sys_ep_reply()`, and the test joins the service and verifies
+  cleanup.

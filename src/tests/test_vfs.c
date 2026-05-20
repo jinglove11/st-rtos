@@ -16,6 +16,34 @@
 
 #if VFS_ENABLE && TEST_MODULE_VFS
 
+static kern_err_t test_tmp_unlink(const char *name) {
+    inode_t *tmp = vfs_lookup("/tmp");
+    if (!tmp) return KERN_ERR_NOEXIST;
+
+    kern_err_t err = KERN_ERR_NOEXIST;
+    if (tmp->dir_ops && tmp->dir_ops->unlink) {
+        err = tmp->dir_ops->unlink(tmp, name);
+    }
+    inode_put(tmp);
+    return err;
+}
+
+static kern_err_t test_dir_unlink_child(const char *dir_path, const char *name) {
+    inode_t *dir = vfs_lookup(dir_path);
+    if (!dir) return KERN_ERR_NOEXIST;
+
+    kern_err_t err = KERN_ERR_NOEXIST;
+    if (dir->dir_ops && dir->dir_ops->unlink) {
+        err = dir->dir_ops->unlink(dir, name);
+    }
+    inode_put(dir);
+    return err;
+}
+
+static void vfs_fd_dummy_task(void *arg) {
+    (void)arg;
+}
+
 /*============================================================================
  * Test 1: inode alloc/free 生命周期 + 池耗尽
  *============================================================================*/
@@ -336,8 +364,11 @@ static void test_vfs_mount_redirect(void) {
                    "duplicate unmount rejected");
 
     if (file) inode_put(file);
+    (void)test_dir_unlink_child("/tmp/mnt_src", "inside");
     if (src) inode_put(src);
     if (dst) inode_put(dst);
+    (void)test_tmp_unlink("mnt_src");
+    (void)test_tmp_unlink("mnt_dst");
     inode_put(tmp);
 }
 
@@ -348,29 +379,37 @@ static void test_vfs_mount_redirect(void) {
 static void test_fd_table_ops(void) {
     test_section("Test 6: fd table operations");
 
-    tcb_t *task = sched_get_current();
-    TEST_ASSERT_NOT_NULL(task, "current task exists");
+    task_id_t tid = task_create("vfsfd", vfs_fd_dummy_task, NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "fd table test task created");
+
+    tcb_t *task = task_get_tcb(tid);
+    TEST_ASSERT_NOT_NULL(task, "fd table test task exists");
 
     inode_t *ino = inode_alloc(INODE_TYPE_FILE, "fdtest");
+    TEST_ASSERT_NOT_NULL(ino, "fd test inode allocated");
 
     /* fd_alloc */
     int fd = fd_alloc(task, ino, O_RDWR);
     TEST_ASSERT(fd >= 0, "fd_alloc returns valid index");
-    TEST_ASSERT(task->fd_table[fd].in_use == 1, "fd_entry in_use=1");
-    TEST_ASSERT_EQ((uintptr_t)ino, (uintptr_t)task->fd_table[fd].inode,
-                   "fd_entry points to correct inode");
+    if (task != NULL && fd >= 0 && fd < VFS_MAX_FDS) {
+        TEST_ASSERT(task->fd_table[fd].in_use == 1, "fd_entry in_use=1");
+        TEST_ASSERT_EQ((uintptr_t)ino, (uintptr_t)task->fd_table[fd].inode,
+                       "fd_entry points to correct inode");
+    }
 
     /* fd_free */
-    fd_free(task, fd);
-    TEST_ASSERT(task->fd_table[fd].in_use == 0, "fd_entry freed");
+    if (fd >= 0) {
+        fd_free(task, fd);
+    }
+    if (task != NULL && fd >= 0 && fd < VFS_MAX_FDS) {
+        TEST_ASSERT(task->fd_table[fd].in_use == 0, "fd_entry freed");
+    }
 
     /* fd_alloc exhaustion */
     int fds[VFS_MAX_FDS];
-    inode_t *tmp_inos[VFS_MAX_FDS];
     int i;
     for (i = 0; i < VFS_MAX_FDS; i++) {
-        tmp_inos[i] = inode_alloc(INODE_TYPE_FILE, "tmp");
-        fds[i] = fd_alloc(task, tmp_inos[i], O_RDONLY);
+        fds[i] = fd_alloc(task, ino, O_RDONLY);
         if (fds[i] < 0) break;
     }
     TEST_ASSERT_EQ(VFS_MAX_FDS, i, "fd table filled to VFS_MAX_FDS");
@@ -379,9 +418,13 @@ static void test_fd_table_ops(void) {
 
     for (int j = 0; j < i; j++) {
         fd_free(task, fds[j]);
-        inode_put(tmp_inos[j]);  /* release alloc ref, fd_free already put its ref */
     }
-    inode_free(ino);
+    if (ino != NULL) {
+        inode_free(ino);
+    }
+    if (tid >= 0) {
+        (void)task_delete(tid);
+    }
 }
 
 /*============================================================================
@@ -548,6 +591,7 @@ static void test_vfs_ocreat(void) {
     if (cleanup) {
         inode_put(cleanup);
     }
+    (void)test_tmp_unlink("ocreat_new");
 }
 
 /*============================================================================
@@ -718,6 +762,7 @@ static void test_lseek_boundary(void) {
     TEST_ASSERT_EQ(3, (int)pos, "SEEK_END -2 on 5-byte file → 3");
 
     close(fd);
+    (void)test_tmp_unlink("trunc_test");
 }
 
 /*============================================================================
@@ -778,6 +823,7 @@ static void test_task_fd_cleanup(void) {
                    "task delete released fd inode ref");
 
     inode_put(ino);
+    (void)test_tmp_unlink("fd_cleanup");
 }
 
 /*============================================================================
@@ -800,6 +846,7 @@ static void test_vfs_module(void) {
     test_ramfs_basic();
     test_vfs_ocreat();
     test_ramfs_append();
+    (void)test_tmp_unlink("testfile");
     test_vfs_cap_guard();
     test_dot_entries();
     test_o_trunc();

@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "syscall.h"
 #include <string.h>
 
 /*============================================================================
@@ -79,6 +80,7 @@ static int event_check(uint32_t current, uint32_t wait, uint32_t opt) {
 
 void event_init(void) {
     memset(event_pool, 0, sizeof(event_pool));
+    memset(event_wait_info, 0, sizeof(event_wait_info));
     event_used_bitmap = 0;
 }
 
@@ -115,6 +117,10 @@ kern_err_t event_delete(event_id_t event_id) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
+        if (tcb->id >= 0 && tcb->id < KERN_MAX_TASKS) {
+            memset(&event_wait_info[tcb->id], 0,
+                   sizeof(event_wait_info[tcb->id]));
+        }
         tcb->block_result = KERN_ERR_NOEXIST;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
@@ -222,6 +228,69 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
     return result;
 }
 
+#if SYSCALL_ENABLE
+kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
+                              uint32_t opt, uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+
+    uint32_t crit = hal_enter_critical();
+
+    event_t *evt = get_event(event_id);
+    if (evt == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (event_check(evt->flags, flags, opt)) {
+        if (opt & EVENT_OPT_CLEAR) {
+            evt->flags &= ~flags;
+        }
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERN_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    event_wait_info[current->id].wait_flags = flags;
+    event_wait_info[current->id].wait_opt = opt;
+    event_wait_info[current->id].received = NULL;
+
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_EVENT;
+    current->block_obj = evt;
+    current->block_result = KERN_OK;
+    wait_queue_add(&evt->wait_queue, current);
+
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    current->state = TASK_STATE_BLOCKED;
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
+
 kern_err_t event_set(event_id_t event_id, uint32_t flags) {
     uint32_t crit = hal_enter_critical();
 
@@ -241,12 +310,22 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
         uint32_t wait_flags = 0;
         uint32_t wait_opt = 0;
 
-        if (tid >= 0 && tid < KERN_MAX_TASKS) {
-            wait_flags = event_wait_info[tid].wait_flags;
-            wait_opt = event_wait_info[tid].wait_opt;
+        if (tid < 0 || tid >= KERN_MAX_TASKS) {
+            tcb = next;
+            continue;
         }
 
+        wait_flags = event_wait_info[tid].wait_flags;
+        wait_opt = event_wait_info[tid].wait_opt;
+
         if (event_check(evt->flags, wait_flags, wait_opt)) {
+            if (event_wait_info[tid].received != NULL) {
+                *event_wait_info[tid].received = evt->flags;
+            }
+            if (wait_opt & EVENT_OPT_CLEAR) {
+                evt->flags &= ~wait_flags;
+            }
+            memset(&event_wait_info[tid], 0, sizeof(event_wait_info[tid]));
             wait_queue_remove(&evt->wait_queue, tcb);
             tcb->block_result = KERN_OK;
             sched_wakeup(tcb, KERN_OK);

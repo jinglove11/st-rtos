@@ -12,6 +12,9 @@
  *
  * 统一栈布局 (svc 硬件帧 + padding = 固定偏移):
  *   PSP+64: a4, PSP+68: a5, PSP+72: a6
+ *
+ * Wrappers push 16 bytes before SVC so PSP remains 8-byte aligned and the
+ * Cortex-M exception entry does not insert an alignment padding word.
  * sys_call0-3 的 a4-a6 固定压 0，内核根据 argc 忽略。
  */
 
@@ -27,9 +30,10 @@
 #define PAD3  "movs r4, #0\n\t" \
               "push {r4}\n\t"   \
               "push {r4}\n\t"   \
+              "push {r4}\n\t"   \
               "push {r4}\n\t"
 
-#define UNPAD3 "add sp, sp, #12\n\t"
+#define UNPAD3 "add sp, sp, #16\n\t"
 
 static inline int sys_call0(int num) {
     register int r0 __asm("r0") = num;
@@ -85,11 +89,12 @@ static inline int sys_call4(int num, int a1, int a2, int a3, int a4) {
     register int r4 __asm("r4") = a4;
     __asm volatile(
         "movs r12, #0\n\t"
+        "push {r12}\n\t"      /* alignment pad */
         "push {r12}\n\t"      /* a6 = 0 */
         "push {r12}\n\t"      /* a5 = 0 */
         "push {%4}\n\t"       /* a4 = r4 */
         "svc #1\n\t"
-        "add sp, sp, #12\n\t"
+        "add sp, sp, #16\n\t"
         : "+r"(r0) : "r"(r1), "r"(r2), "r"(r3), "r"(r4) : "r12", "memory");
     return r0;
 }
@@ -103,11 +108,12 @@ static inline int sys_call5(int num, int a1, int a2, int a3, int a4, int a5) {
     register int r5 __asm("r5") = a5;
     __asm volatile(
         "movs r12, #0\n\t"
+        "push {r12}\n\t"      /* alignment pad */
         "push {r12}\n\t"      /* a6 = 0 */
         "push {%5}\n\t"       /* a5 = r5 */
         "push {%4}\n\t"       /* a4 = r4 */
         "svc #1\n\t"
-        "add sp, sp, #12\n\t"
+        "add sp, sp, #16\n\t"
         : "+r"(r0) : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5) : "r12", "memory");
     return r0;
 }
@@ -121,13 +127,15 @@ static inline int sys_call6(int num, int a1, int a2, int a3, int a4, int a5, int
     register int r5 __asm("r5") = a5;
     register int r6 __asm("r6") = a6;
     __asm volatile(
+        "movs r12, #0\n\t"
+        "push {r12}\n\t"      /* alignment pad */
         "push {%6}\n\t"       /* a6 = r6 */
         "push {%5}\n\t"       /* a5 = r5 */
         "push {%4}\n\t"       /* a4 = r4 */
         "svc #1\n\t"
-        "add sp, sp, #12\n\t"
+        "add sp, sp, #16\n\t"
         : "+r"(r0) : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5), "r"(r6)
-        : "memory");
+        : "r12", "memory");
     return r0;
 }
 
@@ -280,6 +288,10 @@ static inline int sys_timer_start(int timer_id, int period) {
     return sys_call2(SYSCALL_TIMER_START, timer_id, period);
 }
 
+static inline int sys_timer_bind(int timer_id, int ep_id, int badge) {
+    return sys_call3(SYSCALL_TIMER_BIND, timer_id, ep_id, badge);
+}
+
 /*============================================================================
  * Endpoint (C/S) — 用户态内联封装
  *============================================================================*/
@@ -319,6 +331,10 @@ static inline int sys_ep_recv_caps(int ep_id, void *msg,
 
 static inline int sys_ep_reply(int ep_id, const void *msg) {
     return sys_call2(SYSCALL_EP_REPLY, ep_id, (int)(uintptr_t)msg);
+}
+
+static inline int sys_ep_take_reply(int ep_id) {
+    return sys_call1(SYSCALL_EP_TAKE_REPLY, ep_id);
 }
 
 /*============================================================================
@@ -369,12 +385,28 @@ static inline void *sys_ch_get_shm(int ch_id) {
  * 内存管理 — 用户态内联封装
  *============================================================================*/
 
-static inline void *sys_mem_alloc(int size) {
-    return (void *)(uintptr_t)sys_call1(SYSCALL_MEM_ALLOC, size);
+static inline int sys_mem_alloc(int size) {
+    return sys_call1(SYSCALL_MEM_ALLOC, size);
 }
 
-static inline int sys_mem_free(void *ptr) {
-    return sys_call1(SYSCALL_MEM_FREE, (int)(uintptr_t)ptr);
+static inline int sys_mem_free(int mem_cap) {
+    return sys_call1(SYSCALL_MEM_FREE, mem_cap);
+}
+
+static inline int sys_mem_size(int mem_cap) {
+    return sys_call1(SYSCALL_MEM_SIZE, mem_cap);
+}
+
+static inline int sys_shm_create(int size, int rights) {
+    return sys_call2(SYSCALL_SHM_CREATE, size, rights);
+}
+
+static inline void *sys_shm_map(int shm_cap, int rights) {
+    return (void *)(uintptr_t)sys_call2(SYSCALL_SHM_MAP, shm_cap, rights);
+}
+
+static inline int sys_shm_unmap(int shm_cap) {
+    return sys_call1(SYSCALL_SHM_UNMAP, shm_cap);
 }
 
 /*============================================================================

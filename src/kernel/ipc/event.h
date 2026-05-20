@@ -42,6 +42,14 @@ kern_err_t event_delete(event_id_t event_id);
 kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
                       uint32_t timeout, uint32_t *received);
 
+#if SYSCALL_ENABLE
+/**
+ * @brief 等待事件标志的 syscall continuation 版本
+ */
+kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
+                              uint32_t opt, uint32_t timeout);
+#endif
+
 /**
  * @brief 设置事件标志
  * @param event_id 事件标志组 ID

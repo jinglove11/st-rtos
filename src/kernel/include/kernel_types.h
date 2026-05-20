@@ -110,6 +110,19 @@ typedef struct {
  * 任务控制块 (TCB)
  *============================================================================*/
 
+#if MPU_ENABLE && CAP_ENABLE
+#define TASK_SHM_MAP_MAX 5
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  region;
+    uint8_t  rights;
+    uint8_t  _pad;
+    cap_id_t cap;
+    void    *addr;
+    size_t   size;
+} shm_mapping_t;
+#endif
+
 typedef struct tcb {
     // --- 上下文保存区 (汇编访问, 必须在最前面) ---
     void       *sp;                   // 栈指针
@@ -156,12 +169,15 @@ typedef struct tcb {
     uint8_t     _pad1[2];             // 4 字节对齐
 #if MPU_ENABLE
     uint32_t    mpu_regions[8][2];   // MPU region [RBAR, RASR] x 8
+#if CAP_ENABLE
+    shm_mapping_t shm_maps[TASK_SHM_MAP_MAX];
+#endif
 #endif
 
     // --- 能力 ---
 #if CAP_ENABLE
     uint16_t    capabilities;         // 能力位图
-    cap_id_t    cap_set[8];          // 持有的能力集 (Phase 2)
+    cap_id_t    cap_set[16];         // 持有的能力集 (Phase 2)
 #endif
 
     // --- 统计信息 ---
@@ -283,6 +299,10 @@ typedef struct {
     timer_callback_t callback;                  // 回调函数
     void           *arg;                        // 回调参数
 
+    // --- 通知信息 ---
+    ep_id_t         notify_ep;                  // 到期通知 endpoint
+    uint32_t        notify_badge;               // 到期通知 badge
+
     // --- 堆索引 ---
     int16_t         heap_index;                 // 在最小堆中的索引，-1 表示不在堆中
 
@@ -291,6 +311,7 @@ typedef struct {
     uint8_t         in_use;                     // 使用标志
     uint8_t         stop_pending;               // 回调中请求了 stop
     uint8_t         delete_pending;             // 删除已请求
+    uint8_t         notify_bound;               // 是否绑定 endpoint 通知
 } timer_t;
 
 /**
@@ -349,10 +370,13 @@ typedef void (*bh_handler_t)(void *arg);
 typedef struct {
     bh_handler_t handler;              // 处理函数
     void        *arg;                  // 参数
+    ep_id_t      notify_ep;            // 通知 endpoint
+    uint32_t     notify_badge;         // 通知 badge
     uint8_t      pending;              // 待处理标志
     uint8_t      in_use;               // 使用标志
     uint8_t      running;              // handler 正在执行
     uint8_t      delete_pending;       // 运行中删除，返回后释放
+    uint8_t      notify_bound;         // 是否绑定 endpoint 通知
 } bh_t;
 
 /*============================================================================

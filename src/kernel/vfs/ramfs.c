@@ -71,6 +71,21 @@ static kern_err_t ramfs_truncate(inode_t *inode) {
     return KERN_OK;
 }
 
+static void ramfs_free_file_data(inode_t *inode) {
+    if (!inode || inode->type != INODE_TYPE_FILE || !inode->private_data) {
+        return;
+    }
+
+    ramfs_data_t *data = (ramfs_data_t *)inode->private_data;
+    if (data->buffer) {
+        kfree(data->buffer);
+        data->buffer = NULL;
+    }
+    kfree(data);
+    inode->private_data = NULL;
+    inode->size = 0;
+}
+
 static int32_t ramfs_read(inode_t *inode, void *buf, uint32_t offset, uint32_t size) {
     ramfs_data_t *data = (ramfs_data_t *)inode->private_data;
     if (!data || !data->buffer) return 0;
@@ -166,9 +181,16 @@ static kern_err_t dir_unlink(inode_t *dir, const char *name) {
 
     inode_t *child = inode_lookup_child(dir, name);
     if (!child) return KERN_ERR_NOEXIST;
+    if (child->refcount > 2) return KERN_ERR_BUSY;
+    if (child->type == INODE_TYPE_DIR && child->children != NULL)
+        return KERN_ERR_BUSY;
 
+    uint32_t refs = child->refcount;
+    ramfs_free_file_data(child);
     inode_remove_child(dir, name);
-    inode_put(child);  /* release alloc ref; tree ref released by remove_child */
+    if (refs > 1) {
+        inode_put(child);  /* release alloc ref; tree ref released by remove_child */
+    }
     return KERN_OK;
 }
 

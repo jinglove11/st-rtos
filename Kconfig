@@ -595,8 +595,8 @@ config SYSCALL_ENABLE
 config SYSCALL_TABLE_SIZE
     int "Syscall table size"
     depends on SYSCALL_ENABLE
-    default 40
-    range 16 64
+    default 64
+    range 16 96
     help
       系统调用分发表大小。
 
@@ -767,4 +767,3 @@ config DRIVER_MAX_DEVICES
       设备注册表最大设备数。
 
 endmenu
-

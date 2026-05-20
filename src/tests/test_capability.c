@@ -6,6 +6,7 @@
 #include "test_framework.h"
 #include "kernel.h"
 #include "ipc_transfer.h"
+#include "mem.h"
 #include <string.h>
 
 #if CAP_ENABLE && TEST_MODULE_CAP
@@ -38,9 +39,12 @@ static void test_cap_create_pool_full(void) {
     test_section("Test 2: cap_create pool full");
     int dummy = 0;
     cap_id_t caps[CAP_MAX_COUNT];
+    uint16_t free_before = cap_free_count();
+
+    TEST_ASSERT(free_before <= CAP_MAX_COUNT, "cap free count in range");
 
     /* fill the pool */
-    for (int i = 0; i < CAP_MAX_COUNT; i++) {
+    for (uint16_t i = 0; i < free_before; i++) {
         caps[i] = cap_create(&dummy, CAP_OBJ_SEMAPHORE, CAP_FULL, 1);
         TEST_ASSERT(caps[i] != ((cap_id_t)-1), "cap_create during fill");
     }
@@ -50,7 +54,7 @@ static void test_cap_create_pool_full(void) {
     TEST_ASSERT(over == ((cap_id_t)-1), "cap_create returns invalid when full");
 
     /* clean up */
-    for (int i = 0; i < CAP_MAX_COUNT; i++) cap_delete(caps[i]);
+    for (uint16_t i = 0; i < free_before; i++) cap_delete(caps[i]);
 }
 
 /*============================================================================
@@ -377,6 +381,32 @@ static void test_cap_revoke_cascade(void) {
 
     ptr = cap_resolve(child, CAP_OBJ_CHANNEL, CAP_READ);
     TEST_ASSERT(ptr == NULL, "child revoked by cascade");
+}
+
+/*============================================================================
+ * Test 18b: cap_delete removes only the selected cap
+ *============================================================================*/
+
+static void test_cap_delete_preserves_children(void) {
+    test_section("Test 18b: delete preserves children");
+
+    int obj = 404;
+    cap_id_t parent = cap_create(&obj, CAP_OBJ_CHANNEL,
+                                 CAP_READ | CAP_WRITE | CAP_GRANT, 1);
+    TEST_ASSERT(parent != ((cap_id_t)-1), "create delete parent");
+
+    cap_id_t child = cap_derive(parent, CAP_READ);
+    TEST_ASSERT(child != ((cap_id_t)-1), "derive delete child");
+
+    cap_delete(parent);
+
+    void *ptr = cap_resolve(parent, CAP_OBJ_CHANNEL, CAP_READ);
+    TEST_ASSERT(ptr == NULL, "deleted parent invalid");
+
+    ptr = cap_resolve(child, CAP_OBJ_CHANNEL, CAP_READ);
+    TEST_ASSERT(ptr == &obj, "child survives parent delete");
+
+    cap_delete(child);
 }
 
 /*============================================================================
@@ -709,6 +739,47 @@ static void test_cap_cleanup_callback(void) {
 }
 
 /*============================================================================
+ * Test 27: MMIO cap lifecycle
+ *============================================================================*/
+
+static void test_mmio_cap_lifecycle(void) {
+    test_section("Test 27: MMIO cap lifecycle");
+
+#if MEM_DYNAMIC
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    cap_id_t cap = KERN_INVALID_ID;
+    kern_err_t err = kmmio_create_cap(0x40000000UL, 16, 4,
+                                      CAP_READ | CAP_WRITE | CAP_MANAGE,
+                                      &cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kmmio_create_cap OK");
+    TEST_ASSERT(cap >= 0, "kmmio_create_cap returns cap");
+    TEST_ASSERT_EQ((int)outstanding,
+                   (int)mem_get_outstanding_allocs(),
+                   "kmmio static metadata keeps heap unchanged");
+
+    uintptr_t base = 0;
+    size_t size = 0;
+    uint8_t width = 0;
+    err = kmmio_get_bounds(cap, &base, &size, &width);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kmmio_get_bounds OK");
+    TEST_ASSERT_EQ((int)0x40000000UL, (int)base, "kmmio base recorded");
+    TEST_ASSERT_EQ(16, (int)size, "kmmio size recorded");
+    TEST_ASSERT_EQ(4, (int)width, "kmmio width recorded");
+
+    err = kmmio_delete_cap(cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kmmio_delete_cap OK");
+    err = kmmio_get_bounds(cap, &base, &size, &width);
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, (int)err,
+                   "deleted kmmio cap no longer resolves");
+    TEST_ASSERT_EQ((int)outstanding,
+                   (int)mem_get_outstanding_allocs(),
+                   "kmmio delete keeps heap unchanged");
+#else
+    test_skip("dynamic memory disabled");
+#endif
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -731,6 +802,7 @@ static void test_capability_module(void) {
     test_cap_no_permission();
     test_cap_stale_generation();
     test_cap_revoke_cascade();
+    test_cap_delete_preserves_children();
     test_cap_cspace_required_for_user();
     test_cap_cspace_install_and_revoke();
     test_cap_copy_to_task();
@@ -739,6 +811,7 @@ static void test_capability_module(void) {
     test_ipc_cap_move_rollback();
     test_cap_object_refcount();
     test_cap_cleanup_callback();
+    test_mmio_cap_lifecycle();
 }
 
 TEST_MODULE_REGISTER(capability, test_capability_module);

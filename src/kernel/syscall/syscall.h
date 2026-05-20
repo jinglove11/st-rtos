@@ -104,6 +104,12 @@
 #define SYSCALL_EP_RECV_CAPS     55
 #define SYSCALL_CH_SEND_CAPS     56
 #define SYSCALL_CH_RECV_CAPS     57
+#define SYSCALL_EP_TAKE_REPLY    58
+#define SYSCALL_TIMER_BIND       59
+#define SYSCALL_MEM_SIZE         60
+#define SYSCALL_SHM_MAP          61
+#define SYSCALL_SHM_UNMAP        62
+#define SYSCALL_SHM_CREATE       63
 
 /*============================================================================
  * Syscall 分发

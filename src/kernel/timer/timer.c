@@ -6,6 +6,7 @@
  */
 
 #include "timer.h"
+#include "endpoint.h"
 #include "scheduler.h"
 #include "mqueue.h"
 #include "task.h"
@@ -571,6 +572,14 @@ static void process_expired_timers(void) {
         heap_pop(&timer_heap);
         timer->state = TIMER_STATE_RUNNING;
 
+        if (timer->notify_bound) {
+            uint8_t notify_msg[KERN_EP_MSG_SIZE];
+            memset(notify_msg, 0, sizeof(notify_msg));
+            ((uint32_t *)notify_msg)[0] = timer->notify_badge;
+            ((uint32_t *)notify_msg)[1] = (uint32_t)timer->id;
+            (void)endpoint_notify(timer->notify_ep, notify_msg);
+        }
+
         /* 执行回调 */
         if (timer->callback) {
             timer->callback(timer->arg);
@@ -659,6 +668,7 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     timer->one_shot = (period == 0) ? 1 : 0;
     timer->state = TIMER_STATE_IDLE;
     timer->heap_index = -1;
+    timer->notify_ep = KERN_INVALID_ID;
     timer->in_use = 1;
 
     if (name) {
@@ -779,6 +789,33 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 #else
     (void)timer_id;
     (void)new_period;
+    return KERN_ERR;
+#endif
+}
+
+kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
+                               uint32_t badge) {
+#if TIMER_ENABLE && IPC_ENDPOINT
+    uint32_t crit = hal_irq_save();
+    timer_t *timer = timer_get(timer_id);
+    if (timer == NULL || timer->delete_pending) {
+        hal_irq_restore(crit);
+        return KERN_ERR_PARAM;
+    }
+    if (!endpoint_exists(ep_id)) {
+        hal_irq_restore(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    timer->notify_ep = ep_id;
+    timer->notify_badge = badge;
+    timer->notify_bound = 1;
+    hal_irq_restore(crit);
+    return KERN_OK;
+#else
+    (void)timer_id;
+    (void)ep_id;
+    (void)badge;
     return KERN_ERR;
 #endif
 }

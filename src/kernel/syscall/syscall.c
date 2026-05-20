@@ -21,6 +21,7 @@
 #include "mpu.h"
 #include "usercopy.h"
 #include "hal.h"
+#include <stdint.h>
 #include <string.h>
 
 #if CAP_ENABLE
@@ -56,10 +57,6 @@ static int syscall_current_is_user(void) {
  * while the handler is spinning.  Until P3-7 syscall continuations land, user
  * IPC syscalls must use nonblocking timeout==0 semantics.
  */
-static kern_err_t syscall_reject_blocking_ipc(uint32_t timeout) {
-    return (timeout == 0) ? KERN_OK : KERN_ERR_BUSY;
-}
-
 static kern_err_t syscall_block_sleep(uint32_t ticks) {
     tcb_t *cur = sched_get_current();
     if (cur == NULL) {
@@ -408,9 +405,9 @@ static int sys_event_wait(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_EVENT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return event_wait((event_id_t)((uintptr_t)obj - 1), a2, 0, a3, NULL);
+    return event_wait_syscall((event_id_t)((uintptr_t)obj - 1), a2, 0, a3);
 #else
-    return event_wait((event_id_t)a1, a2, 0, a3, NULL);
+    return event_wait_syscall((event_id_t)a1, a2, 0, a3);
 #endif
 }
 
@@ -567,8 +564,49 @@ static int sys_ep_send(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_ep_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U6;
-    return KERN_ERR_BUSY;
+    U(a6);
+#if CAP_ENABLE
+    uint8_t msg[KERN_EP_MSG_SIZE];
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    uint8_t cap_count = (uint8_t)a4;
+
+    if (a4 > IPC_CAPS_MAX) {
+        return KERN_ERR_PARAM;
+    }
+    if (!user_access_ok((const void *)(uintptr_t)a2, KERN_EP_MSG_SIZE,
+                        USER_ACCESS_READ)) {
+        return KERN_ERR_PARAM;
+    }
+    kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
+                                         sizeof(msg));
+    if (copy_err != KERN_OK) {
+        return copy_err;
+    }
+    if (cap_count > 0) {
+        if (!user_access_ok((const void *)(uintptr_t)a3,
+                            (uint32_t)cap_count * sizeof(xfers[0]),
+                            USER_ACCESS_READ)) {
+            return KERN_ERR_PARAM;
+        }
+        copy_err = copy_from_user(xfers, (const void *)(uintptr_t)a3,
+                                  (uint32_t)cap_count * sizeof(xfers[0]));
+        if (copy_err != KERN_OK) {
+            return copy_err;
+        }
+    }
+
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
+    if (!obj) return KERN_ERR_CAP;
+    return endpoint_send_caps_syscall((ep_id_t)((uintptr_t)obj - 1),
+                                      msg,
+                                      (void *)(uintptr_t)a2,
+                                      xfers,
+                                      cap_count,
+                                      a5);
+#else
+    U(a1);U(a2);U(a3);U(a4);U(a5);
+    return KERN_ERR_CAP;
+#endif
 }
 
 static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -607,8 +645,33 @@ static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_ep_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U6;
-    return KERN_ERR_BUSY;
+    U(a6);
+#if CAP_ENABLE
+    if (!user_access_ok((void *)(uintptr_t)a2, KERN_EP_MSG_SIZE,
+                        USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+    if (!user_access_ok((void *)(uintptr_t)a3,
+                        IPC_CAPS_MAX * sizeof(cap_id_t),
+                        USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+    if (!user_access_ok((void *)(uintptr_t)a4, sizeof(uint8_t),
+                        USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    return endpoint_recv_caps_syscall((ep_id_t)((uintptr_t)obj - 1),
+                                      (void *)(uintptr_t)a2,
+                                      (cap_id_t *)(uintptr_t)a3,
+                                      (uint8_t *)(uintptr_t)a4,
+                                      a5);
+#else
+    U(a1);U(a2);U(a3);U(a4);U(a5);
+    return KERN_ERR_CAP;
+#endif
 }
 
 static int sys_ep_reply(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -625,11 +688,28 @@ static int sys_ep_reply(uint32_t a1, uint32_t a2, uint32_t a3,
         return copy_err;
     }
 #if CAP_ENABLE
+    void *reply = cap_resolve((cap_id_t)a1, CAP_OBJ_REPLY, CAP_WRITE);
+    if (reply) {
+        return endpoint_reply_cap(reply, msg);
+    }
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
     return endpoint_reply((ep_id_t)((uintptr_t)obj - 1), msg);
 #else
     return endpoint_reply((ep_id_t)a1, msg);
+#endif
+}
+
+static int sys_ep_take_reply(uint32_t a1, uint32_t a2, uint32_t a3,
+                                     uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    return (int)endpoint_take_reply_cap((ep_id_t)((uintptr_t)obj - 1));
+#else
+    U(a1);
+    return KERN_ERR_CAP;
 #endif
 }
 
@@ -693,23 +773,56 @@ static int sys_ch_send(uint32_t a1, uint32_t a2, uint32_t a3,
     if (copy_err != KERN_OK) {
         return copy_err;
     }
-    kern_err_t sleep_err = syscall_reject_blocking_ipc(a3);
-    if (sleep_err != KERN_OK) {
-        return sleep_err;
-    }
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return channel_send((ch_id_t)((uintptr_t)obj - 1), msg, a3);
+    return channel_send_syscall((ch_id_t)((uintptr_t)obj - 1), msg, a3);
 #else
-    return channel_send((ch_id_t)a1, msg, a3);
+    return channel_send_syscall((ch_id_t)a1, msg, a3);
 #endif
 }
 
 static int sys_ch_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U6;
-    return KERN_ERR_BUSY;
+    U(a6);
+#if CAP_ENABLE
+    uint8_t msg[KERN_CH_MSG_SIZE];
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    uint8_t cap_count = (uint8_t)a4;
+
+    if (a4 > IPC_CAPS_MAX) {
+        return KERN_ERR_PARAM;
+    }
+    if (!user_access_ok((const void *)(uintptr_t)a2, KERN_CH_MSG_SIZE,
+                        USER_ACCESS_READ)) {
+        return KERN_ERR_PARAM;
+    }
+    kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
+                                         sizeof(msg));
+    if (copy_err != KERN_OK) {
+        return copy_err;
+    }
+    if (cap_count > 0) {
+        if (!user_access_ok((const void *)(uintptr_t)a3,
+                            (uint32_t)cap_count * sizeof(xfers[0]),
+                            USER_ACCESS_READ)) {
+            return KERN_ERR_PARAM;
+        }
+        copy_err = copy_from_user(xfers, (const void *)(uintptr_t)a3,
+                                  (uint32_t)cap_count * sizeof(xfers[0]));
+        if (copy_err != KERN_OK) {
+            return copy_err;
+        }
+    }
+
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
+    if (!obj) return KERN_ERR_CAP;
+    return channel_send_caps_syscall((ch_id_t)((uintptr_t)obj - 1),
+                                     msg, xfers, cap_count, a5);
+#else
+    U(a1);U(a2);U(a3);U(a4);U(a5);
+    return KERN_ERR_CAP;
+#endif
 }
 
 static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -720,10 +833,17 @@ static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
     if (!user_access_ok((void *)(uintptr_t)a2, KERN_CH_MSG_SIZE, USER_ACCESS_WRITE)) {
         return KERN_ERR_PARAM;
     }
-    kern_err_t sleep_err = syscall_reject_blocking_ipc(a3);
-    if (sleep_err != KERN_OK) {
-        return sleep_err;
+    if (a3 != 0) {
+#if CAP_ENABLE
+        void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
+        if (!obj) return KERN_ERR_CAP;
+        return channel_recv_syscall((ch_id_t)((uintptr_t)obj - 1),
+                                    (void *)(uintptr_t)a2, a3);
+#else
+        return channel_recv_syscall((ch_id_t)a1, (void *)(uintptr_t)a2, a3);
+#endif
     }
+
     memset(msg, 0, sizeof(msg));
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
@@ -740,8 +860,33 @@ static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_ch_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
-    U6;
-    return KERN_ERR_BUSY;
+    U(a6);
+#if CAP_ENABLE
+    if (!user_access_ok((void *)(uintptr_t)a2, KERN_CH_MSG_SIZE,
+                        USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+    if (!user_access_ok((void *)(uintptr_t)a3,
+                        IPC_CAPS_MAX * sizeof(cap_id_t),
+                        USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+    if (!user_access_ok((void *)(uintptr_t)a4, sizeof(uint8_t),
+                        USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    return channel_recv_caps_syscall((ch_id_t)((uintptr_t)obj - 1),
+                                     (void *)(uintptr_t)a2,
+                                     (cap_id_t *)(uintptr_t)a3,
+                                     (uint8_t *)(uintptr_t)a4,
+                                     a5);
+#else
+    U(a1);U(a2);U(a3);U(a4);U(a5);
+    return KERN_ERR_CAP;
+#endif
 }
 
 static int sys_ch_get_shm(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -767,7 +912,7 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
     U(a5);U(a6);
     char name_buf[TIMER_NAME_LEN];
 
-    if (syscall_current_is_user()) {
+    if (syscall_current_is_user() && a2 != 0) {
         return KERN_ERR_PERM;
     }
 
@@ -778,7 +923,8 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
         return copy_err;
     }
 
-    if (!user_access_ok((const void *)(uintptr_t)a2, 1, USER_ACCESS_READ)) {
+    if (a2 != 0 &&
+        !user_access_ok((const void *)(uintptr_t)a2, 1, USER_ACCESS_READ)) {
         return KERN_ERR_PARAM;
     }
 
@@ -811,6 +957,22 @@ static int sys_timer_start(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+static int sys_timer_bind(uint32_t a1, uint32_t a2, uint32_t a3,
+                          uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *timer_obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TIMER, CAP_WRITE);
+    if (!timer_obj) return KERN_ERR_CAP;
+    void *ep_obj = cap_resolve((cap_id_t)a2, CAP_OBJ_ENDPOINT, CAP_WRITE);
+    if (!ep_obj) return KERN_ERR_CAP;
+    return timer_bind_endpoint((timer_id_t)((uintptr_t)timer_obj - 1),
+                               (ep_id_t)((uintptr_t)ep_obj - 1),
+                               a3);
+#else
+    return timer_bind_endpoint((timer_id_t)a1, (ep_id_t)a2, a3);
+#endif
+}
+
 /*============================================================================
  * 内存管理
  *============================================================================*/
@@ -819,16 +981,15 @@ static int sys_mem_alloc(uint32_t a1, uint32_t a2, uint32_t a3,
                                  uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
     if (a1 == 0) return KERN_ERR_PARAM;
-    void *ptr = kmalloc(a1);
-    if (!ptr) return KERN_ERR_RESOURCE;
 #if CAP_ENABLE
-    tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create(ptr, CAP_OBJ_MEMBLOCK,
-                              CAP_READ | CAP_WRITE | CAP_MANAGE,
-                              (uint8_t)(cur ? cur->id : 0));
-    if (cap < 0) { kfree(ptr); return KERN_ERR_RESOURCE; }
+    cap_id_t cap = kmem_alloc_cap((size_t)a1,
+                                  CAP_READ | CAP_WRITE | CAP_MANAGE |
+                                  CAP_TRANSFER);
+    if (cap < 0) return KERN_ERR_RESOURCE;
     return (int)cap;
 #else
+    void *ptr = kmalloc(a1);
+    if (!ptr) return KERN_ERR_RESOURCE;
     return (kern_err_t)(uintptr_t)ptr;
 #endif
 }
@@ -837,14 +998,103 @@ static int sys_mem_free(uint32_t a1, uint32_t a2, uint32_t a3,
                                 uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
 #if CAP_ENABLE
-    void *ptr = cap_resolve((cap_id_t)a1, CAP_OBJ_MEMBLOCK, CAP_MANAGE);
-    if (!ptr) return KERN_ERR_CAP;
-    kfree(ptr);
-    cap_delete((cap_id_t)a1);
-    return KERN_OK;
+    return kmem_free_cap((cap_id_t)a1);
 #else
     kfree((void *)a1);
     return KERN_OK;
+#endif
+}
+
+static int sys_mem_size(uint32_t a1, uint32_t a2, uint32_t a3,
+                                uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *base = NULL;
+    size_t size = 0;
+    kern_err_t err = kmem_get_bounds((cap_id_t)a1, &base, &size);
+    U(base);
+    if (err != KERN_OK) {
+        return err;
+    }
+    if (size > (size_t)INT32_MAX) {
+        return KERN_ERR_OVERFLOW;
+    }
+    return (int)size;
+#else
+    return KERN_ERR_CAP;
+#endif
+}
+
+static int sys_shm_create(uint32_t a1, uint32_t a2, uint32_t a3,
+                          uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE && MPU_ENABLE && MEM_DYNAMIC
+    if (a1 == 0) {
+        return KERN_ERR_PARAM;
+    }
+    if (syscall_current_is_user()) {
+        return KERN_ERR_PERM;
+    }
+
+    uint8_t rights = (uint8_t)a2;
+    if (rights == 0) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE |
+                 CAP_TRANSFER | CAP_GRANT;
+    }
+    if ((rights & ~(CAP_READ | CAP_WRITE | CAP_MANAGE |
+                    CAP_TRANSFER | CAP_GRANT)) != 0) {
+        return KERN_ERR_PARAM;
+    }
+
+    cap_id_t cap = kshm_create_aligned_cap((size_t)a1, rights);
+    if (cap < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+    return (int)cap;
+#else
+    return KERN_ERR_CAP;
+#endif
+}
+
+static int sys_shm_map(uint32_t a1, uint32_t a2, uint32_t a3,
+                       uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE && MPU_ENABLE
+    tcb_t *current = sched_get_current();
+    if (current == NULL || (current->attrs & TASK_ATTR_USER) == 0) {
+        return KERN_ERR_PERM;
+    }
+
+    void *addr = NULL;
+    kern_err_t err = kshm_map_to_task(current, (cap_id_t)a1,
+                                      (uint8_t)a2, &addr);
+    if (err != KERN_OK) {
+        return err;
+    }
+
+    mpu_load_task_regions(current);
+    return (int)(uintptr_t)addr;
+#else
+    return KERN_ERR_CAP;
+#endif
+}
+
+static int sys_shm_unmap(uint32_t a1, uint32_t a2, uint32_t a3,
+                         uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE && MPU_ENABLE
+    tcb_t *current = sched_get_current();
+    if (current == NULL || (current->attrs & TASK_ATTR_USER) == 0) {
+        return KERN_ERR_PERM;
+    }
+
+    kern_err_t err = kshm_unmap_from_task(current, (cap_id_t)a1);
+    if (err == KERN_OK || err == KERN_ERR_CAP) {
+        mpu_load_task_regions(current);
+    }
+    return err;
+#else
+    return KERN_ERR_CAP;
 #endif
 }
 
@@ -1069,6 +1319,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_EP_REPLY,      sys_ep_reply,      2),
     SYSDEF(SYSCALL_EP_SEND_CAPS,  sys_ep_send_caps,  5),
     SYSDEF(SYSCALL_EP_RECV_CAPS,  sys_ep_recv_caps,  5),
+    SYSDEF(SYSCALL_EP_TAKE_REPLY, sys_ep_take_reply, 1),
     SYSDEF(SYSCALL_CH_CREATE,     sys_ch_create,     2),
     SYSDEF(SYSCALL_CH_DELETE,     sys_ch_delete,     1),
     SYSDEF(SYSCALL_CH_CONNECT,    sys_ch_connect,    3),
@@ -1079,11 +1330,16 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CH_RECV_CAPS,  sys_ch_recv_caps,  5),
     SYSDEF(SYSCALL_TIMER_CREATE,  sys_timer_create,  4),
     SYSDEF(SYSCALL_TIMER_START,   sys_timer_start,   2),
+    SYSDEF(SYSCALL_TIMER_BIND,    sys_timer_bind,    3),
     SYSDEF(SYSCALL_IRQ_REGISTER,  sys_irq_register,  3),
     SYSDEF(SYSCALL_BH_CREATE,     sys_bh_create,     2),
     SYSDEF(SYSCALL_BH_SCHEDULE,   sys_bh_schedule,   1),
     SYSDEF(SYSCALL_MEM_ALLOC,     sys_mem_alloc,     1),
     SYSDEF(SYSCALL_MEM_FREE,      sys_mem_free,      1),
+    SYSDEF(SYSCALL_MEM_SIZE,      sys_mem_size,      1),
+    SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
+    SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
+    SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),
 #if CAP_ENABLE
     SYSDEF(SYSCALL_CAP_DERIVE,    sys_cap_derive,    2),
     SYSDEF(SYSCALL_CAP_TRANSFER,  sys_cap_transfer,  2),

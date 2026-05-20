@@ -9,6 +9,8 @@
 #include "trace.h"
 #include "stats.h"
 #include "capability.h"
+#include "task.h"
+#include "mpu.h"
 
 #if MEM_DYNAMIC && TEST_ENABLE
 
@@ -99,14 +101,300 @@ static void test_kmem_cap_binding(void) {
 
     void *ptr = kmem_resolve_cap(cap, CAP_WRITE);
     TEST_ASSERT_NOT_NULL(ptr, "kmem cap resolves with write");
-    TEST_ASSERT_EQ(outstanding + 1, mem_get_outstanding_allocs(),
+    TEST_ASSERT_EQ(outstanding + 2, mem_get_outstanding_allocs(),
                    "cap memory increments outstanding");
 
-    kern_err_t err = kmem_free_cap(cap);
+    void *base = NULL;
+    size_t size = 0;
+    kern_err_t err = kmem_get_bounds(cap, &base, &size);
+    TEST_ASSERT_EQ(KERN_OK, err, "kmem_get_bounds OK");
+    TEST_ASSERT_EQ((uintptr_t)ptr, (uintptr_t)base,
+                   "kmem bounds base matches resolved ptr");
+    TEST_ASSERT_EQ((int)24, (int)size, "kmem bounds size recorded");
+
+    err = kmem_get_bounds(cap, NULL, &size);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmem_get_bounds rejects NULL base");
+
+    void *range = NULL;
+    err = kmem_get_range(cap, CAP_WRITE, 8, 8, &range);
+    TEST_ASSERT_EQ(KERN_OK, err, "kmem_get_range inside bounds OK");
+    TEST_ASSERT_EQ((uintptr_t)((uint8_t *)ptr + 8), (uintptr_t)range,
+                   "kmem_get_range returns offset pointer");
+
+    err = kmem_get_range(cap, CAP_WRITE, 20, 8, &range);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmem_get_range rejects overflow");
+
+    err = kmem_get_range(cap, CAP_WRITE, 24, 1, &range);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmem_get_range rejects end overflow");
+
+    err = kmem_get_range(cap, CAP_WRITE, 0, 0, &range);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmem_get_range rejects zero length");
+
+    err = kmem_get_range(cap, CAP_WRITE, 0, 4, NULL);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmem_get_range rejects NULL output");
+
+    err = kmem_free_cap(cap);
     TEST_ASSERT_EQ(KERN_OK, err, "kmem_free_cap OK");
     TEST_ASSERT_EQ(outstanding, mem_get_outstanding_allocs(),
                    "cap cleanup frees memory");
 }
+
+static void test_kmmio_cap_strict_rejection(void) {
+    test_section("Test 5: MMIO capability strict rejection");
+
+    cap_id_t cap = KERN_INVALID_ID;
+    kern_err_t err = kmmio_create_cap(0x40000000UL, 4, 4, CAP_FULL, NULL);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmmio_create_cap rejects NULL out cap");
+
+    err = kmmio_create_cap(0x40000000UL, 0, 4, CAP_FULL, &cap);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmmio_create_cap rejects zero size");
+
+    err = kmmio_create_cap(0x40000002UL, 4, 4, CAP_FULL, &cap);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmmio_create_cap rejects unaligned base");
+
+    err = kmmio_create_cap(0x40000000UL, 4, 3, CAP_FULL, &cap);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kmmio_create_cap rejects invalid width");
+
+    err = kmmio_create_cap(0x08000000UL, 4, 4, CAP_FULL, &cap);
+    TEST_ASSERT_EQ(KERN_ERR_PERM, err, "kmmio_create_cap rejects Flash");
+
+    err = kmmio_create_cap(0x20000000UL, 4, 4, CAP_FULL, &cap);
+    TEST_ASSERT_EQ(KERN_ERR_PERM, err, "kmmio_create_cap rejects SRAM");
+
+    void *heap = kmalloc(16);
+    TEST_ASSERT_NOT_NULL(heap, "heap pointer allocated for MMIO rejection");
+    if (heap != NULL) {
+        err = kmmio_create_cap((uintptr_t)heap, 4, 4, CAP_FULL, &cap);
+        TEST_ASSERT_EQ(KERN_ERR_PERM, err, "kmmio_create_cap rejects heap memory");
+        kfree(heap);
+    }
+
+    err = kmmio_create_cap(0x5ffffffcUL, 8, 4, CAP_FULL, &cap);
+    TEST_ASSERT_EQ(KERN_ERR_PERM, err, "kmmio_create_cap rejects peripheral overflow");
+
+    err = kmmio_get_bounds(KERN_INVALID_ID, &(uintptr_t){0}, &(size_t){0},
+                           &(uint8_t){0});
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kmmio_get_bounds rejects invalid cap");
+    err = kmmio_delete_cap(KERN_INVALID_ID);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kmmio_delete_cap rejects invalid cap");
+}
+
+static void test_kshm_cap_lifecycle(void) {
+    test_section("Test 6: shared memory capability lifecycle");
+
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    cap_id_t cap = kshm_create_cap(64,
+                                   CAP_READ | CAP_WRITE |
+                                   CAP_MANAGE | CAP_GRANT);
+    TEST_ASSERT(cap >= 0, "kshm_create_cap returns cap");
+    TEST_ASSERT_EQ((int)(outstanding + 1),
+                   (int)mem_get_outstanding_allocs(),
+                   "kshm create allocates backing");
+
+    void *base = NULL;
+    size_t size = 0;
+    kern_err_t err = kshm_get_bounds(cap, &base, &size);
+    TEST_ASSERT_EQ(KERN_OK, err, "kshm_get_bounds OK");
+    TEST_ASSERT_NOT_NULL(base, "kshm base is non-NULL");
+    TEST_ASSERT_EQ(64, (int)size, "kshm size recorded");
+
+    void *range = NULL;
+    err = kshm_get_range(cap, CAP_WRITE, 16, 8, &range);
+    TEST_ASSERT_EQ(KERN_OK, err, "kshm_get_range inside bounds OK");
+    TEST_ASSERT_EQ((uintptr_t)((uint8_t *)base + 16), (uintptr_t)range,
+                   "kshm_get_range returns offset pointer");
+
+    err = kshm_get_range(cap, CAP_WRITE, 60, 8, &range);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kshm_get_range rejects overflow");
+
+    err = kshm_get_range(cap, CAP_WRITE, 0, 0, &range);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kshm_get_range rejects zero length");
+
+    cap_id_t child = cap_derive(cap, CAP_READ);
+    TEST_ASSERT(child >= 0, "kshm child cap derived");
+    err = kshm_get_range(child, CAP_READ, 0, 4, &range);
+    TEST_ASSERT_EQ(KERN_OK, err, "kshm child read range OK");
+    err = kshm_get_range(child, CAP_WRITE, 0, 4, &range);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kshm child write rejected");
+
+    err = kshm_delete_cap(cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "kshm_delete_cap cascades parent");
+    err = kshm_get_bounds(child, &base, &size);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kshm child invalid after parent revoke");
+    TEST_ASSERT_EQ((int)outstanding,
+                   (int)mem_get_outstanding_allocs(),
+                   "kshm cleanup restores outstanding");
+
+    cap_id_t bad = kshm_create_cap(0, CAP_FULL);
+    TEST_ASSERT(bad < 0, "kshm_create_cap rejects zero size");
+    err = kshm_delete_cap(KERN_INVALID_ID);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kshm_delete_cap rejects invalid cap");
+}
+
+#if MPU_ENABLE
+#define TEST_MPU_AP_MASK (0x7UL << 24)
+
+static void shm_map_dummy_task(void *arg) {
+    (void)arg;
+}
+
+static void test_kshm_map_to_task(void) {
+    test_section("Test 7: shared memory task mapping");
+
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    task_id_t tid = task_create_user("shmmap", shm_map_dummy_task, NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "user task created for shm map");
+
+    tcb_t *tcb = task_get_tcb(tid);
+    TEST_ASSERT_NOT_NULL(tcb, "user task TCB resolved");
+
+    cap_id_t root = kshm_create_aligned_cap(256,
+                                            CAP_READ | CAP_WRITE |
+                                            CAP_MANAGE | CAP_TRANSFER |
+                                            CAP_GRANT);
+    TEST_ASSERT(root >= 0, "aligned kshm root cap created");
+
+    cap_id_t task_cap = KERN_INVALID_ID;
+    if (tcb != NULL && root >= 0) {
+        task_cap = cap_copy_to(NULL, root, tcb, CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(task_cap >= 0, "shm cap copied into task CSpace");
+
+    void *addr = NULL;
+    kern_err_t err = kshm_map_to_task(tcb, task_cap, CAP_READ, &addr);
+    TEST_ASSERT_EQ(KERN_OK, err, "read-only shm map OK");
+    TEST_ASSERT_NOT_NULL(addr, "mapped address returned");
+
+    int mapped_slot = -1;
+    uint8_t mapped_region = 0;
+    for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (tcb != NULL && tcb->shm_maps[i].in_use &&
+            tcb->shm_maps[i].cap == task_cap) {
+            mapped_slot = i;
+            mapped_region = tcb->shm_maps[i].region;
+            break;
+        }
+    }
+    TEST_ASSERT(mapped_slot >= 0, "task records shm mapping");
+    TEST_ASSERT(mapped_region >= 3 && mapped_region < 8,
+                "shm map uses dynamic MPU region");
+    if (mapped_slot >= 0) {
+        uint32_t rasr = tcb->mpu_regions[mapped_region][1];
+        TEST_ASSERT((rasr & RASR_ENABLE) != 0, "shm MPU region enabled");
+        TEST_ASSERT((rasr & TEST_MPU_AP_MASK) == AP_PRW_URO,
+                    "read-only shm map uses user read access");
+        TEST_ASSERT((rasr & XN_ENABLE) != 0, "shm map is execute-never");
+    }
+
+    err = kshm_map_to_task(tcb, task_cap, CAP_READ, &addr);
+    TEST_ASSERT_EQ(KERN_ERR_BUSY, err, "duplicate shm map rejected");
+
+    err = kshm_unmap_from_task(tcb, task_cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "shm unmap OK");
+    if (mapped_slot >= 0) {
+        TEST_ASSERT((tcb->mpu_regions[mapped_region][1] & RASR_ENABLE) == 0,
+                    "shm MPU region disabled after unmap");
+        TEST_ASSERT(tcb->shm_maps[mapped_slot].in_use == 0,
+                    "shm mapping metadata cleared");
+    }
+
+    err = kshm_map_to_task(tcb, task_cap, CAP_READ | CAP_WRITE, &addr);
+    TEST_ASSERT_EQ(KERN_OK, err, "read-write shm map OK");
+    mapped_slot = -1;
+    mapped_region = 0;
+    for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (tcb != NULL && tcb->shm_maps[i].in_use &&
+            tcb->shm_maps[i].cap == task_cap) {
+            mapped_slot = i;
+            mapped_region = tcb->shm_maps[i].region;
+            break;
+        }
+    }
+    TEST_ASSERT(mapped_slot >= 0, "read-write map metadata recorded");
+    if (mapped_slot >= 0) {
+        uint32_t rasr = tcb->mpu_regions[mapped_region][1];
+        TEST_ASSERT((rasr & TEST_MPU_AP_MASK) == AP_FULL,
+                    "read-write shm map uses user write access");
+    }
+
+    err = task_delete(tid);
+    TEST_ASSERT_EQ(KERN_OK, err, "task delete clears shm maps");
+    tcb = NULL;
+
+    err = kshm_delete_cap(root);
+    TEST_ASSERT_EQ(KERN_OK, err, "root shm cap deleted after task cleanup");
+    TEST_ASSERT_EQ((int)outstanding,
+                   (int)mem_get_outstanding_allocs(),
+                   "shm mapping cleanup restores outstanding");
+}
+
+static void test_kshm_revoke_unmaps_task(void) {
+    test_section("Test 8: shared memory revoke unmaps task");
+
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    task_id_t tid = task_create_user("shmrev", shm_map_dummy_task, NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "user task created for shm revoke");
+
+    tcb_t *tcb = task_get_tcb(tid);
+    TEST_ASSERT_NOT_NULL(tcb, "user task TCB resolved for revoke");
+
+    cap_id_t root = kshm_create_aligned_cap(256,
+                                            CAP_READ | CAP_WRITE |
+                                            CAP_MANAGE | CAP_TRANSFER |
+                                            CAP_GRANT);
+    TEST_ASSERT(root >= 0, "aligned kshm root cap created for revoke");
+
+    cap_id_t task_cap = KERN_INVALID_ID;
+    if (tcb != NULL && root >= 0) {
+        task_cap = cap_copy_to(NULL, root, tcb, CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(task_cap >= 0, "shm cap copied before revoke");
+
+    void *addr = NULL;
+    kern_err_t err = kshm_map_to_task(tcb, task_cap,
+                                      CAP_READ | CAP_WRITE, &addr);
+    TEST_ASSERT_EQ(KERN_OK, err, "shm map before revoke OK");
+
+    uint8_t mapped_region = 0;
+    int saw_mapping = 0;
+    for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (tcb != NULL && tcb->shm_maps[i].in_use &&
+            tcb->shm_maps[i].cap == task_cap) {
+            mapped_region = tcb->shm_maps[i].region;
+            saw_mapping = 1;
+            break;
+        }
+    }
+    TEST_ASSERT(saw_mapping == 1, "shm mapping exists before revoke");
+
+    err = cap_revoke(root);
+    TEST_ASSERT_EQ(KERN_OK, err, "root revoke OK");
+    if (tcb != NULL && saw_mapping) {
+        int still_mapped = 0;
+        for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
+            if (tcb->shm_maps[i].in_use && tcb->shm_maps[i].cap == task_cap) {
+                still_mapped = 1;
+            }
+        }
+        TEST_ASSERT(still_mapped == 0, "revoke clears task shm mapping");
+        TEST_ASSERT((tcb->mpu_regions[mapped_region][1] & RASR_ENABLE) == 0,
+                    "revoke disables mapped MPU region");
+    }
+
+    void *base = NULL;
+    size_t size = 0;
+    err = kshm_get_bounds(task_cap, &base, &size);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "revoked task shm cap invalid");
+
+    if (tid >= 0) {
+        err = task_delete(tid);
+        TEST_ASSERT_EQ(KERN_OK, err, "task delete after shm revoke OK");
+    }
+    TEST_ASSERT_EQ((int)outstanding,
+                   (int)mem_get_outstanding_allocs(),
+                   "shm revoke cleanup restores outstanding");
+}
+#endif
 #endif
 
 static void test_mem_module(void) {
@@ -115,6 +403,12 @@ static void test_mem_module(void) {
     test_mempool_diagnostics();
 #if CAP_ENABLE
     test_kmem_cap_binding();
+    test_kmmio_cap_strict_rejection();
+    test_kshm_cap_lifecycle();
+#if MPU_ENABLE
+    test_kshm_map_to_task();
+    test_kshm_revoke_unmaps_task();
+#endif
 #endif
 }
 

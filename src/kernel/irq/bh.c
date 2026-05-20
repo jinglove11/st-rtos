@@ -4,6 +4,7 @@
  */
 
 #include "bh.h"
+#include "endpoint.h"
 #include "hal.h"
 #include "task.h"
 #include "scheduler.h"
@@ -113,9 +114,21 @@ static void bh_service_loop(void *arg) {
             if (bh->in_use && bh->pending) {
                 bh_handler_t handler = bh->handler;
                 void        *bh_arg  = bh->arg;
+                uint8_t      notify_bound = bh->notify_bound;
+                ep_id_t      notify_ep = bh->notify_ep;
+                uint32_t     notify_badge = bh->notify_badge;
+                int16_t      bh_id = (int16_t)i;
                 bh->pending = 0;
                 bh->running = 1;
                 hal_exit_critical(crit);
+
+                if (notify_bound) {
+                    uint8_t msg[KERN_EP_MSG_SIZE];
+                    memset(msg, 0, sizeof(msg));
+                    ((uint32_t *)msg)[0] = notify_badge;
+                    ((uint32_t *)msg)[1] = (uint32_t)bh_id;
+                    (void)endpoint_notify(notify_ep, msg);
+                }
 
                 if (handler) {
                     handler(bh_arg);
@@ -164,21 +177,17 @@ void bh_service_start(void) {
 #if IRQ_BH_ENABLE
 
 int16_t bh_create(bh_handler_t handler, void *arg) {
-    if (handler == NULL) {
-        bh_record_event(KERN_INVALID_ID, TRACE_BH_CREATE, KERN_ERR_PARAM,
-                        STATS_COUNTER_ERROR);
-        return KERN_INVALID_ID;
-    }
-
     uint32_t crit = hal_enter_critical();
 
     for (int i = 0; i < IRQ_BH_MAX; i++) {
         if (!bh_pool[i].in_use) {
             bh_pool[i].handler = handler;
             bh_pool[i].arg     = arg;
+            bh_pool[i].notify_ep = KERN_INVALID_ID;
             bh_pool[i].pending = 0;
             bh_pool[i].running = 0;
             bh_pool[i].delete_pending = 0;
+            bh_pool[i].notify_bound = 0;
             bh_pool[i].in_use  = 1;
             hal_exit_critical(crit);
             bh_record_event((int16_t)i, TRACE_BH_CREATE, KERN_OK,
@@ -221,6 +230,34 @@ kern_err_t bh_schedule(int16_t bh_id) {
     trace_record(TRACE_BH_SCHEDULE, 0, (uint16_t)bh_id);
     sem_post(bh_sem);
     bh_record_event(bh_id, TRACE_BH_SCHED, KERN_OK, STATS_COUNTER_OK);
+    return KERN_OK;
+}
+
+kern_err_t bh_bind_endpoint(int16_t bh_id, ep_id_t ep_id, uint32_t badge) {
+    if (bh_id < 0 || bh_id >= IRQ_BH_MAX) {
+        bh_record_event(bh_id, TRACE_BH_CREATE, KERN_ERR_PARAM,
+                        STATS_COUNTER_ERROR);
+        return KERN_ERR_PARAM;
+    }
+    if (!endpoint_exists(ep_id)) {
+        bh_record_event(bh_id, TRACE_BH_CREATE, KERN_ERR_PARAM,
+                        STATS_COUNTER_ERROR);
+        return KERN_ERR_PARAM;
+    }
+
+    uint32_t crit = hal_enter_critical();
+    if (!bh_pool[bh_id].in_use || bh_pool[bh_id].delete_pending) {
+        hal_exit_critical(crit);
+        bh_record_event(bh_id, TRACE_BH_CREATE, KERN_ERR_NOEXIST,
+                        STATS_COUNTER_NOEXIST);
+        return KERN_ERR_NOEXIST;
+    }
+
+    bh_pool[bh_id].notify_ep = ep_id;
+    bh_pool[bh_id].notify_badge = badge;
+    bh_pool[bh_id].notify_bound = 1;
+    hal_exit_critical(crit);
+    bh_record_event(bh_id, TRACE_BH_CREATE, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
 
@@ -281,6 +318,9 @@ int16_t bh_create(bh_handler_t handler, void *arg) {
     return KERN_INVALID_ID;
 }
 kern_err_t bh_schedule(int16_t bh_id)  { (void)bh_id; return KERN_ERR; }
+kern_err_t bh_bind_endpoint(int16_t bh_id, ep_id_t ep_id, uint32_t badge) {
+    (void)bh_id; (void)ep_id; (void)badge; return KERN_ERR;
+}
 kern_err_t bh_cancel(int16_t bh_id)    { (void)bh_id; return KERN_ERR; }
 kern_err_t bh_delete(int16_t bh_id)    { (void)bh_id; return KERN_ERR; }
 

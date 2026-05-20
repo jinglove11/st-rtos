@@ -4,6 +4,7 @@
  */
 
 #include "irq.h"
+#include "endpoint.h"
 #include "hal.h"
 #include "scheduler.h"
 #include "task.h"
@@ -46,11 +47,19 @@ typedef struct {
     uint8_t     in_use;
 } irq_desc_t;
 
+typedef struct {
+    int16_t  irq_num;
+    ep_id_t  ep_id;
+    uint32_t badge;
+    uint8_t  bound;
+} irq_notify_binding_t;
+
 /*============================================================================
  * 静态池
  *============================================================================*/
 
 static irq_desc_t irq_descriptors[IRQ_MAX_USER];
+static irq_notify_binding_t irq_notify_bindings[IRQ_MAX_USER];
 
 #if IRQ_THREADED_ENABLE
 static irq_thread_t irq_threads[IRQ_THREADED_MAX];
@@ -121,6 +130,11 @@ static void irq_record_event(int16_t irq, uint8_t action,
 
 void irq_init(void) {
     memset(irq_descriptors, 0, sizeof(irq_descriptors));
+    memset(irq_notify_bindings, 0, sizeof(irq_notify_bindings));
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        irq_notify_bindings[i].irq_num = KERN_INVALID_ID;
+        irq_notify_bindings[i].ep_id = KERN_INVALID_ID;
+    }
 #if IRQ_THREADED_ENABLE
     memset(irq_threads, 0, sizeof(irq_threads));
 #endif
@@ -242,6 +256,90 @@ kern_err_t irq_disable(int16_t irq) {
     hal_irq_disable_irq((uint32_t)irq);
     irq_record_event(irq, TRACE_IRQ_MASK, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
+}
+
+kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
+    if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
+        return KERN_ERR_PARAM;
+    }
+    if (!endpoint_exists(ep_id)) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
+        return KERN_ERR_PARAM;
+    }
+
+    uint32_t crit = hal_enter_critical();
+
+    int slot = -1;
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_notify_bindings[i].bound &&
+            irq_notify_bindings[i].irq_num == irq) {
+            slot = i;
+            break;
+        }
+        if (slot < 0 && !irq_notify_bindings[i].bound) {
+            slot = i;
+        }
+    }
+
+    if (slot < 0) {
+        hal_exit_critical(crit);
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
+        return KERN_ERR_RESOURCE;
+    }
+
+    irq_notify_bindings[slot].irq_num = irq;
+    irq_notify_bindings[slot].ep_id = ep_id;
+    irq_notify_bindings[slot].badge = badge;
+    irq_notify_bindings[slot].bound = 1;
+
+    hal_exit_critical(crit);
+    irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
+    return KERN_OK;
+}
+
+kern_err_t irq_notify(int16_t irq) {
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+    if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_FIRE, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
+        return KERN_ERR_PARAM;
+    }
+
+    ep_id_t ep_id = KERN_INVALID_ID;
+    uint32_t badge = 0;
+
+    uint32_t crit = hal_enter_critical();
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_notify_bindings[i].bound &&
+            irq_notify_bindings[i].irq_num == irq) {
+            ep_id = irq_notify_bindings[i].ep_id;
+            badge = irq_notify_bindings[i].badge;
+            break;
+        }
+    }
+    hal_exit_critical(crit);
+
+    if (ep_id == KERN_INVALID_ID) {
+        irq_record_event(irq, TRACE_IRQ_SPURIOUS, KERN_ERR_NOEXIST,
+                         STATS_COUNTER_NOEXIST);
+        return KERN_ERR_NOEXIST;
+    }
+
+    uint8_t msg[KERN_EP_MSG_SIZE];
+    memset(msg, 0, sizeof(msg));
+    ((uint32_t *)msg)[0] = badge;
+    ((uint32_t *)msg)[1] = (uint32_t)irq;
+
+    kern_err_t err = endpoint_notify(ep_id, msg);
+    irq_record_event(irq, TRACE_IRQ_FIRE, err,
+                     err == KERN_OK ? STATS_COUNTER_OK : STATS_COUNTER_ERROR);
+    return err;
 }
 
 /*============================================================================

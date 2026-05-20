@@ -8,6 +8,8 @@
 #include "board_config.h"
 #include "kernel.h"
 #include "task.h"
+#include "mem.h"
+#include "capability.h"
 #include "gpio.h"
 #include "system_init.h"
 #include "shell.h"
@@ -27,6 +29,13 @@ extern const test_module_t __test_modules_end;
 static volatile int test_passed = 0;
 static volatile int test_failed = 0;
 static const char *current_module  = "";
+
+typedef struct {
+    int passed;
+    int failed;
+    uint16_t cap_free;
+    uint32_t mem_outstanding;
+} test_resource_snapshot_t;
 
 /*============================================================================
  * 计数查询
@@ -63,6 +72,80 @@ void test_print_hex(const char *label, uint32_t num) {
     for (int i = 7; i >= 0; i--) { buf[i] = hex[num & 0xF]; num >>= 4; }
     uart_puts(TEST_UART, buf);
     uart_puts(TEST_UART, "\r\n");
+}
+
+static test_resource_snapshot_t test_resource_snapshot(void) {
+    test_resource_snapshot_t snap;
+    snap.passed = test_passed;
+    snap.failed = test_failed;
+#if CAP_ENABLE
+    snap.cap_free = cap_free_count();
+#else
+    snap.cap_free = 0;
+#endif
+#if MEM_DYNAMIC
+    snap.mem_outstanding = mem_get_outstanding_allocs();
+#else
+    snap.mem_outstanding = 0;
+#endif
+    return snap;
+}
+
+static void test_print_module_result(const test_module_t *module,
+                                     const test_resource_snapshot_t *before,
+                                     const test_resource_snapshot_t *after) {
+    int pass_delta = after->passed - before->passed;
+    int fail_delta = after->failed - before->failed;
+
+    test_print("[MODULE] ");
+    test_print(module->name);
+    test_print(" pass +");
+    uart_putdec(TEST_UART, (uint32_t)pass_delta);
+    test_print(" fail +");
+    uart_putdec(TEST_UART, (uint32_t)fail_delta);
+
+#if CAP_ENABLE
+    test_print(" cap ");
+    uart_putdec(TEST_UART, (uint32_t)before->cap_free);
+    test_print("->");
+    uart_putdec(TEST_UART, (uint32_t)after->cap_free);
+#endif
+
+#if MEM_DYNAMIC
+    test_print(" mem ");
+    uart_putdec(TEST_UART, before->mem_outstanding);
+    test_print("->");
+    uart_putdec(TEST_UART, after->mem_outstanding);
+#endif
+
+    test_print("\r\n");
+
+#if CAP_ENABLE
+    if (after->cap_free < before->cap_free) {
+        test_print("[RESOURCE] ");
+        test_print(module->name);
+        test_print(": cap free decreased by ");
+        uart_putdec(TEST_UART, (uint32_t)(before->cap_free - after->cap_free));
+        test_print("\r\n");
+    }
+    if (after->cap_free < 8U) {
+        test_print("[RESOURCE] ");
+        test_print(module->name);
+        test_print(": cap pool low, free=");
+        uart_putdec(TEST_UART, (uint32_t)after->cap_free);
+        test_print("\r\n");
+    }
+#endif
+
+#if MEM_DYNAMIC
+    if (after->mem_outstanding > before->mem_outstanding) {
+        test_print("[RESOURCE] ");
+        test_print(module->name);
+        test_print(": mem outstanding increased by ");
+        uart_putdec(TEST_UART, after->mem_outstanding - before->mem_outstanding);
+        test_print("\r\n");
+    }
+#endif
 }
 
 /*============================================================================
@@ -132,7 +215,10 @@ void test_run_all_modules(void) {
 
         module_count++;
         current_module = module->name;
+        test_resource_snapshot_t before = test_resource_snapshot();
         module->func();
+        test_resource_snapshot_t after = test_resource_snapshot();
+        test_print_module_result(module, &before, &after);
     }
 
     test_print_num("\r\nModules: ", module_count);

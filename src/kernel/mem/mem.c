@@ -11,7 +11,9 @@
 #include "trace.h"
 #include "stats.h"
 #include "scheduler.h"
+#include "task.h"
 #include "capability.h"
+#include "mpu.h"
 #include "hal.h"
 #include <string.h>
 
@@ -382,9 +384,114 @@ uint32_t mem_get_fail_count(void) {
 
 #if CAP_ENABLE
 
+typedef struct {
+    void  *base;
+    size_t size;
+} kmem_object_t;
+
+typedef struct {
+    uintptr_t base;
+    size_t    size;
+    uint8_t   width;
+    uint8_t   in_use;
+} kmmio_object_t;
+
+typedef struct {
+    void  *base;
+    size_t size;
+    uint8_t in_use;
+    uint8_t aligned;
+} kshm_object_t;
+
+#define KMMIO_PERIPH_BASE 0x40000000UL
+#define KMMIO_PERIPH_SIZE 0x20000000UL
+#define KMMIO_OBJECT_MAX  8
+#define KSHM_OBJECT_MAX   8
+
+static kmmio_object_t kmmio_objects[KMMIO_OBJECT_MAX];
+static kshm_object_t kshm_objects[KSHM_OBJECT_MAX];
+
+static int kmem_range_in_region(uintptr_t base, size_t size,
+                                uintptr_t region_base, size_t region_size) {
+    if (size == 0) {
+        return 0;
+    }
+
+    uintptr_t end = base + (uintptr_t)size - 1U;
+    uintptr_t region_end = region_base + (uintptr_t)region_size - 1U;
+    if (end < base || region_end < region_base) {
+        return 0;
+    }
+
+    return base >= region_base && end <= region_end;
+}
+
+static int kmmio_width_valid(uint8_t width) {
+    return width == 1U || width == 2U || width == 4U;
+}
+
+static kmmio_object_t *kmmio_alloc_object(void) {
+    for (uint32_t i = 0; i < KMMIO_OBJECT_MAX; i++) {
+        if (!kmmio_objects[i].in_use) {
+            memset(&kmmio_objects[i], 0, sizeof(kmmio_objects[i]));
+            kmmio_objects[i].in_use = 1U;
+            return &kmmio_objects[i];
+        }
+    }
+    return NULL;
+}
+
+static void kmmio_free_object(kmmio_object_t *mmio) {
+    if (mmio != NULL) {
+        memset(mmio, 0, sizeof(*mmio));
+    }
+}
+
+static kshm_object_t *kshm_alloc_object(void) {
+    for (uint32_t i = 0; i < KSHM_OBJECT_MAX; i++) {
+        if (!kshm_objects[i].in_use) {
+            memset(&kshm_objects[i], 0, sizeof(kshm_objects[i]));
+            kshm_objects[i].in_use = 1U;
+            return &kshm_objects[i];
+        }
+    }
+    return NULL;
+}
+
+static void kshm_free_object(kshm_object_t *shm) {
+    if (shm != NULL) {
+        memset(shm, 0, sizeof(*shm));
+    }
+}
+
 static void kmem_cap_cleanup(void *object, uint8_t obj_type) {
-    if (obj_type == CAP_OBJ_MEMBLOCK) {
-        kfree(object);
+    if (obj_type == CAP_OBJ_MEMBLOCK && object != NULL) {
+        kmem_object_t *mem = (kmem_object_t *)object;
+        if (mem->base != NULL) {
+            kfree(mem->base);
+            mem->base = NULL;
+        }
+        kfree(mem);
+    } else if (obj_type == CAP_OBJ_MMIO && object != NULL) {
+        kmmio_free_object((kmmio_object_t *)object);
+    } else if (obj_type == CAP_OBJ_SHM && object != NULL) {
+        kshm_object_t *shm = (kshm_object_t *)object;
+        if (shm->base != NULL) {
+            if (shm->aligned) {
+                kfree_aligned(shm->base);
+            } else {
+                kfree(shm->base);
+            }
+            shm->base = NULL;
+        }
+        kshm_free_object(shm);
+    }
+}
+
+static void kmem_cap_revoke_hook(cap_id_t cap, void *object, uint8_t obj_type) {
+    (void)object;
+    if (obj_type == CAP_OBJ_SHM) {
+        kshm_unmap_cap_from_all_tasks(cap);
     }
 }
 
@@ -393,32 +500,408 @@ cap_id_t kmem_alloc_cap(size_t size, uint8_t rights) {
         rights = CAP_READ | CAP_WRITE | CAP_MANAGE;
     }
 
-    void *ptr = kmalloc(size);
-    if (!ptr) {
+    kmem_object_t *mem = (kmem_object_t *)kmalloc(sizeof(kmem_object_t));
+    if (!mem) {
         return KERN_INVALID_ID;
     }
+    memset(mem, 0, sizeof(*mem));
+
+    mem->base = kmalloc(size);
+    if (!mem->base) {
+        kfree(mem);
+        return KERN_INVALID_ID;
+    }
+    mem->size = size;
 
     (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, kmem_cap_cleanup);
-    cap_id_t cap = cap_create(ptr, CAP_OBJ_MEMBLOCK, rights, 0);
+    cap_id_t cap = cap_create(mem, CAP_OBJ_MEMBLOCK, rights, 0);
     if (cap == KERN_INVALID_ID) {
-        kfree(ptr);
+        kmem_cap_cleanup(mem, CAP_OBJ_MEMBLOCK);
         return KERN_INVALID_ID;
     }
     return cap;
 }
 
 void *kmem_resolve_cap(cap_id_t cap, uint8_t required_rights) {
-    return cap_resolve(cap, CAP_OBJ_MEMBLOCK, required_rights);
+    kmem_object_t *mem = cap_resolve(cap, CAP_OBJ_MEMBLOCK, required_rights);
+    return mem ? mem->base : NULL;
 }
 
 kern_err_t kmem_free_cap(cap_id_t cap) {
-    void *ptr = cap_resolve(cap, CAP_OBJ_MEMBLOCK, CAP_MANAGE);
-    if (!ptr) {
+    kmem_object_t *mem = cap_resolve(cap, CAP_OBJ_MEMBLOCK, CAP_MANAGE);
+    if (!mem) {
         return KERN_ERR_CAP;
     }
 
     (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, kmem_cap_cleanup);
     return cap_revoke(cap);
+}
+
+kern_err_t kmem_get_bounds(cap_id_t cap, void **base, size_t *size) {
+    if (base == NULL || size == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    kmem_object_t *mem = cap_resolve(cap, CAP_OBJ_MEMBLOCK, CAP_READ);
+    if (!mem) {
+        return KERN_ERR_CAP;
+    }
+
+    *base = mem->base;
+    *size = mem->size;
+    return KERN_OK;
+}
+
+kern_err_t kmem_get_range(cap_id_t cap, uint8_t required_rights,
+                          size_t offset, size_t len, void **ptr) {
+    if (ptr == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    if (len == 0) {
+        return KERN_ERR_PARAM;
+    }
+
+    kmem_object_t *mem = cap_resolve(cap, CAP_OBJ_MEMBLOCK, required_rights);
+    if (!mem) {
+        return KERN_ERR_CAP;
+    }
+    if (offset > mem->size || len > (mem->size - offset)) {
+        return KERN_ERR_PARAM;
+    }
+
+    *ptr = (void *)((uint8_t *)mem->base + offset);
+    return KERN_OK;
+}
+
+kern_err_t kmmio_create_cap(uintptr_t base, size_t size, uint8_t width,
+                            uint8_t rights, cap_id_t *out_cap) {
+    if (out_cap == NULL || size == 0 || !kmmio_width_valid(width)) {
+        return KERN_ERR_PARAM;
+    }
+    *out_cap = KERN_INVALID_ID;
+
+    if ((base & ((uintptr_t)width - 1U)) != 0U) {
+        return KERN_ERR_PARAM;
+    }
+    if (!kmem_range_in_region(base, size, KMMIO_PERIPH_BASE, KMMIO_PERIPH_SIZE)) {
+        return KERN_ERR_PERM;
+    }
+
+    if (rights == 0) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE;
+    }
+
+    kmmio_object_t *mmio = kmmio_alloc_object();
+    if (!mmio) {
+        return KERN_ERR_RESOURCE;
+    }
+    mmio->base = base;
+    mmio->size = size;
+    mmio->width = width;
+
+    (void)cap_register_cleanup(CAP_OBJ_MMIO, kmem_cap_cleanup);
+    cap_id_t cap = cap_create_for(NULL, mmio, CAP_OBJ_MMIO, rights);
+    if (cap == KERN_INVALID_ID) {
+        kmmio_free_object(mmio);
+        return KERN_ERR_RESOURCE;
+    }
+
+    *out_cap = cap;
+    return KERN_OK;
+}
+
+kern_err_t kmmio_delete_cap(cap_id_t cap) {
+    kmmio_object_t *mmio = cap_resolve(cap, CAP_OBJ_MMIO, CAP_MANAGE);
+    if (!mmio) {
+        return KERN_ERR_CAP;
+    }
+
+    (void)cap_register_cleanup(CAP_OBJ_MMIO, kmem_cap_cleanup);
+    return cap_revoke(cap);
+}
+
+kern_err_t kmmio_get_bounds(cap_id_t cap, uintptr_t *base, size_t *size,
+                            uint8_t *width) {
+    if (base == NULL || size == NULL || width == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    kmmio_object_t *mmio = cap_resolve(cap, CAP_OBJ_MMIO, CAP_READ);
+    if (!mmio) {
+        return KERN_ERR_CAP;
+    }
+
+    *base = mmio->base;
+    *size = mmio->size;
+    *width = mmio->width;
+    return KERN_OK;
+}
+
+cap_id_t kshm_create_cap(size_t size, uint8_t rights) {
+    if (size == 0) {
+        return KERN_INVALID_ID;
+    }
+    if (rights == 0) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE | CAP_TRANSFER | CAP_GRANT;
+    }
+
+    kshm_object_t *shm = kshm_alloc_object();
+    if (!shm) {
+        return KERN_INVALID_ID;
+    }
+
+    shm->base = kmalloc(size);
+    if (!shm->base) {
+        kshm_free_object(shm);
+        return KERN_INVALID_ID;
+    }
+    shm->size = size;
+
+    (void)cap_register_cleanup(CAP_OBJ_SHM, kmem_cap_cleanup);
+    (void)cap_register_revoke_hook(CAP_OBJ_SHM, kmem_cap_revoke_hook);
+    cap_id_t cap = cap_create_for(NULL, shm, CAP_OBJ_SHM, rights);
+    if (cap == KERN_INVALID_ID) {
+        kmem_cap_cleanup(shm, CAP_OBJ_SHM);
+        return KERN_INVALID_ID;
+    }
+    return cap;
+}
+
+static int kshm_is_power_of_two(size_t size) {
+    return size != 0 && (size & (size - 1U)) == 0;
+}
+
+cap_id_t kshm_create_aligned_cap(size_t size, uint8_t rights) {
+    if (size < 32 || !kshm_is_power_of_two(size)) {
+        return KERN_INVALID_ID;
+    }
+    if (rights == 0) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE | CAP_TRANSFER | CAP_GRANT;
+    }
+
+    kshm_object_t *shm = kshm_alloc_object();
+    if (!shm) {
+        return KERN_INVALID_ID;
+    }
+
+    shm->base = kmalloc_aligned(size, size);
+    if (!shm->base) {
+        kshm_free_object(shm);
+        return KERN_INVALID_ID;
+    }
+    shm->size = size;
+    shm->aligned = 1U;
+
+    (void)cap_register_cleanup(CAP_OBJ_SHM, kmem_cap_cleanup);
+    (void)cap_register_revoke_hook(CAP_OBJ_SHM, kmem_cap_revoke_hook);
+    cap_id_t cap = cap_create_for(NULL, shm, CAP_OBJ_SHM, rights);
+    if (cap == KERN_INVALID_ID) {
+        kmem_cap_cleanup(shm, CAP_OBJ_SHM);
+        return KERN_INVALID_ID;
+    }
+    return cap;
+}
+
+kern_err_t kshm_delete_cap(cap_id_t cap) {
+    kshm_object_t *shm = cap_resolve(cap, CAP_OBJ_SHM, CAP_MANAGE);
+    if (!shm) {
+        return KERN_ERR_CAP;
+    }
+
+    (void)cap_register_cleanup(CAP_OBJ_SHM, kmem_cap_cleanup);
+    (void)cap_register_revoke_hook(CAP_OBJ_SHM, kmem_cap_revoke_hook);
+    return cap_revoke(cap);
+}
+
+kern_err_t kshm_get_bounds(cap_id_t cap, void **base, size_t *size) {
+    if (base == NULL || size == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    kshm_object_t *shm = cap_resolve(cap, CAP_OBJ_SHM, CAP_READ);
+    if (!shm) {
+        return KERN_ERR_CAP;
+    }
+
+    *base = shm->base;
+    *size = shm->size;
+    return KERN_OK;
+}
+
+kern_err_t kshm_get_range(cap_id_t cap, uint8_t required_rights,
+                          size_t offset, size_t len, void **ptr) {
+    if (ptr == NULL || len == 0) {
+        return KERN_ERR_PARAM;
+    }
+
+    kshm_object_t *shm = cap_resolve(cap, CAP_OBJ_SHM, required_rights);
+    if (!shm) {
+        return KERN_ERR_CAP;
+    }
+    if (offset > shm->size || len > (shm->size - offset)) {
+        return KERN_ERR_PARAM;
+    }
+
+    *ptr = (void *)((uint8_t *)shm->base + offset);
+    return KERN_OK;
+}
+
+kern_err_t kshm_map_to_task(tcb_t *task, cap_id_t cap,
+                            uint8_t rights, void **out_addr) {
+#if MPU_ENABLE
+    if (task == NULL || out_addr == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    *out_addr = NULL;
+    if (rights != CAP_READ && rights != (CAP_READ | CAP_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+
+    kshm_object_t *shm = cap_lookup_for(task, cap, CAP_OBJ_SHM, rights);
+    if (!shm) {
+        return KERN_ERR_CAP;
+    }
+    if (!kshm_is_power_of_two(shm->size) || shm->size < 32 ||
+        (((uintptr_t)shm->base & ((uintptr_t)shm->size - 1U)) != 0U)) {
+        return KERN_ERR_PARAM;
+    }
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (task->shm_maps[i].in_use && task->shm_maps[i].cap == cap) {
+            return KERN_ERR_BUSY;
+        }
+    }
+
+    int map_slot = -1;
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (!task->shm_maps[i].in_use) {
+            map_slot = (int)i;
+            break;
+        }
+    }
+    if (map_slot < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+
+    int region = -1;
+    for (uint32_t r = 3; r < 8; r++) {
+        if ((task->mpu_regions[r][1] & RASR_ENABLE) == 0) {
+            region = (int)r;
+            break;
+        }
+    }
+    if (region < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+
+    uint32_t ap = (rights & CAP_WRITE) ? AP_FULL : AP_PRW_URO;
+    uint32_t rasr = RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE |
+                    mpu_calc_rasr_size((uint32_t)shm->size);
+    task->mpu_regions[region][0] = ((uint32_t)(uintptr_t)shm->base) |
+                                   RBAR_VALID | (uint32_t)region;
+    task->mpu_regions[region][1] = rasr;
+
+    task->shm_maps[map_slot].in_use = 1U;
+    task->shm_maps[map_slot].region = (uint8_t)region;
+    task->shm_maps[map_slot].rights = rights;
+    task->shm_maps[map_slot].cap = cap;
+    task->shm_maps[map_slot].addr = shm->base;
+    task->shm_maps[map_slot].size = shm->size;
+
+    *out_addr = shm->base;
+    return KERN_OK;
+#else
+    (void)task; (void)cap; (void)rights; (void)out_addr;
+    return KERN_ERR_STATE;
+#endif
+}
+
+kern_err_t kshm_unmap_from_task(tcb_t *task, cap_id_t cap) {
+#if MPU_ENABLE
+    if (task == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (task->shm_maps[i].in_use && task->shm_maps[i].cap == cap) {
+            kern_err_t result = KERN_OK;
+            if (cap_lookup_for(task, cap, CAP_OBJ_SHM, CAP_READ) == NULL) {
+                result = KERN_ERR_CAP;
+            }
+
+            uint8_t region = task->shm_maps[i].region;
+            if (region < 8) {
+                task->mpu_regions[region][0] = 0;
+                task->mpu_regions[region][1] = 0;
+            }
+            memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
+            return result;
+        }
+    }
+    return KERN_ERR_NOEXIST;
+#else
+    (void)task; (void)cap;
+    return KERN_ERR_STATE;
+#endif
+}
+
+void kshm_unmap_cap_from_all_tasks(cap_id_t cap) {
+#if MPU_ENABLE
+    tcb_t *current = sched_get_current();
+    int current_changed = 0;
+
+    task_id_t id = KERN_INVALID_ID;
+    while ((id = task_get_next(id)) != KERN_INVALID_ID) {
+        tcb_t *task = task_get_tcb(id);
+        if (task == NULL) {
+            continue;
+        }
+
+        for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+            if (!task->shm_maps[i].in_use || task->shm_maps[i].cap != cap) {
+                continue;
+            }
+
+            uint8_t region = task->shm_maps[i].region;
+            if (region < 8) {
+                task->mpu_regions[region][0] = 0;
+                task->mpu_regions[region][1] = 0;
+            }
+            memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
+            if (task == current) {
+                current_changed = 1;
+            }
+        }
+    }
+
+    if (current_changed && current != NULL) {
+        mpu_load_task_regions(current);
+    }
+#else
+    (void)cap;
+#endif
+}
+
+void kshm_unmap_all_for_task(tcb_t *task) {
+#if MPU_ENABLE
+    if (task == NULL) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (!task->shm_maps[i].in_use) {
+            continue;
+        }
+        uint8_t region = task->shm_maps[i].region;
+        if (region < 8) {
+            task->mpu_regions[region][0] = 0;
+            task->mpu_regions[region][1] = 0;
+        }
+        memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
+    }
+#else
+    (void)task;
+#endif
 }
 
 #endif

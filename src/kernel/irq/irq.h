@@ -49,6 +49,25 @@ kern_err_t irq_enable(int16_t irq);
  */
 kern_err_t irq_disable(int16_t irq);
 
+/**
+ * @brief 将 IRQ 事件绑定到 endpoint 通知
+ * @param irq   中断号
+ * @param ep_id 通知目标 endpoint
+ * @param badge 写入通知消息首字的 badge
+ * @return KERN_OK 成功, 其他失败
+ */
+kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge);
+
+/**
+ * @brief 投递一次 IRQ endpoint 通知
+ * @param irq 中断号
+ * @return KERN_OK 成功, 其他失败
+ *
+ * @note 当前版本只能在任务上下文调用；真实 ISR 到 endpoint 的队列化
+ *       mask/ack 策略后续补齐。
+ */
+kern_err_t irq_notify(int16_t irq);
+
 /*============================================================================
  * 中断上下文检测
  *============================================================================*/

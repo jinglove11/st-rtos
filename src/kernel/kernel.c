@@ -18,6 +18,7 @@
 #include "bh.h"
 #include "stats.h"
 #include "capability.h"
+#include "root_bootstrap.h"
 #include "vfs/vfs.h"
 #if DRIVER_ENABLE
 #include "device.h"
@@ -38,6 +39,7 @@ void kern_init(void) {
 #endif
 #if CAP_ENABLE
     cap_init();
+    root_bootstrap_init();
 #endif
 #if VFS_ENABLE
     vfs_init();

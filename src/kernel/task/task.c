@@ -16,6 +16,8 @@
 #include "endpoint.h"
 #include "channel.h"
 #include "vfs.h"
+#include "mem.h"
+#include "root_bootstrap.h"
 
 /*
  * PendSV/SVC 汇编直接按偏移访问 tcb_t::state 和 tcb_t::attrs。
@@ -185,7 +187,12 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
     vfs_close_task_fds(tcb);
 #endif
 
+#if MPU_ENABLE && CAP_ENABLE
+    kshm_unmap_all_for_task(tcb);
+#endif
+
 #if CAP_ENABLE
+    root_bootstrap_cleanup_task(tcb);
     cap_revoke_all((uint8_t)tcb->id);
 #endif
 

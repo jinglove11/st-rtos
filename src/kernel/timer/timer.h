@@ -126,6 +126,20 @@ kern_err_t timer_reset(timer_id_t timer_id);
  */
 kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period);
 
+/**
+ * @brief 将定时器到期事件绑定到 endpoint 通知
+ *
+ * @param timer_id 定时器 ID
+ * @param ep_id    通知目标 endpoint
+ * @param badge    写入通知消息首字的 badge
+ *
+ * @return KERN_OK 成功，其他失败
+ *
+ * @note 通知是单向消息，不等待 endpoint reply。
+ */
+kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
+                               uint32_t badge);
+
 /*============================================================================
  * 定时器状态查询
  *============================================================================*/

@@ -35,6 +35,15 @@ int16_t bh_create(bh_handler_t handler, void *arg);
 kern_err_t bh_schedule(int16_t bh_id);
 
 /**
+ * @brief 将 BH 运行事件绑定到 endpoint 通知
+ * @param bh_id 底半部 ID
+ * @param ep_id 通知目标 endpoint
+ * @param badge 写入通知消息首字的 badge
+ * @return KERN_OK 成功, 其他失败
+ */
+kern_err_t bh_bind_endpoint(int16_t bh_id, ep_id_t ep_id, uint32_t badge);
+
+/**
  * @brief 取消尚未执行的底半部
  * @param bh_id 底半部 ID
  * @return KERN_OK 成功, 其他失败

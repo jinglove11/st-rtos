@@ -29,7 +29,9 @@ static void test_cpu_usage_basic(void) {
     task_id_t tid = task_create("cpu_b", (task_func_t)(void (*)(void *))NULL,
                                 NULL, 10, 0);
     /* 用一个简单的忙等任务 */
-    (void)tid;
+    if (tid >= 0) {
+        TEST_ASSERT_EQ(KERN_OK, task_delete(tid), "unused stats task deleted");
+    }
 
     /* 验证 idle 任务有 cpu_usage 字段 */
     tcb_t *idle = task_get_idle();
@@ -86,6 +88,10 @@ static void test_cpu_usage_sum(void) {
         if (bitmap & (1U << i)) {
             sum += task_pool[i].cpu_usage;
         }
+    }
+    tcb_t *idle = task_get_idle();
+    if (idle != NULL) {
+        sum += idle->cpu_usage;
     }
 
     /* 停止忙等任务 */

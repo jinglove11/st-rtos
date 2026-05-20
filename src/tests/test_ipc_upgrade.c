@@ -13,6 +13,7 @@
 #include "event.h"
 #include "endpoint.h"
 #include "channel.h"
+#include "mem.h"
 
 #if TEST_ENABLE
 
@@ -379,6 +380,11 @@ static volatile int ep_cap_client_done;
 static volatile int ep_cap_server_ok;
 static volatile int ep_cap_client_ok;
 static int ep_cap_object;
+static cap_id_t ep_shm_src;
+static volatile int ep_shm_server_done;
+static volatile int ep_shm_client_done;
+static volatile int ep_shm_server_ok;
+static volatile int ep_shm_client_ok;
 
 static void ep_cap_server(void *arg) {
     (void)arg;
@@ -454,6 +460,109 @@ static void test_endpoint_cap_transfer(void) {
     TEST_ASSERT(ep_cap_client_ok == 1, "client kept source cap");
 
     endpoint_delete(test_ep_cap);
+}
+
+static void ep_shm_server(void *arg) {
+    (void)arg;
+
+    uint32_t msg = 0;
+    cap_id_t caps[IPC_CAPS_MAX];
+    uint8_t cap_count = 0;
+
+    kern_err_t err = endpoint_recv_caps(test_ep_cap, &msg,
+                                        caps, &cap_count, 1000);
+    if (err == KERN_OK && cap_count == 1) {
+        void *base = NULL;
+        size_t size = 0;
+        void *range = NULL;
+        kern_err_t read_err = kshm_get_bounds(caps[0], &base, &size);
+        kern_err_t range_err = kshm_get_range(caps[0], CAP_READ, 8, 8, &range);
+        kern_err_t write_err = kshm_get_range(caps[0], CAP_WRITE, 0, 4, &range);
+        if (read_err == KERN_OK && size == 96 && base != NULL &&
+            range_err == KERN_OK && write_err == KERN_ERR_CAP) {
+            ep_shm_server_ok = 1;
+        }
+        uint32_t reply = msg + 2;
+        endpoint_reply(test_ep_cap, &reply);
+    }
+    ep_shm_server_done = 1;
+}
+
+static void ep_shm_client(void *arg) {
+    (void)arg;
+
+    ipc_cap_xfer_t xfer;
+    xfer.src_cap = ep_shm_src;
+    xfer.rights = CAP_READ;
+    xfer.flags = IPC_CAP_COPY;
+
+    uint32_t msg = 50;
+    kern_err_t err = endpoint_send_caps(test_ep_cap, &msg, &xfer, 1, 1000);
+    if (err == KERN_OK && msg == 52) {
+        void *range = NULL;
+        kern_err_t write_err = kshm_get_range(ep_shm_src, CAP_WRITE, 0, 4, &range);
+        if (write_err == KERN_OK) {
+            ep_shm_client_ok = 1;
+        }
+    }
+    ep_shm_client_done = 1;
+}
+
+static void test_endpoint_shm_cap_transfer(void) {
+    test_section("Test 9b: Endpoint SHM capability transfer");
+
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    test_ep_cap = endpoint_create("ep_shm", sizeof(uint32_t), 4);
+    TEST_ASSERT(test_ep_cap >= 0, "shm endpoint created");
+
+    ep_shm_server_done = 0;
+    ep_shm_client_done = 0;
+    ep_shm_server_ok = 0;
+    ep_shm_client_ok = 0;
+    ep_shm_src = KERN_INVALID_ID;
+
+    task_id_t server = task_create("ep_shms", ep_shm_server, NULL, 10, 0);
+    task_id_t client = task_create("ep_shmc", ep_shm_client, NULL, 11, 0);
+    TEST_ASSERT(server >= 0 && client >= 0, "shm tasks created");
+
+    tcb_t *client_tcb = task_get_tcb(client);
+    TEST_ASSERT(client_tcb != NULL, "shm client TCB available");
+
+    cap_id_t root = kshm_create_cap(96,
+                                    CAP_READ | CAP_WRITE |
+                                    CAP_MANAGE | CAP_TRANSFER);
+    TEST_ASSERT(root >= 0, "shm root cap created");
+    if (root >= 0 && client_tcb != NULL) {
+        ep_shm_src = cap_copy_to(NULL, root, client_tcb,
+                                 CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    TEST_ASSERT(ep_shm_src >= 0, "shm source cap copied to client");
+
+    if (server >= 0) task_start(server);
+    if (client >= 0) task_start(client);
+
+    task_delay(100);
+
+    TEST_ASSERT(ep_shm_server_done == 1, "shm server done");
+    TEST_ASSERT(ep_shm_client_done == 1, "shm client done");
+    TEST_ASSERT(ep_shm_server_ok == 1, "server received read-only shm cap");
+    TEST_ASSERT(ep_shm_client_ok == 1, "client kept writable shm source cap");
+
+    if (root >= 0) {
+        kern_err_t err = kshm_delete_cap(root);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err, "shm root revoke OK");
+    }
+    if (ep_shm_src >= 0) {
+        void *base = NULL;
+        size_t size = 0;
+        kern_err_t err = kshm_get_bounds(ep_shm_src, &base, &size);
+        TEST_ASSERT_EQ((int)KERN_ERR_CAP, (int)err,
+                       "shm copied source invalid after root revoke");
+    }
+
+    endpoint_delete(test_ep_cap);
+    TEST_ASSERT_EQ((int)outstanding, (int)mem_get_outstanding_allocs(),
+                   "shm endpoint transfer cleanup restored outstanding");
 }
 
 /*============================================================================
@@ -917,6 +1026,7 @@ static void test_ipc_upgrade_module(void) {
     test_endpoint_reply_scoped_to_receiver();
     test_endpoint_reply_after_timeout();
     test_endpoint_cap_transfer();
+    test_endpoint_shm_cap_transfer();
     test_endpoint_delete_wakes();
 
     /* Channel */

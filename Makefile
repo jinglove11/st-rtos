@@ -114,6 +114,7 @@ CFLAGS      += -O2 -g
 CFLAGS      += -ffreestanding -nostdlib
 CFLAGS      += -fno-builtin -fno-common
 CFLAGS      += -ffunction-sections -fdata-sections
+CFLAGS      += -MMD -MP
 CFLAGS      += -I$(SRC_DIR)/kernel/include
 CFLAGS      += -I$(SRC_DIR)/kernel/core
 CFLAGS      += -I$(SRC_DIR)/kernel/task
@@ -142,6 +143,7 @@ CFLAGS      += -DTARGET_BOARD=$(BOARD_DEFINE)
 ASFLAGS     = $(CPU)
 ASFLAGS     += -Wall -g
 ASFLAGS     += -x assembler-with-cpp
+ASFLAGS     += -MMD -MP
 
 LDFLAGS     = $(CPU)
 LDFLAGS     += -T$(LINK_SCRIPT)
@@ -184,6 +186,7 @@ KERN_SOURCES += src/kernel/vfs/ramfs.c
 KERN_SOURCES += src/kernel/dev/device.c
 KERN_SOURCES += src/kernel/trace/trace.c
 KERN_SOURCES += src/kernel/stats/stats.c
+KERN_SOURCES += src/kernel/root_bootstrap.c
 KERN_SOURCES += src/kernel/system_init.c
 
 TEST_SOURCES  = src/tests/test_framework.c
@@ -205,6 +208,7 @@ TEST_SOURCES += src/tests/test_watchdog.c
 TEST_SOURCES += src/tests/test_stats.c
 TEST_SOURCES += src/tests/test_trace.c
 TEST_SOURCES += src/tests/test_mem.c
+TEST_SOURCES += src/tests/test_service_model.c
 TEST_SOURCES += src/tests/test_diag.c
 # TEST_SOURCES += src/tests/test_example.c  # 示例测试模块（取消注释启用）
 
@@ -226,6 +230,7 @@ C_SOURCES    = $(KERN_SOURCES) $(HAL_SOURCES) $(APP_SOURCES) $(TEST_SOURCES)
 
 OBJECTS      = $(C_SOURCES:src/%.c=$(BUILD_DIR)/%.o)
 OBJECTS      += $(ASM_SOURCES:src/%.S=$(BUILD_DIR)/%.o)
+DEPS         = $(OBJECTS:.o=.d)
 
 #----------------------------------------------------------------------------
 # 构建规则
@@ -266,6 +271,8 @@ $(BUILD_DIR)/%.o: src/%.S
 	@echo "Assembling: $<"
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) -c $< -o $@
+
+-include $(DEPS)
 
 #----------------------------------------------------------------------------
 # 清理

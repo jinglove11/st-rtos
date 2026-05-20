@@ -14,6 +14,7 @@
 #include "test_framework.h"
 #include "irq.h"
 #include "bh.h"
+#include "endpoint.h"
 #include "task.h"
 #include "hal.h"
 #include "kernel.h"
@@ -119,6 +120,44 @@ static void test_bh_lifecycle(void) {
     for (int i = 0; i < created; i++) {
         bh_delete(ids[i]);
     }
+}
+
+static void test_bh_endpoint_notification(void) {
+    test_section("Test 3a: BH endpoint notification");
+
+#if IPC_ENDPOINT
+    ep_id_t ep = endpoint_create("bh_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "BH notification endpoint created");
+    if (ep < 0) return;
+
+    int16_t bh_id = bh_create(NULL, NULL);
+    TEST_ASSERT(bh_id >= 0, "notification-only BH created");
+    if (bh_id < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = bh_bind_endpoint(bh_id, ep, 0x42484e54U);
+    TEST_ASSERT_EQ(KERN_OK, err, "BH bound to endpoint");
+
+    err = bh_bind_endpoint(bh_id, (ep_id_t)KERN_INVALID_ID, 0);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "BH bind rejects invalid endpoint");
+
+    err = bh_schedule(bh_id);
+    TEST_ASSERT_EQ(KERN_OK, err, "notification BH scheduled");
+
+    uint32_t msg[2] = {0, 0};
+    err = endpoint_recv(ep, msg, 30);
+    TEST_ASSERT_EQ(KERN_OK, err, "BH notification received");
+    TEST_ASSERT_EQ((int)0x42484e54U, (int)msg[0],
+                   "BH notification badge copied");
+    TEST_ASSERT_EQ((int)bh_id, (int)msg[1], "BH notification id copied");
+
+    bh_delete(bh_id);
+    endpoint_delete(ep);
+#else
+    test_skip("endpoint disabled");
+#endif
 }
 
 typedef struct {
@@ -350,6 +389,43 @@ static void test_isr_guards(void) {
 }
 
 /*============================================================================
+ * 测试 7: IRQ endpoint 通知
+ *============================================================================*/
+
+static void test_irq_endpoint_notification(void) {
+    test_section("Test 7: IRQ endpoint notification");
+
+#if IPC_ENDPOINT
+    ep_id_t ep = endpoint_create("irq_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "IRQ notification endpoint created");
+    if (ep < 0) return;
+
+    kern_err_t err = irq_bind_endpoint(44, ep, 0x4952514eU);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ bound to endpoint");
+
+    err = irq_bind_endpoint(44, (ep_id_t)KERN_INVALID_ID, 0);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "IRQ bind rejects invalid endpoint");
+
+    err = irq_notify(44);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ notification sent");
+
+    uint32_t msg[2] = {0, 0};
+    err = endpoint_recv(ep, msg, 0);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ notification received");
+    TEST_ASSERT_EQ((int)0x4952514eU, (int)msg[0],
+                   "IRQ notification badge copied");
+    TEST_ASSERT_EQ(44, (int)msg[1], "IRQ notification number copied");
+
+    err = irq_notify(43);
+    TEST_ASSERT_EQ(KERN_ERR_NOEXIST, err, "unbound IRQ notification rejected");
+
+    endpoint_delete(ep);
+#else
+    test_skip("endpoint disabled");
+#endif
+}
+
+/*============================================================================
  * 中断管理测试模块入口
  *============================================================================*/
 
@@ -357,6 +433,7 @@ static void test_irq_module(void) {
     test_isr_pool();
     test_isr_context();
     test_bh_lifecycle();
+    test_bh_endpoint_notification();
     test_bh_delete_while_running();
     test_irq_bh_trace_stats();
 #if IRQ_THREADED_ENABLE
@@ -364,6 +441,7 @@ static void test_irq_module(void) {
 #endif
     test_register_vector();
     test_isr_guards();
+    test_irq_endpoint_notification();
 }
 
 /*============================================================================

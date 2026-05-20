@@ -14,6 +14,7 @@
 #include "kernel_types.h"
 #include "hal.h"
 #include "trace.h"
+#include "syscall.h"
 #include <string.h>
 
 #if IPC_CHANNEL
@@ -59,6 +60,16 @@ static uint8_t ch_cap_count_buffers[KERN_MAX_CHANNELS][2];
 static uint8_t ch_shm_pool[KERN_MAX_CHANNELS][256]
     __attribute__((aligned(8)));
 
+#if SYSCALL_ENABLE
+static uint8_t ch_syscall_send_msg[KERNEL_MAX_TASKS][KERN_CH_MSG_SIZE]
+    __attribute__((aligned(4)));
+static ipc_cap_xfer_t ch_syscall_send_caps[KERNEL_MAX_TASKS][IPC_CAPS_MAX];
+static uint8_t ch_syscall_send_cap_count[KERNEL_MAX_TASKS];
+static void *ch_syscall_recv_msg[KERNEL_MAX_TASKS];
+static cap_id_t *ch_syscall_recv_caps[KERNEL_MAX_TASKS];
+static uint8_t *ch_syscall_recv_cap_count[KERNEL_MAX_TASKS];
+#endif
+
 /*============================================================================
  * 内部函数
  *============================================================================*/
@@ -92,6 +103,18 @@ static void channel_wake_all(wait_queue_t *queue, kern_err_t result) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
+#if SYSCALL_ENABLE
+        if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
+            memset(ch_syscall_send_msg[tcb->id], 0,
+                   sizeof(ch_syscall_send_msg[tcb->id]));
+            memset(ch_syscall_send_caps[tcb->id], 0,
+                   sizeof(ch_syscall_send_caps[tcb->id]));
+            ch_syscall_send_cap_count[tcb->id] = 0;
+            ch_syscall_recv_msg[tcb->id] = NULL;
+            ch_syscall_recv_caps[tcb->id] = NULL;
+            ch_syscall_recv_cap_count[tcb->id] = NULL;
+        }
+#endif
         tcb->block_result = result;
         sched_wakeup(tcb, result);
         tcb = next;
@@ -124,6 +147,145 @@ static kern_err_t channel_get_side(channel_t *ch, tcb_t *current, int *is_a) {
     return KERN_ERR_PERM;
 }
 
+static kern_err_t channel_get_recv_side(channel_t *ch, tcb_t *current,
+                                        int *is_a) {
+    if (ch == NULL || current == NULL) {
+        return KERN_ERR_STATE;
+    }
+    if (ch->peer_a == KERN_INVALID_ID && ch->peer_b == KERN_INVALID_ID) {
+        return KERN_ERR_STATE;
+    }
+    if (current->id == ch->peer_a) {
+        *is_a = 1;
+        return KERN_OK;
+    }
+    if (current->id == ch->peer_b) {
+        *is_a = 0;
+        return KERN_OK;
+    }
+    return KERN_ERR_PERM;
+}
+
+static int channel_sender_alive(channel_t *ch, int receiver_is_a) {
+    task_id_t sender = receiver_is_a ? ch->peer_b : ch->peer_a;
+    return sender != KERN_INVALID_ID && task_get_tcb(sender) != NULL;
+}
+
+static void channel_wake_recv_waiter(wait_queue_t *recv_wq,
+                                     uint8_t *buf,
+                                     uint8_t *ready_flag,
+                                     cap_id_t *cap_src,
+                                     uint8_t *cap_count_src) {
+    if (recv_wq->count == 0 || !*ready_flag) {
+        return;
+    }
+
+    tcb_t *waiter = wait_queue_get_highest(recv_wq);
+    if (waiter == NULL) {
+        return;
+    }
+
+#if SYSCALL_ENABLE
+    if (waiter->syscall_blocked &&
+        waiter->id >= 0 && waiter->id < KERNEL_MAX_TASKS &&
+        ch_syscall_recv_msg[waiter->id] != NULL) {
+        if (*cap_count_src > 0) {
+            if (ch_syscall_recv_caps[waiter->id] == NULL ||
+                ch_syscall_recv_cap_count[waiter->id] == NULL) {
+                ch_syscall_recv_msg[waiter->id] = NULL;
+                wait_queue_remove(recv_wq, waiter);
+                waiter->block_result = KERN_ERR_RESOURCE;
+                sched_wakeup(waiter, KERN_ERR_RESOURCE);
+                return;
+            }
+            memcpy(ch_syscall_recv_caps[waiter->id], cap_src,
+                   sizeof(cap_id_t) * (*cap_count_src));
+            *ch_syscall_recv_cap_count[waiter->id] = *cap_count_src;
+        } else if (ch_syscall_recv_cap_count[waiter->id] != NULL) {
+            *ch_syscall_recv_cap_count[waiter->id] = 0;
+        }
+
+        memcpy(ch_syscall_recv_msg[waiter->id], buf, KERN_CH_MSG_SIZE);
+        ch_syscall_recv_msg[waiter->id] = NULL;
+        ch_syscall_recv_caps[waiter->id] = NULL;
+        ch_syscall_recv_cap_count[waiter->id] = NULL;
+        *ready_flag = 0;
+        *cap_count_src = 0;
+        memset(cap_src, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
+        wait_queue_remove(recv_wq, waiter);
+        waiter->block_result = KERN_OK;
+        sched_wakeup(waiter, KERN_OK);
+        return;
+    }
+#endif
+
+    wait_queue_remove(recv_wq, waiter);
+    waiter->block_result = KERN_OK;
+    sched_wakeup(waiter, KERN_OK);
+}
+
+static void channel_wake_send_waiter(wait_queue_t *send_wq,
+                                     wait_queue_t *recv_wq,
+                                     uint8_t *buf,
+                                     uint8_t *ready_flag,
+                                     cap_id_t *cap_dst,
+                                     uint8_t *cap_count_dst,
+                                     task_id_t receiver_id) {
+    if (send_wq->count == 0 || *ready_flag) {
+        return;
+    }
+
+    tcb_t *waiter = wait_queue_get_highest(send_wq);
+    if (waiter == NULL) {
+        return;
+    }
+
+#if SYSCALL_ENABLE
+    if (waiter->syscall_blocked &&
+        waiter->id >= 0 && waiter->id < KERNEL_MAX_TASKS) {
+        uint8_t cap_count = ch_syscall_send_cap_count[waiter->id];
+        if (cap_count > 0) {
+            tcb_t *receiver = task_get_tcb(receiver_id);
+            kern_err_t xfer_err = ipc_transfer_caps(waiter, receiver,
+                                                    ch_syscall_send_caps[waiter->id],
+                                                    cap_count, cap_dst);
+            if (xfer_err != KERN_OK) {
+                memset(ch_syscall_send_msg[waiter->id], 0,
+                       sizeof(ch_syscall_send_msg[waiter->id]));
+                memset(ch_syscall_send_caps[waiter->id], 0,
+                       sizeof(ch_syscall_send_caps[waiter->id]));
+                ch_syscall_send_cap_count[waiter->id] = 0;
+                wait_queue_remove(send_wq, waiter);
+                waiter->block_result = xfer_err;
+                sched_wakeup(waiter, xfer_err);
+                return;
+            }
+        } else {
+            memset(cap_dst, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
+        }
+
+        memcpy(buf, ch_syscall_send_msg[waiter->id], KERN_CH_MSG_SIZE);
+        memset(ch_syscall_send_msg[waiter->id], 0,
+               sizeof(ch_syscall_send_msg[waiter->id]));
+        memset(ch_syscall_send_caps[waiter->id], 0,
+               sizeof(ch_syscall_send_caps[waiter->id]));
+        ch_syscall_send_cap_count[waiter->id] = 0;
+        *cap_count_dst = cap_count;
+        *ready_flag = 1;
+        wait_queue_remove(send_wq, waiter);
+        waiter->block_result = KERN_OK;
+        sched_wakeup(waiter, KERN_OK);
+        channel_wake_recv_waiter(recv_wq, buf, ready_flag, cap_dst,
+                                 cap_count_dst);
+        return;
+    }
+#endif
+
+    wait_queue_remove(send_wq, waiter);
+    waiter->block_result = KERN_OK;
+    sched_wakeup(waiter, KERN_OK);
+}
+
 /*============================================================================
  * 公开接口
  *============================================================================*/
@@ -132,6 +294,14 @@ void channel_init(void) {
     memset(ch_pool, 0, sizeof(ch_pool));
     memset(ch_cap_id_buffers, 0, sizeof(ch_cap_id_buffers));
     memset(ch_cap_count_buffers, 0, sizeof(ch_cap_count_buffers));
+#if SYSCALL_ENABLE
+    memset(ch_syscall_send_msg, 0, sizeof(ch_syscall_send_msg));
+    memset(ch_syscall_send_caps, 0, sizeof(ch_syscall_send_caps));
+    memset(ch_syscall_send_cap_count, 0, sizeof(ch_syscall_send_cap_count));
+    memset(ch_syscall_recv_msg, 0, sizeof(ch_syscall_recv_msg));
+    memset(ch_syscall_recv_caps, 0, sizeof(ch_syscall_recv_caps));
+    memset(ch_syscall_recv_cap_count, 0, sizeof(ch_syscall_recv_cap_count));
+#endif
     ch_used_bitmap = 0;
 }
 
@@ -217,6 +387,19 @@ void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {
     wait_queue_remove_safe(&ch->b_recv_waiters, tcb);
     wait_queue_remove_safe(&ch->a_send_waiters, tcb);
     wait_queue_remove_safe(&ch->b_send_waiters, tcb);
+
+#if SYSCALL_ENABLE
+    if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
+        memset(ch_syscall_send_msg[tcb->id], 0,
+               sizeof(ch_syscall_send_msg[tcb->id]));
+        memset(ch_syscall_send_caps[tcb->id], 0,
+               sizeof(ch_syscall_send_caps[tcb->id]));
+        ch_syscall_send_cap_count[tcb->id] = 0;
+        ch_syscall_recv_msg[tcb->id] = NULL;
+        ch_syscall_recv_caps[tcb->id] = NULL;
+        ch_syscall_recv_cap_count[tcb->id] = NULL;
+    }
+#endif
 
     if (tcb->id == ch->peer_a) {
         ch->peer_a = KERN_INVALID_ID;
@@ -386,14 +569,8 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
     *ready_flag = 1;
 
     /* 如果对端在等待接收，唤醒它 */
-    if (recv_wq->count > 0) {
-        tcb_t *waiter = wait_queue_get_highest(recv_wq);
-        if (waiter) {
-            wait_queue_remove(recv_wq, waiter);
-            waiter->block_result = KERN_OK;
-            sched_wakeup(waiter, KERN_OK);
-        }
-    }
+    channel_wake_recv_waiter(recv_wq, dst_buf, ready_flag, cap_dst,
+                             cap_count_dst);
 
     hal_exit_critical(crit);
     return KERN_OK;
@@ -402,6 +579,212 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
 kern_err_t channel_send(ch_id_t ch_id, const void *msg, uint32_t timeout) {
     return channel_send_common(ch_id, msg, NULL, 0, timeout);
 }
+
+#if SYSCALL_ENABLE
+kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
+                                uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
+
+    uint32_t crit = hal_enter_critical();
+
+    channel_t *ch = ch_get(ch_id);
+    if (ch == NULL || msg == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+    trace_record(TRACE_IPC_SEND, (uint8_t)current->id, (uint16_t)ch_id);
+
+    int is_a = 0;
+    kern_err_t side_err = channel_get_side(ch, current, &is_a);
+    if (side_err != KERN_OK) {
+        hal_exit_critical(crit);
+        return side_err;
+    }
+
+    uint8_t *dst_buf;
+    uint8_t *ready_flag;
+    wait_queue_t *recv_wq;
+    wait_queue_t *send_wq;
+    cap_id_t *cap_dst;
+    uint8_t *cap_count_dst;
+
+    if (is_a) {
+        dst_buf = ch->a_to_b_buf;
+        ready_flag = &ch->a_to_b_ready;
+        recv_wq = &ch->b_recv_waiters;
+        send_wq = &ch->a_send_waiters;
+        cap_dst = ch_cap_id_buffers[ch_id][0];
+        cap_count_dst = &ch_cap_count_buffers[ch_id][0];
+    } else {
+        dst_buf = ch->b_to_a_buf;
+        ready_flag = &ch->b_to_a_ready;
+        recv_wq = &ch->a_recv_waiters;
+        send_wq = &ch->b_send_waiters;
+        cap_dst = ch_cap_id_buffers[ch_id][1];
+        cap_count_dst = &ch_cap_count_buffers[ch_id][1];
+    }
+
+    if (*ready_flag) {
+        if (timeout == 0) {
+            hal_exit_critical(crit);
+            return KERN_ERR_TIMEOUT;
+        }
+
+        memcpy(ch_syscall_send_msg[current->id], msg, ch->msg_size);
+        current->syscall_blocked = 1;
+        current->block_reason = BLOCK_REASON_CH_SEND;
+        current->block_obj = ch;
+        current->block_result = KERN_OK;
+        wait_queue_add(send_wq, current);
+        {
+            extern void sched_remove_ready(tcb_t *tcb);
+            sched_remove_ready(current);
+        }
+        current->state = TASK_STATE_BLOCKED;
+        if (timeout > 0) {
+            extern uint32_t sched_get_tick_count(void);
+            current->wake_tick = sched_get_tick_count() + timeout;
+        } else {
+            current->wake_tick = 0;
+        }
+
+        hal_exit_critical(crit);
+        return KERN_SYSCALL_BLOCKED;
+    }
+
+    memcpy(dst_buf, msg, ch->msg_size);
+    *cap_count_dst = 0;
+    memset(cap_dst, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
+    *ready_flag = 1;
+
+    channel_wake_recv_waiter(recv_wq, dst_buf, ready_flag, cap_dst,
+                             cap_count_dst);
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
+                                     const void *msg,
+                                     const ipc_cap_xfer_t *caps,
+                                     uint8_t cap_count,
+                                     uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
+    if (cap_count > IPC_CAPS_MAX) return KERN_ERR_PARAM;
+    if (cap_count > 0 && caps == NULL) return KERN_ERR_PARAM;
+
+    uint32_t crit = hal_enter_critical();
+
+    channel_t *ch = ch_get(ch_id);
+    if (ch == NULL || msg == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+    trace_record(TRACE_IPC_SEND, (uint8_t)current->id, (uint16_t)ch_id);
+
+    int is_a = 0;
+    kern_err_t side_err = channel_get_side(ch, current, &is_a);
+    if (side_err != KERN_OK) {
+        hal_exit_critical(crit);
+        return side_err;
+    }
+
+    uint8_t *dst_buf;
+    uint8_t *ready_flag;
+    wait_queue_t *recv_wq;
+    wait_queue_t *send_wq;
+    cap_id_t *cap_dst;
+    uint8_t *cap_count_dst;
+    task_id_t receiver_id;
+
+    if (is_a) {
+        dst_buf = ch->a_to_b_buf;
+        ready_flag = &ch->a_to_b_ready;
+        recv_wq = &ch->b_recv_waiters;
+        send_wq = &ch->a_send_waiters;
+        cap_dst = ch_cap_id_buffers[ch_id][0];
+        cap_count_dst = &ch_cap_count_buffers[ch_id][0];
+        receiver_id = ch->peer_b;
+    } else {
+        dst_buf = ch->b_to_a_buf;
+        ready_flag = &ch->b_to_a_ready;
+        recv_wq = &ch->a_recv_waiters;
+        send_wq = &ch->b_send_waiters;
+        cap_dst = ch_cap_id_buffers[ch_id][1];
+        cap_count_dst = &ch_cap_count_buffers[ch_id][1];
+        receiver_id = ch->peer_a;
+    }
+
+    if (*ready_flag) {
+        if (timeout == 0) {
+            hal_exit_critical(crit);
+            return KERN_ERR_TIMEOUT;
+        }
+
+        memcpy(ch_syscall_send_msg[current->id], msg, ch->msg_size);
+        if (cap_count > 0) {
+            memcpy(ch_syscall_send_caps[current->id], caps,
+                   sizeof(ipc_cap_xfer_t) * cap_count);
+        }
+        ch_syscall_send_cap_count[current->id] = cap_count;
+        current->syscall_blocked = 1;
+        current->block_reason = BLOCK_REASON_CH_SEND;
+        current->block_obj = ch;
+        current->block_result = KERN_OK;
+        wait_queue_add(send_wq, current);
+        {
+            extern void sched_remove_ready(tcb_t *tcb);
+            sched_remove_ready(current);
+        }
+        current->state = TASK_STATE_BLOCKED;
+        if (timeout > 0) {
+            extern uint32_t sched_get_tick_count(void);
+            current->wake_tick = sched_get_tick_count() + timeout;
+        } else {
+            current->wake_tick = 0;
+        }
+
+        hal_exit_critical(crit);
+        return KERN_SYSCALL_BLOCKED;
+    }
+
+    if (cap_count > 0) {
+        tcb_t *receiver = task_get_tcb(receiver_id);
+        kern_err_t xfer_err = ipc_transfer_caps(current, receiver,
+                                                caps, cap_count, cap_dst);
+        if (xfer_err != KERN_OK) {
+            hal_exit_critical(crit);
+            return xfer_err;
+        }
+    } else {
+        memset(cap_dst, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
+    }
+
+    memcpy(dst_buf, msg, ch->msg_size);
+    *cap_count_dst = cap_count;
+    *ready_flag = 1;
+
+    channel_wake_recv_waiter(recv_wq, dst_buf, ready_flag, cap_dst,
+                             cap_count_dst);
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+#endif
 
 kern_err_t channel_send_caps(ch_id_t ch_id,
                              const void *msg,
@@ -429,7 +812,7 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
     tcb_t *current = sched_get_current();
     trace_record(TRACE_IPC_RECV, (uint8_t)current->id, (uint16_t)ch_id);
     int is_a = 0;
-    kern_err_t side_err = channel_get_side(ch, current, &is_a);
+    kern_err_t side_err = channel_get_recv_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
         hal_exit_critical(crit);
         return side_err;
@@ -463,6 +846,10 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
 
     /* 如果没有数据，阻塞等待 */
     if (!*ready_flag) {
+        if (!channel_sender_alive(ch, is_a)) {
+            hal_exit_critical(crit);
+            return KERN_ERR_NOEXIST;
+        }
         if (timeout == 0) {
             hal_exit_critical(crit);
             return KERN_ERR_TIMEOUT;
@@ -510,7 +897,7 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
             return KERN_ERR_NOEXIST;
         }
 
-        side_err = channel_get_side(ch, current, &is_a);
+        side_err = channel_get_recv_side(ch, current, &is_a);
         if (side_err != KERN_OK) {
             hal_exit_critical(crit);
             return side_err;
@@ -529,6 +916,10 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
             cap_count_src = &ch_cap_count_buffers[ch_id][0];
         }
         if (!*ready_flag) {
+            if (!channel_sender_alive(ch, is_a)) {
+                hal_exit_critical(crit);
+                return KERN_ERR_NOEXIST;
+            }
             hal_exit_critical(crit);
             return KERN_ERR_TIMEOUT;
         }
@@ -553,14 +944,8 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
     memset(cap_src, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
 
     /* 如果对应方向有发送者等待槽位，唤醒一个 */
-    if (send_wq->count > 0) {
-        tcb_t *waiter = wait_queue_get_highest(send_wq);
-        if (waiter) {
-            wait_queue_remove(send_wq, waiter);
-            waiter->block_result = KERN_OK;
-            sched_wakeup(waiter, KERN_OK);
-        }
-    }
+    channel_wake_send_waiter(send_wq, recv_wq, src_buf, ready_flag, cap_src,
+                             cap_count_src, is_a ? ch->peer_a : ch->peer_b);
 
     hal_exit_critical(crit);
     return KERN_OK;
@@ -569,6 +954,216 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
 kern_err_t channel_recv(ch_id_t ch_id, void *msg, uint32_t timeout) {
     return channel_recv_common(ch_id, msg, NULL, NULL, timeout);
 }
+
+#if SYSCALL_ENABLE
+kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
+                                uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
+
+    uint32_t crit = hal_enter_critical();
+
+    channel_t *ch = ch_get(ch_id);
+    if (ch == NULL || user_msg == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+    trace_record(TRACE_IPC_RECV, (uint8_t)current->id, (uint16_t)ch_id);
+
+    int is_a = 0;
+    kern_err_t side_err = channel_get_recv_side(ch, current, &is_a);
+    if (side_err != KERN_OK) {
+        hal_exit_critical(crit);
+        return side_err;
+    }
+
+    uint8_t *src_buf;
+    uint8_t *ready_flag;
+    wait_queue_t *recv_wq;
+    wait_queue_t *send_wq;
+    cap_id_t *cap_src;
+    uint8_t *cap_count_src;
+
+    if (is_a) {
+        src_buf = ch->b_to_a_buf;
+        ready_flag = &ch->b_to_a_ready;
+        recv_wq = &ch->a_recv_waiters;
+        send_wq = &ch->b_send_waiters;
+        cap_src = ch_cap_id_buffers[ch_id][1];
+        cap_count_src = &ch_cap_count_buffers[ch_id][1];
+    } else {
+        src_buf = ch->a_to_b_buf;
+        ready_flag = &ch->a_to_b_ready;
+        recv_wq = &ch->b_recv_waiters;
+        send_wq = &ch->a_send_waiters;
+        cap_src = ch_cap_id_buffers[ch_id][0];
+        cap_count_src = &ch_cap_count_buffers[ch_id][0];
+    }
+
+    if (!*ready_flag) {
+        if (!channel_sender_alive(ch, is_a)) {
+            hal_exit_critical(crit);
+            return KERN_ERR_NOEXIST;
+        }
+        if (timeout == 0) {
+            hal_exit_critical(crit);
+            return KERN_ERR_TIMEOUT;
+        }
+
+        ch_syscall_recv_msg[current->id] = user_msg;
+        current->syscall_blocked = 1;
+        current->block_reason = BLOCK_REASON_CH_RECV;
+        current->block_obj = ch;
+        current->block_result = KERN_OK;
+        wait_queue_add(recv_wq, current);
+        {
+            extern void sched_remove_ready(tcb_t *tcb);
+            sched_remove_ready(current);
+        }
+        current->state = TASK_STATE_BLOCKED;
+        if (timeout > 0) {
+            extern uint32_t sched_get_tick_count(void);
+            current->wake_tick = sched_get_tick_count() + timeout;
+        } else {
+            current->wake_tick = 0;
+        }
+
+        hal_exit_critical(crit);
+        return KERN_SYSCALL_BLOCKED;
+    }
+
+    if (*cap_count_src > 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_RESOURCE;
+    }
+
+    memcpy(user_msg, src_buf, ch->msg_size);
+    *ready_flag = 0;
+    *cap_count_src = 0;
+    memset(cap_src, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
+
+    channel_wake_send_waiter(send_wq, recv_wq, src_buf, ready_flag, cap_src,
+                             cap_count_src, is_a ? ch->peer_a : ch->peer_b);
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
+                                     void *user_msg,
+                                     cap_id_t *out_caps,
+                                     uint8_t *out_cap_count,
+                                     uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
+    if (user_msg == NULL || out_caps == NULL || out_cap_count == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    uint32_t crit = hal_enter_critical();
+
+    channel_t *ch = ch_get(ch_id);
+    if (ch == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+    trace_record(TRACE_IPC_RECV, (uint8_t)current->id, (uint16_t)ch_id);
+
+    int is_a = 0;
+    kern_err_t side_err = channel_get_recv_side(ch, current, &is_a);
+    if (side_err != KERN_OK) {
+        hal_exit_critical(crit);
+        return side_err;
+    }
+
+    uint8_t *src_buf;
+    uint8_t *ready_flag;
+    wait_queue_t *recv_wq;
+    wait_queue_t *send_wq;
+    cap_id_t *cap_src;
+    uint8_t *cap_count_src;
+
+    if (is_a) {
+        src_buf = ch->b_to_a_buf;
+        ready_flag = &ch->b_to_a_ready;
+        recv_wq = &ch->a_recv_waiters;
+        send_wq = &ch->b_send_waiters;
+        cap_src = ch_cap_id_buffers[ch_id][1];
+        cap_count_src = &ch_cap_count_buffers[ch_id][1];
+    } else {
+        src_buf = ch->a_to_b_buf;
+        ready_flag = &ch->a_to_b_ready;
+        recv_wq = &ch->b_recv_waiters;
+        send_wq = &ch->a_send_waiters;
+        cap_src = ch_cap_id_buffers[ch_id][0];
+        cap_count_src = &ch_cap_count_buffers[ch_id][0];
+    }
+
+    if (!*ready_flag) {
+        if (!channel_sender_alive(ch, is_a)) {
+            hal_exit_critical(crit);
+            return KERN_ERR_NOEXIST;
+        }
+        if (timeout == 0) {
+            hal_exit_critical(crit);
+            return KERN_ERR_TIMEOUT;
+        }
+
+        ch_syscall_recv_msg[current->id] = user_msg;
+        ch_syscall_recv_caps[current->id] = out_caps;
+        ch_syscall_recv_cap_count[current->id] = out_cap_count;
+        current->syscall_blocked = 1;
+        current->block_reason = BLOCK_REASON_CH_RECV;
+        current->block_obj = ch;
+        current->block_result = KERN_OK;
+        wait_queue_add(recv_wq, current);
+        {
+            extern void sched_remove_ready(tcb_t *tcb);
+            sched_remove_ready(current);
+        }
+        current->state = TASK_STATE_BLOCKED;
+        if (timeout > 0) {
+            extern uint32_t sched_get_tick_count(void);
+            current->wake_tick = sched_get_tick_count() + timeout;
+        } else {
+            current->wake_tick = 0;
+        }
+
+        hal_exit_critical(crit);
+        return KERN_SYSCALL_BLOCKED;
+    }
+
+    if (*cap_count_src > 0) {
+        memcpy(out_caps, cap_src, sizeof(cap_id_t) * (*cap_count_src));
+        *out_cap_count = *cap_count_src;
+    } else {
+        *out_cap_count = 0;
+    }
+
+    memcpy(user_msg, src_buf, ch->msg_size);
+    *ready_flag = 0;
+    *cap_count_src = 0;
+    memset(cap_src, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
+
+    channel_wake_send_waiter(send_wq, recv_wq, src_buf, ready_flag, cap_src,
+                             cap_count_src, is_a ? ch->peer_a : ch->peer_b);
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+#endif
 
 kern_err_t channel_recv_caps(ch_id_t ch_id,
                              void *msg,

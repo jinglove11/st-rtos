@@ -294,6 +294,12 @@ static void test_fault_releases_fd_refs(void) {
                    "fault cleanup released fd inode ref");
 
     inode_put(ino);
+
+    inode_t *tmp = vfs_lookup("/tmp");
+    if (tmp && tmp->dir_ops && tmp->dir_ops->unlink) {
+        (void)tmp->dir_ops->unlink(tmp, "fault_fd_cleanup");
+    }
+    if (tmp) inode_put(tmp);
 #else
     test_skip("MPU or VFS not enabled");
 #endif

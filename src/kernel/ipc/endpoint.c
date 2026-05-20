@@ -16,6 +16,7 @@
 #include "hal.h"
 #include "trace.h"
 #include "syscall.h"
+#include "capability.h"
 #include <string.h>
 
 #if IPC_ENDPOINT
@@ -46,6 +47,19 @@ typedef struct {
     uint8_t     in_use;
 } endpoint_t;
 
+#if CAP_ENABLE
+typedef struct {
+    ep_id_t     ep_id;
+    task_id_t   server_id;
+    tcb_t      *sender;
+    uint32_t    request_gen;
+    cap_id_t    cap;
+    uint8_t     active;
+    uint8_t     used;
+    kern_err_t  bind_error;
+} endpoint_reply_t;
+#endif
+
 static endpoint_t ep_pool[KERN_MAX_ENDPOINTS];
 static uint32_t ep_used_bitmap;
 
@@ -66,11 +80,18 @@ static tcb_t *ep_server_sender[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static uint32_t ep_server_gen[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static uint8_t ep_server_dead[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static void *ep_syscall_recv_msg[KERNEL_MAX_TASKS];
+static cap_id_t *ep_syscall_recv_caps[KERNEL_MAX_TASKS];
+static uint8_t *ep_syscall_recv_cap_count[KERNEL_MAX_TASKS];
 static uint32_t ep_request_gen_buffers[KERN_MAX_ENDPOINTS][KERN_EP_MAX_PENDING];
 static ipc_cap_xfer_t ep_cap_xfer_buffers[KERN_MAX_ENDPOINTS]
                                           [KERN_EP_MAX_PENDING]
                                           [IPC_CAPS_MAX];
 static uint8_t ep_cap_count_buffers[KERN_MAX_ENDPOINTS][KERN_EP_MAX_PENDING];
+
+#if CAP_ENABLE
+static endpoint_reply_t ep_reply_objects[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
+static cap_id_t ep_server_reply_cap[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
+#endif
 
 /*============================================================================
  * 内部函数
@@ -98,6 +119,67 @@ static endpoint_t *ep_get(ep_id_t id) {
     return &ep_pool[id];
 }
 
+#if CAP_ENABLE
+static void endpoint_invalidate_reply_cap(ep_id_t ep_id, task_id_t server_id) {
+    if (ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS ||
+        server_id < 0 || server_id >= KERNEL_MAX_TASKS) {
+        return;
+    }
+
+    cap_id_t cap = ep_server_reply_cap[ep_id][server_id];
+    ep_server_reply_cap[ep_id][server_id] = KERN_INVALID_ID;
+    ep_reply_objects[ep_id][server_id].active = 0;
+    ep_reply_objects[ep_id][server_id].used = 1;
+    ep_reply_objects[ep_id][server_id].sender = NULL;
+    ep_reply_objects[ep_id][server_id].request_gen = 0;
+    ep_reply_objects[ep_id][server_id].bind_error = KERN_OK;
+    if (cap != KERN_INVALID_ID) {
+        cap_delete(cap);
+    }
+}
+
+static void endpoint_invalidate_sender_reply_caps(ep_id_t ep_id, tcb_t *sender) {
+    if (ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS || sender == NULL) {
+        return;
+    }
+
+    for (task_id_t tid = 0; tid < KERNEL_MAX_TASKS; tid++) {
+        if (ep_reply_objects[ep_id][tid].sender == sender) {
+            endpoint_invalidate_reply_cap(ep_id, tid);
+        }
+    }
+}
+
+static void endpoint_bind_reply_cap(ep_id_t ep_id, tcb_t *server,
+                                    tcb_t *sender, uint32_t request_gen) {
+    if (ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS ||
+        server == NULL || sender == NULL ||
+        server->id < 0 || server->id >= KERNEL_MAX_TASKS) {
+        return;
+    }
+
+    endpoint_invalidate_reply_cap(ep_id, server->id);
+
+    endpoint_reply_t *reply = &ep_reply_objects[ep_id][server->id];
+    reply->ep_id = ep_id;
+    reply->server_id = server->id;
+    reply->sender = sender;
+    reply->request_gen = request_gen;
+    reply->active = 1;
+    reply->used = 0;
+    reply->bind_error = KERN_OK;
+    reply->cap = cap_create_for(server, reply, CAP_OBJ_REPLY, CAP_WRITE);
+    if (reply->cap == KERN_INVALID_ID) {
+        reply->active = 0;
+        reply->used = 1;
+        reply->sender = NULL;
+        reply->request_gen = 0;
+        reply->bind_error = KERN_ERR_RESOURCE;
+    }
+    ep_server_reply_cap[ep_id][server->id] = reply->cap;
+}
+#endif
+
 static void endpoint_clear_server_bindings(ep_id_t ep_id, tcb_t *sender) {
     if (ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS || sender == NULL) {
         return;
@@ -108,6 +190,9 @@ static void endpoint_clear_server_bindings(ep_id_t ep_id, tcb_t *sender) {
             ep_server_sender[ep_id][tid] = NULL;
             ep_server_gen[ep_id][tid] = 0;
             ep_server_dead[ep_id][tid] = 1;
+#if CAP_ENABLE
+            endpoint_invalidate_reply_cap(ep_id, tid);
+#endif
         }
     }
 }
@@ -178,9 +263,19 @@ void endpoint_init(void) {
     memset(ep_server_gen, 0, sizeof(ep_server_gen));
     memset(ep_server_dead, 0, sizeof(ep_server_dead));
     memset(ep_syscall_recv_msg, 0, sizeof(ep_syscall_recv_msg));
+    memset(ep_syscall_recv_caps, 0, sizeof(ep_syscall_recv_caps));
+    memset(ep_syscall_recv_cap_count, 0, sizeof(ep_syscall_recv_cap_count));
     memset(ep_request_gen_buffers, 0, sizeof(ep_request_gen_buffers));
     memset(ep_cap_xfer_buffers, 0, sizeof(ep_cap_xfer_buffers));
     memset(ep_cap_count_buffers, 0, sizeof(ep_cap_count_buffers));
+#if CAP_ENABLE
+    memset(ep_reply_objects, 0, sizeof(ep_reply_objects));
+    for (ep_id_t ep = 0; ep < KERN_MAX_ENDPOINTS; ep++) {
+        for (task_id_t tid = 0; tid < KERNEL_MAX_TASKS; tid++) {
+            ep_server_reply_cap[ep][tid] = KERN_INVALID_ID;
+        }
+    }
+#endif
 }
 
 ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pending) {
@@ -237,6 +332,8 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
         tcb_t *next = tcb->wait_next;
         if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
             ep_syscall_recv_msg[tcb->id] = NULL;
+            ep_syscall_recv_caps[tcb->id] = NULL;
+            ep_syscall_recv_cap_count[tcb->id] = NULL;
         }
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
@@ -275,6 +372,11 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     memset(ep_server_sender[ep_id], 0, sizeof(ep_server_sender[ep_id]));
     memset(ep_server_gen[ep_id], 0, sizeof(ep_server_gen[ep_id]));
     memset(ep_server_dead[ep_id], 0, sizeof(ep_server_dead[ep_id]));
+#if CAP_ENABLE
+    for (task_id_t tid = 0; tid < KERNEL_MAX_TASKS; tid++) {
+        endpoint_invalidate_reply_cap(ep_id, tid);
+    }
+#endif
     memset(ep_request_gen_buffers[ep_id], 0, sizeof(ep_request_gen_buffers[ep_id]));
     memset(ep_cap_xfer_buffers[ep_id], 0, sizeof(ep_cap_xfer_buffers[ep_id]));
     memset(ep_cap_count_buffers[ep_id], 0, sizeof(ep_cap_count_buffers[ep_id]));
@@ -283,6 +385,13 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
 
     hal_irq_restore(crit);
     return KERN_OK;
+}
+
+int endpoint_exists(ep_id_t ep_id) {
+    uint32_t crit = hal_irq_save();
+    int exists = (ep_get(ep_id) != NULL) ? 1 : 0;
+    hal_irq_restore(crit);
+    return exists;
 }
 
 void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
@@ -296,6 +405,12 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
     wait_queue_remove_safe(&ep->send_waiters, tcb);
     wait_queue_remove_safe(&ep->reply_waiters, tcb);
     endpoint_cancel_sender((ep_id_t)(ep - ep_pool), ep, tcb);
+#if CAP_ENABLE
+    endpoint_invalidate_sender_reply_caps((ep_id_t)(ep - ep_pool), tcb);
+    if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
+        endpoint_invalidate_reply_cap((ep_id_t)(ep - ep_pool), tcb->id);
+    }
+#endif
 
     for (uint16_t i = 0; i < ep->max_pending; i++) {
         if (ep->sender_buf[i] == tcb) {
@@ -309,6 +424,8 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
         ep_client_gen[tcb->id] = 0;
         ep_syscall_client_msg[tcb->id] = NULL;
         ep_syscall_recv_msg[tcb->id] = NULL;
+        ep_syscall_recv_caps[tcb->id] = NULL;
+        ep_syscall_recv_cap_count[tcb->id] = NULL;
     }
 }
 
@@ -317,6 +434,8 @@ static int endpoint_deliver_to_syscall_recv(ep_id_t ep_id,
                                             tcb_t *server,
                                             tcb_t *sender,
                                             const void *msg,
+                                            const ipc_cap_xfer_t *caps,
+                                            uint8_t cap_count,
                                             uint32_t request_gen) {
     if (ep == NULL || server == NULL || sender == NULL || msg == NULL) {
         return 0;
@@ -327,12 +446,37 @@ static int endpoint_deliver_to_syscall_recv(ep_id_t ep_id,
     if (server->syscall_blocked == 0 || ep_syscall_recv_msg[server->id] == NULL) {
         return 0;
     }
+    if (cap_count > 0 &&
+        (ep_syscall_recv_caps[server->id] == NULL ||
+         ep_syscall_recv_cap_count[server->id] == NULL)) {
+        return 0;
+    }
 
     memcpy(ep_syscall_recv_msg[server->id], msg, ep->msg_size);
+    if (cap_count > 0) {
+        kern_err_t err = ipc_transfer_caps(sender,
+                                           server,
+                                           caps,
+                                           cap_count,
+                                           ep_syscall_recv_caps[server->id]);
+        if (err != KERN_OK) {
+            sender->block_result = err;
+            return 0;
+        }
+        *ep_syscall_recv_cap_count[server->id] = cap_count;
+    } else if (ep_syscall_recv_cap_count[server->id] != NULL) {
+        *ep_syscall_recv_cap_count[server->id] = 0;
+    }
+
     ep_syscall_recv_msg[server->id] = NULL;
+    ep_syscall_recv_caps[server->id] = NULL;
+    ep_syscall_recv_cap_count[server->id] = NULL;
     ep_server_dead[ep_id][server->id] = 0;
     ep_server_sender[ep_id][server->id] = sender;
     ep_server_gen[ep_id][server->id] = request_gen;
+#if CAP_ENABLE
+    endpoint_bind_reply_cap(ep_id, server, sender, request_gen);
+#endif
 
     wait_queue_remove_safe(&ep->recv_waiters, server);
     sched_wakeup(server, KERN_OK);
@@ -364,7 +508,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
      * If such a server is waiting, deliver directly to its validated user
      * buffer and bind reply authority before blocking the client for reply.
      */
-    if (cap_count == 0 && ep->recv_waiters.count > 0) {
+    if (ep->recv_waiters.count > 0) {
         tcb_t *server = wait_queue_get_highest(&ep->recv_waiters);
         uint32_t request_gen = ep->next_request_gen++;
         if (ep->next_request_gen == 0) {
@@ -372,7 +516,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
         }
 
         if (endpoint_deliver_to_syscall_recv(ep_id, ep, server, current,
-                                             msg, request_gen)) {
+                                             msg, caps, cap_count, request_gen)) {
             ep_client_msg[current->id] = msg;
             ep_client_gen[current->id] = request_gen;
 
@@ -542,12 +686,84 @@ kern_err_t endpoint_send(ep_id_t ep_id, void *msg, uint32_t timeout) {
     return endpoint_send_common(ep_id, msg, NULL, 0, timeout);
 }
 
-kern_err_t endpoint_send_syscall(ep_id_t ep_id,
-                                 const void *msg,
-                                 void *user_reply_msg,
-                                 uint32_t timeout) {
+kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
+    if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
+    if (msg == NULL) return KERN_ERR_PARAM;
+
+    uint32_t crit = hal_enter_critical();
+
+    endpoint_t *ep = ep_get(ep_id);
+    if (ep == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+#if SYSCALL_ENABLE
+    if (ep->recv_waiters.count > 0) {
+        tcb_t *server = wait_queue_get_highest(&ep->recv_waiters);
+        if (server != NULL &&
+            server->syscall_blocked &&
+            server->id >= 0 && server->id < KERNEL_MAX_TASKS &&
+            ep_syscall_recv_msg[server->id] != NULL) {
+            memcpy(ep_syscall_recv_msg[server->id], msg, ep->msg_size);
+            if (ep_syscall_recv_cap_count[server->id] != NULL) {
+                *ep_syscall_recv_cap_count[server->id] = 0;
+            }
+            ep_syscall_recv_msg[server->id] = NULL;
+            ep_syscall_recv_caps[server->id] = NULL;
+            ep_syscall_recv_cap_count[server->id] = NULL;
+            ep_server_dead[ep_id][server->id] = 0;
+            ep_server_sender[ep_id][server->id] = NULL;
+            ep_server_gen[ep_id][server->id] = 0;
+#if CAP_ENABLE
+            endpoint_invalidate_reply_cap(ep_id, server->id);
+#endif
+            wait_queue_remove_safe(&ep->recv_waiters, server);
+            sched_wakeup(server, KERN_OK);
+            hal_exit_critical(crit);
+            return KERN_OK;
+        }
+    }
+#endif
+
+    if (ep->count >= ep->max_pending) {
+        hal_exit_critical(crit);
+        return KERN_ERR_BUSY;
+    }
+
+    uint16_t slot = ep->head;
+    uint8_t *dst = ep->msg_buf + (slot * ep->msg_size);
+    memcpy(dst, msg, ep->msg_size);
+    ep->sender_buf[slot] = NULL;
+    ep_request_gen_buffers[ep_id][slot] = 0;
+    ep_cap_count_buffers[ep_id][slot] = 0;
+    ep->head = (ep->head + 1) % ep->max_pending;
+    ep->count++;
+    ep->pending_count++;
+
+    if (ep->recv_waiters.count > 0) {
+        tcb_t *server = wait_queue_get_highest(&ep->recv_waiters);
+        if (server != NULL) {
+            wait_queue_remove(&ep->recv_waiters, server);
+            server->block_result = KERN_OK;
+            sched_wakeup(server, KERN_OK);
+        }
+    }
+
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
+                                               const void *msg,
+                                               void *user_reply_msg,
+                                               const ipc_cap_xfer_t *caps,
+                                               uint8_t cap_count,
+                                               uint32_t timeout) {
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
     if (msg == NULL || user_reply_msg == NULL) return KERN_ERR_PARAM;
+    if (cap_count > IPC_CAPS_MAX) return KERN_ERR_PARAM;
+    if (cap_count > 0 && caps == NULL) return KERN_ERR_PARAM;
 
     uint32_t crit = hal_enter_critical();
 
@@ -582,13 +798,18 @@ kern_err_t endpoint_send_syscall(ep_id_t ep_id,
     if (ep->recv_waiters.count > 0) {
         tcb_t *server = wait_queue_get_highest(&ep->recv_waiters);
         if (!endpoint_deliver_to_syscall_recv(ep_id, ep, server, current,
-                                             msg, request_gen)) {
+                                             msg, caps, cap_count, request_gen)) {
             uint16_t slot = ep->head;
             uint8_t *dst = ep->msg_buf + (slot * ep->msg_size);
             memcpy(dst, msg, ep->msg_size);
             ep->sender_buf[slot] = current;
             ep_request_gen_buffers[ep_id][slot] = request_gen;
-            ep_cap_count_buffers[ep_id][slot] = 0;
+            ep_cap_count_buffers[ep_id][slot] = cap_count;
+            if (cap_count > 0) {
+                memcpy(ep_cap_xfer_buffers[ep_id][slot],
+                       caps,
+                       (size_t)cap_count * sizeof(caps[0]));
+            }
             ep->head = (ep->head + 1) % ep->max_pending;
             ep->count++;
             ep->pending_count++;
@@ -605,10 +826,24 @@ kern_err_t endpoint_send_syscall(ep_id_t ep_id,
         memcpy(dst, msg, ep->msg_size);
         ep->sender_buf[slot] = current;
         ep_request_gen_buffers[ep_id][slot] = request_gen;
-        ep_cap_count_buffers[ep_id][slot] = 0;
+        ep_cap_count_buffers[ep_id][slot] = cap_count;
+        if (cap_count > 0) {
+            memcpy(ep_cap_xfer_buffers[ep_id][slot],
+                   caps,
+                   (size_t)cap_count * sizeof(caps[0]));
+        }
         ep->head = (ep->head + 1) % ep->max_pending;
         ep->count++;
         ep->pending_count++;
+
+        if (ep->recv_waiters.count > 0) {
+            tcb_t *server = wait_queue_get_highest(&ep->recv_waiters);
+            if (server) {
+                wait_queue_remove(&ep->recv_waiters, server);
+                server->block_result = KERN_OK;
+                sched_wakeup(server, KERN_OK);
+            }
+        }
     }
 
     ep_client_msg[current->id] = user_reply_msg;
@@ -635,6 +870,24 @@ kern_err_t endpoint_send_syscall(ep_id_t ep_id,
 
     hal_exit_critical(crit);
     return KERN_SYSCALL_BLOCKED;
+}
+
+kern_err_t endpoint_send_syscall(ep_id_t ep_id,
+                                 const void *msg,
+                                 void *user_reply_msg,
+                                 uint32_t timeout) {
+    return endpoint_send_syscall_common(ep_id, msg, user_reply_msg,
+                                        NULL, 0, timeout);
+}
+
+kern_err_t endpoint_send_caps_syscall(ep_id_t ep_id,
+                                      const void *msg,
+                                      void *user_reply_msg,
+                                      const ipc_cap_xfer_t *caps,
+                                      uint8_t cap_count,
+                                      uint32_t timeout) {
+    return endpoint_send_syscall_common(ep_id, msg, user_reply_msg,
+                                        caps, cap_count, timeout);
 }
 
 kern_err_t endpoint_send_caps(ep_id_t ep_id,
@@ -767,6 +1020,9 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
     if (current->id >= 0 && current->id < KERNEL_MAX_TASKS) {
         ep_server_sender[ep_id][current->id] = sender;
         ep_server_gen[ep_id][current->id] = request_gen;
+#if CAP_ENABLE
+        endpoint_bind_reply_cap(ep_id, current, sender, request_gen);
+#endif
     }
     ep_cap_count_buffers[ep_id][slot] = 0;
     ep_request_gen_buffers[ep_id][slot] = 0;
@@ -839,6 +1095,9 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
         ep_server_dead[ep_id][current->id] = 0;
         ep_server_sender[ep_id][current->id] = sender;
         ep_server_gen[ep_id][current->id] = request_gen;
+#if CAP_ENABLE
+        endpoint_bind_reply_cap(ep_id, current, sender, request_gen);
+#endif
 
         ep_cap_count_buffers[ep_id][slot] = 0;
         ep_request_gen_buffers[ep_id][slot] = 0;
@@ -895,7 +1154,16 @@ kern_err_t endpoint_recv_caps(ep_id_t ep_id,
     return endpoint_recv_common(ep_id, msg, out_caps, out_cap_count, timeout);
 }
 
-kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
+kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
+                                      void *user_msg,
+                                      cap_id_t *out_caps,
+                                      uint8_t *out_cap_count,
+                                      uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
+    if (user_msg == NULL || out_caps == NULL || out_cap_count == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
     uint32_t crit = hal_enter_critical();
 
     endpoint_t *ep = ep_get(ep_id);
@@ -904,17 +1172,66 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
         return KERN_ERR_PARAM;
     }
 
-    tcb_t *server = sched_get_current();
-    tcb_t *sender = NULL;
-    uint32_t request_gen = 0;
-    if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS) {
-        sender = ep_server_sender[ep_id][server->id];
-        request_gen = ep_server_gen[ep_id][server->id];
+    tcb_t *current = sched_get_current();
+    if (current == NULL || current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
     }
+
+    if (ep->count > 0) {
+        hal_exit_critical(crit);
+        return endpoint_recv_common(ep_id, user_msg, out_caps, out_cap_count, 0);
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    ep_syscall_recv_msg[current->id] = user_msg;
+    ep_syscall_recv_caps[current->id] = out_caps;
+    ep_syscall_recv_cap_count[current->id] = out_cap_count;
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_EP_RECV;
+    current->block_obj = ep;
+    wait_queue_add(&ep->recv_waiters, current);
+
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    current->state = TASK_STATE_BLOCKED;
+    current->block_result = KERN_OK;
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+
+static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
+                                       tcb_t *sender, uint32_t request_gen,
+                                       const void *msg) {
+    uint32_t crit = hal_enter_critical();
+
+    endpoint_t *ep = ep_get(ep_id);
+    if (ep == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
     if (sender == NULL) {
         if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS &&
             ep_server_dead[ep_id][server->id] != 0) {
             ep_server_dead[ep_id][server->id] = 0;
+#if CAP_ENABLE
+            endpoint_invalidate_reply_cap(ep_id, server->id);
+#endif
             hal_exit_critical(crit);
             return KERN_ERR_NOEXIST;
         }
@@ -931,6 +1248,9 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
             ep_server_sender[ep_id][server->id] = NULL;
             ep_server_gen[ep_id][server->id] = 0;
             ep_server_dead[ep_id][server->id] = 1;
+#if CAP_ENABLE
+            endpoint_invalidate_reply_cap(ep_id, server->id);
+#endif
         }
         hal_exit_critical(crit);
         return KERN_ERR_NOEXIST;
@@ -946,6 +1266,9 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
         ep_server_sender[ep_id][server->id] = NULL;
         ep_server_gen[ep_id][server->id] = 0;
         ep_server_dead[ep_id][server->id] = 0;
+#if CAP_ENABLE
+        endpoint_invalidate_reply_cap(ep_id, server->id);
+#endif
     }
     ep_client_msg[sender->id] = NULL;
     ep_client_gen[sender->id] = 0;
@@ -959,5 +1282,89 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
     hal_exit_critical(crit);
     return KERN_OK;
 }
+
+kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
+    tcb_t *server = sched_get_current();
+    tcb_t *sender = NULL;
+    uint32_t request_gen = 0;
+
+    if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS &&
+        ep_id >= 0 && ep_id < KERN_MAX_ENDPOINTS) {
+        sender = ep_server_sender[ep_id][server->id];
+        request_gen = ep_server_gen[ep_id][server->id];
+    }
+
+    return endpoint_reply_bound(ep_id, server, sender, request_gen, msg);
+}
+
+#if CAP_ENABLE
+cap_id_t endpoint_take_reply_cap(ep_id_t ep_id) {
+    tcb_t *server = sched_get_current();
+    if (server == NULL || server->id < 0 || server->id >= KERNEL_MAX_TASKS ||
+        ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS) {
+        return KERN_INVALID_ID;
+    }
+
+    uint32_t crit = hal_enter_critical();
+    endpoint_t *ep = ep_get(ep_id);
+    if (ep == NULL) {
+        hal_exit_critical(crit);
+        return KERN_INVALID_ID;
+    }
+
+    endpoint_reply_t *reply = &ep_reply_objects[ep_id][server->id];
+    if (!reply->active && !reply->used) {
+        tcb_t *sender = ep_server_sender[ep_id][server->id];
+        uint32_t request_gen = ep_server_gen[ep_id][server->id];
+        if (sender == NULL) {
+            sender = wait_queue_get_highest(&ep->reply_waiters);
+            if (sender != NULL &&
+                sender->id >= 0 && sender->id < KERNEL_MAX_TASKS &&
+                sender->block_obj == ep &&
+                sender->block_reason == BLOCK_REASON_EP_SEND) {
+                request_gen = ep_client_gen[sender->id];
+                ep_server_sender[ep_id][server->id] = sender;
+                ep_server_gen[ep_id][server->id] = request_gen;
+                ep_server_dead[ep_id][server->id] = 0;
+            }
+        }
+        if (sender != NULL && request_gen != 0) {
+            endpoint_bind_reply_cap(ep_id, server, sender, request_gen);
+        }
+    }
+
+    if (!reply->active || reply->used) {
+        if (reply->bind_error != KERN_OK) {
+            kern_err_t err = reply->bind_error;
+            hal_exit_critical(crit);
+            return err;
+        }
+        hal_exit_critical(crit);
+        return KERN_INVALID_ID;
+    }
+    cap_id_t cap = ep_server_reply_cap[ep_id][server->id];
+    if (cap == KERN_INVALID_ID) {
+        hal_exit_critical(crit);
+        return KERN_INVALID_ID;
+    }
+    hal_exit_critical(crit);
+    return cap;
+}
+
+kern_err_t endpoint_reply_cap(void *reply_obj, const void *msg) {
+    endpoint_reply_t *reply = (endpoint_reply_t *)reply_obj;
+    tcb_t *server = sched_get_current();
+
+    if (reply == NULL || !reply->active || reply->used) {
+        return KERN_ERR_STATE;
+    }
+    if (server == NULL || server->id != reply->server_id) {
+        return KERN_ERR_CAP;
+    }
+
+    return endpoint_reply_bound(reply->ep_id, server, reply->sender,
+                                reply->request_gen, msg);
+}
+#endif
 
 #endif /* IPC_ENDPOINT */

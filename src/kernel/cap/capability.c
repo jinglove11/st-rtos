@@ -13,15 +13,17 @@
 
 #define CAP_MAX_COUNT_VAL  CAP_MAX_COUNT
 #define CAP_INVALID        ((cap_id_t)-1)
-#define CAP_SLOT_BITS      6
+#define CAP_SLOT_BITS      7
 #define CAP_SLOT_MASK      ((1U << CAP_SLOT_BITS) - 1U)
 #define CAP_GENERATION_MAX (0x7FFFU >> CAP_SLOT_BITS)
 #define CAP_NO_SLOT        ((int16_t)-1)
 
 typedef char cap_slot_bits_fit[(CAP_MAX_COUNT_VAL <= (1U << CAP_SLOT_BITS)) ? 1 : -1];
+typedef char cap_shm_type_registered[(CAP_OBJ_SHM < CAP_OBJ_TYPE_MAX) ? 1 : -1];
 
 static cap_entry_t cap_pool[CAP_MAX_COUNT_VAL];
 static cap_cleanup_fn_t cap_cleanup_table[CAP_OBJ_TYPE_MAX];
+static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
 
 #define CAP_TASK_CSPACE_SLOTS \
     ((int)(sizeof(((tcb_t *)0)->cap_set) / sizeof(((tcb_t *)0)->cap_set[0])))
@@ -103,6 +105,9 @@ static kern_err_t cap_task_add(tcb_t *task, cap_id_t cap) {
     if (task == NULL || task->id < 0) {
         return KERN_OK;
     }
+    if ((task->attrs & TASK_ATTR_USER) == 0) {
+        return KERN_OK;
+    }
 
     if (cap_task_has(task, cap)) {
         return KERN_OK;
@@ -155,6 +160,10 @@ static int cap_owner_allowed(tcb_t *task, cap_id_t cap, const cap_entry_t *entry
 static int cap_alloc_slot(void) {
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         if (!cap_pool[i].in_use) {
+            if (cap_pool[i].generation == 0 ||
+                cap_pool[i].generation > CAP_GENERATION_MAX) {
+                cap_pool[i].generation = 1;
+            }
             return i;
         }
     }
@@ -216,11 +225,25 @@ static void cap_clear_slot(int slot) {
     cap_id_t cap = cap_encode((uint16_t)slot, cap_pool[slot].generation);
     void *object = cap_pool[slot].object;
     uint8_t obj_type = cap_pool[slot].obj_type;
+    int16_t child = cap_pool[slot].first_child;
+    if (cap != CAP_INVALID &&
+        obj_type < CAP_OBJ_TYPE_MAX &&
+        cap_revoke_hook_table[obj_type] != NULL) {
+        cap_revoke_hook_table[obj_type](cap, object, obj_type);
+    }
+
     if (cap != CAP_INVALID) {
         cap_remove_from_owner(cap_pool[slot].owner, cap);
     }
 
     uint16_t generation = cap_next_generation(cap_pool[slot].generation);
+
+    while (child != CAP_NO_SLOT) {
+        int16_t next = cap_pool[child].next_sibling;
+        cap_pool[child].parent = CAP_NO_SLOT;
+        cap_pool[child].next_sibling = CAP_NO_SLOT;
+        child = next;
+    }
 
     cap_unlink_from_parent(slot);
     memset(&cap_pool[slot], 0, sizeof(cap_pool[slot]));
@@ -246,6 +269,7 @@ static void cap_revoke_slot_tree(int slot) {
 void cap_init(void) {
     memset(cap_pool, 0, sizeof(cap_pool));
     memset(cap_cleanup_table, 0, sizeof(cap_cleanup_table));
+    memset(cap_revoke_hook_table, 0, sizeof(cap_revoke_hook_table));
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         cap_pool[i].generation = 1;
         cap_pool[i].parent = CAP_NO_SLOT;
@@ -334,13 +358,13 @@ void cap_delete(cap_id_t cap) {
     }
 
     int slot = cap_slot_of(entry);
-    cap_revoke_slot_tree(slot);
+    cap_clear_slot(slot);
 }
 
 void cap_revoke_all(uint8_t owner) {
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         if (cap_pool[i].in_use && cap_pool[i].owner == owner) {
-            cap_revoke_slot_tree(i);
+            cap_clear_slot(i);
         }
     }
 }
@@ -504,12 +528,36 @@ uint16_t cap_object_refcount(void *object, uint8_t obj_type) {
     return refs;
 }
 
+uint16_t cap_free_count(void) {
+    uint16_t free_count = 0;
+
+    for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
+        if (!cap_pool[i].in_use &&
+            cap_pool[i].generation != 0 &&
+            cap_pool[i].generation <= CAP_GENERATION_MAX) {
+            free_count++;
+        }
+    }
+
+    return free_count;
+}
+
 kern_err_t cap_register_cleanup(uint8_t obj_type, cap_cleanup_fn_t cleanup) {
     if (obj_type >= CAP_OBJ_TYPE_MAX) {
         return KERN_ERR_PARAM;
     }
 
     cap_cleanup_table[obj_type] = cleanup;
+    return KERN_OK;
+}
+
+kern_err_t cap_register_revoke_hook(uint8_t obj_type,
+                                    cap_revoke_hook_fn_t hook) {
+    if (obj_type >= CAP_OBJ_TYPE_MAX) {
+        return KERN_ERR_PARAM;
+    }
+
+    cap_revoke_hook_table[obj_type] = hook;
     return KERN_OK;
 }
 

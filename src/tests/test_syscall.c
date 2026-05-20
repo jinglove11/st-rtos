@@ -11,7 +11,11 @@
 #include "semaphore.h"
 #include "mutex.h"
 #include "mqueue.h"
+#include "event.h"
 #include "endpoint.h"
+#include "channel.h"
+#include "timer.h"
+#include "mem.h"
 
 #if CAP_ENABLE
 #include "capability.h"
@@ -223,6 +227,180 @@ static void user_callback_syscall_task(void *arg) {
 
     sys_task_exit((void *)(intptr_t)result);
 }
+
+static void user_timer_notify_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    int timer_cap = (int)(cap_id_t)((packed >> 16) & 0xffffU);
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    err = sys_timer_bind(timer_cap, ep_cap, 0x54555352U);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    err = sys_timer_start(timer_cap, 3);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    err = sys_ep_recv(ep_cap, msg_buf, 1000);
+    if (err == KERN_OK && msg[0] != 0x54555352U) {
+        err = KERN_ERR_STATE;
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_mem_cap_task(void *arg) {
+    (void)arg;
+
+    int cap = sys_mem_alloc(32);
+    int err = KERN_OK;
+    if (cap < 0) {
+        sys_task_exit((void *)(intptr_t)cap);
+    }
+
+    int size = sys_mem_size(cap);
+    if (size != 32) {
+        err = KERN_ERR_STATE;
+    }
+
+    if (err == KERN_OK) {
+        err = sys_mem_free(cap);
+    } else {
+        (void)sys_mem_free(cap);
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_shm_map_task(void *arg) {
+    int cap = (int)(intptr_t)arg;
+    int err = KERN_OK;
+
+    int created = sys_shm_create(256, CAP_READ | CAP_WRITE);
+    if (created != KERN_ERR_PERM) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PERM);
+    }
+
+    int bad = sys_call2(SYSCALL_SHM_MAP, KERN_INVALID_ID, CAP_READ);
+    if (bad != KERN_ERR_CAP) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    bad = sys_call2(SYSCALL_SHM_MAP, cap, CAP_MANAGE);
+    if (bad != KERN_ERR_PARAM) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    uint8_t *shm = (uint8_t *)sys_shm_map(cap, CAP_READ | CAP_WRITE);
+    if ((intptr_t)shm < 0) {
+        sys_task_exit((void *)(intptr_t)shm);
+    }
+
+    if (shm[0] != 0x5aU) {
+        err = KERN_ERR_STATE;
+    } else {
+        shm[1] = 0xa5U;
+    }
+
+    if (err == KERN_OK) {
+        err = sys_shm_unmap(cap);
+    } else {
+        (void)sys_shm_unmap(cap);
+    }
+
+    if (err == KERN_OK) {
+        int second = sys_shm_unmap(cap);
+        if (second != KERN_ERR_NOEXIST) {
+            err = KERN_ERR_STATE;
+        }
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_shm_map_exhaust_task(void *arg) {
+    int ep_cap = (int)(intptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    cap_id_t caps[IPC_CAPS_MAX];
+    cap_id_t mapped[TASK_SHM_MAP_MAX];
+    uint8_t cap_count = 0;
+    int err = KERN_OK;
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        mapped[i] = KERN_INVALID_ID;
+    }
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+        for (uint32_t j = 0; j < sizeof(msg_buf); j++) {
+            msg_buf[j] = 0;
+        }
+        for (uint32_t j = 0; j < IPC_CAPS_MAX; j++) {
+            caps[j] = KERN_INVALID_ID;
+        }
+        cap_count = 0;
+
+        err = sys_ep_recv_caps(ep_cap, msg_buf, caps, &cap_count, 1000);
+        if (err != KERN_OK) {
+            break;
+        }
+        if (cap_count != 1) {
+            err = KERN_ERR_STATE;
+            break;
+        }
+
+        void *addr = sys_shm_map(caps[0], CAP_READ | CAP_WRITE);
+        if (i < TASK_SHM_MAP_MAX) {
+            if ((intptr_t)addr < 0) {
+                err = (int)(intptr_t)addr;
+                break;
+            }
+            mapped[i] = caps[0];
+            *msg = i + 1U;
+            err = sys_ep_reply(ep_cap, msg_buf);
+            if (err != KERN_OK) {
+                break;
+            }
+        } else {
+            if ((intptr_t)addr != KERN_ERR_RESOURCE) {
+                err = KERN_ERR_STATE;
+                break;
+            }
+            *msg = 0xeeU;
+            err = sys_ep_reply(ep_cap, msg_buf);
+            break;
+        }
+    }
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (mapped[i] >= 0) {
+            int unmap_err = sys_shm_unmap(mapped[i]);
+            if (err == KERN_OK && unmap_err != KERN_OK) {
+                err = unmap_err;
+            }
+        }
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void test_set_created_task_arg(tcb_t *tcb, uintptr_t arg) {
+    if (tcb == NULL || tcb->sp == NULL) {
+        return;
+    }
+
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
+    *stacked_r0 = (uint32_t)arg;
+}
 #endif
 
 static void test_syscall_security_negative(void) {
@@ -279,6 +457,332 @@ static void test_syscall_security_negative(void) {
 #endif
 }
 
+static void test_user_timer_endpoint_notification(void) {
+    test_section("Test 9b: User timer endpoint notification");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_ENDPOINT && TIMER_ENABLE
+    ep_id_t ep = endpoint_create("u_tmr_ep", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(ep >= 0, "user timer endpoint created");
+    if (ep < 0) return;
+
+    timer_id_t tid = timer_create("u_tmr_nt", NULL, NULL, 0);
+    TEST_ASSERT(tid >= 0, "user notification timer created");
+    if (tid < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "user timer endpoint cap created");
+    if (ep_cap < 0) {
+        timer_delete(tid);
+        endpoint_delete(ep);
+        return;
+    }
+
+    cap_id_t timer_cap = cap_create((void *)(uintptr_t)(tid + 1),
+                                    CAP_OBJ_TIMER, CAP_FULL, 0);
+    TEST_ASSERT(timer_cap >= 0, "user timer cap created");
+    if (timer_cap < 0) {
+        cap_delete(ep_cap);
+        timer_delete(tid);
+        endpoint_delete(ep);
+        return;
+    }
+
+    uint32_t packed = ((uint32_t)(uint16_t)timer_cap << 16) |
+                      (uint32_t)(uint16_t)ep_cap;
+    task_id_t user = task_create_user("u_tmr_nt",
+                                      user_timer_notify_task,
+                                      (void *)(uintptr_t)packed,
+                                      5, 768);
+    TEST_ASSERT(user >= 0, "user timer notify task created");
+    if (user < 0) {
+        cap_delete(timer_cap);
+        cap_delete(ep_cap);
+        timer_delete(tid);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)user);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "timer endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(user);
+        cap_delete(timer_cap);
+        timer_delete(tid);
+        endpoint_delete(ep);
+        return;
+    }
+
+    err = cap_transfer(timer_cap, (uint8_t)user);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "timer cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(user);
+        timer_delete(tid);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(user);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(user, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "timer notify user joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "user received timer endpoint notification");
+
+    timer_delete(tid);
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, capability, endpoint, or timer disabled");
+#endif
+}
+
+static void test_user_mem_cap_syscalls(void) {
+    test_section("Test 9c: User memory cap syscalls");
+
+#if MPU_ENABLE && CAP_ENABLE && MEM_DYNAMIC
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    task_id_t user = task_create_user("u_mem_cap",
+                                      user_mem_cap_task,
+                                      NULL, 5, 768);
+    TEST_ASSERT(user >= 0, "user memory cap task created");
+    if (user < 0) return;
+
+    task_start(user);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(user, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "memory cap user joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "user memory cap syscalls returned OK");
+    TEST_ASSERT_EQ((int)outstanding, (int)mem_get_outstanding_allocs(),
+                   "user memory cap cleanup restored outstanding");
+
+    int err = sys_mem_size(KERN_INVALID_ID);
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, err,
+                   "invalid mem cap size rejected");
+#else
+    test_skip("MPU, capability, or dynamic memory disabled");
+#endif
+}
+
+static void test_user_shm_map_syscalls(void) {
+    test_section("Test 9d: User SHM map syscalls");
+
+#if MPU_ENABLE && CAP_ENABLE && MEM_DYNAMIC
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    cap_id_t root = kshm_create_aligned_cap(256,
+                                            CAP_READ | CAP_WRITE |
+                                            CAP_MANAGE | CAP_TRANSFER |
+                                            CAP_GRANT);
+    TEST_ASSERT(root >= 0, "kernel created aligned SHM cap");
+    if (root < 0) return;
+
+    void *base = NULL;
+    kern_err_t err = kshm_get_range(root, CAP_WRITE, 0, 2, &base);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel resolved SHM setup range");
+    if (err == KERN_OK) {
+        ((uint8_t *)base)[0] = 0x5aU;
+        ((uint8_t *)base)[1] = 0x00U;
+    }
+
+    task_id_t user = task_create_user("u_shm_map",
+                                      user_shm_map_task,
+                                      NULL, 5, 768);
+    TEST_ASSERT(user >= 0, "user SHM map task created");
+    if (user < 0) {
+        (void)kshm_delete_cap(root);
+        return;
+    }
+
+    tcb_t *tcb = task_get_tcb(user);
+    TEST_ASSERT_NOT_NULL(tcb, "user SHM map TCB resolved");
+    cap_id_t user_cap = KERN_INVALID_ID;
+    if (tcb != NULL) {
+        user_cap = cap_copy_to(NULL, root, tcb, CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(user_cap >= 0, "SHM cap copied into user CSpace");
+    if (user_cap < 0) {
+        (void)task_delete(user);
+        (void)kshm_delete_cap(root);
+        return;
+    }
+
+    test_set_created_task_arg(tcb, (uintptr_t)user_cap);
+    task_start(user);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(user, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "SHM map user joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "user SHM map syscalls returned OK");
+    if (base != NULL) {
+        TEST_ASSERT_EQ(0xa5, (int)((uint8_t *)base)[1],
+                       "user wrote through mapped SHM");
+    }
+
+    err = kshm_delete_cap(root);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel deleted SHM root cap");
+    TEST_ASSERT_EQ((int)outstanding, (int)mem_get_outstanding_allocs(),
+                   "user SHM map cleanup restored outstanding");
+#else
+    test_skip("MPU, capability, or dynamic memory disabled");
+#endif
+}
+
+static void test_kernel_shm_create_syscall_policy(void) {
+    test_section("Test 9e: SHM create syscall policy");
+
+#if MPU_ENABLE && CAP_ENABLE && MEM_DYNAMIC
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    int bad = sys_call2(SYSCALL_SHM_CREATE, 0, CAP_FULL);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, bad,
+                   "kernel shm_create rejects zero size");
+
+    int cap = sys_call2(SYSCALL_SHM_CREATE, 256,
+                        CAP_READ | CAP_WRITE |
+                        CAP_MANAGE | CAP_TRANSFER |
+                        CAP_GRANT);
+    TEST_ASSERT(cap >= 0, "kernel shm_create syscall returns cap");
+    if (cap >= 0) {
+        void *base = NULL;
+        size_t size = 0;
+        kern_err_t err = kshm_get_bounds((cap_id_t)cap, &base, &size);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "kernel shm_create cap resolves bounds");
+        TEST_ASSERT_NOT_NULL(base, "kernel shm_create base non-null");
+        TEST_ASSERT_EQ(256, (int)size, "kernel shm_create size recorded");
+
+        err = kshm_delete_cap((cap_id_t)cap);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "kernel shm_create cap deleted");
+    }
+
+    TEST_ASSERT_EQ((int)outstanding, (int)mem_get_outstanding_allocs(),
+                   "kernel shm_create cleanup restored outstanding");
+#else
+    test_skip("MPU, capability, or dynamic memory disabled");
+#endif
+}
+
+static void test_user_shm_map_region_exhaustion(void) {
+    test_section("Test 9f: User SHM map region exhaustion");
+
+#if MPU_ENABLE && CAP_ENABLE && MEM_DYNAMIC && IPC_ENDPOINT
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    ep_id_t ep = endpoint_create("u_shmx", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "SHM exhaustion endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "SHM exhaustion endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    cap_id_t roots[TASK_SHM_MAP_MAX + 1];
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+        roots[i] = KERN_INVALID_ID;
+    }
+
+    int setup_ok = 1;
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+        roots[i] = kshm_create_aligned_cap(256,
+                                           CAP_READ | CAP_WRITE |
+                                           CAP_MANAGE | CAP_TRANSFER |
+                                           CAP_GRANT);
+        if (roots[i] < 0) {
+            setup_ok = 0;
+            break;
+        }
+    }
+    TEST_ASSERT(setup_ok == 1, "SHM exhaustion root caps created");
+    if (!setup_ok) {
+        for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+            if (roots[i] >= 0) {
+                (void)kshm_delete_cap(roots[i]);
+            }
+        }
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t user = task_create_user("u_shm_x",
+                                      user_shm_map_exhaust_task,
+                                      (void *)(uintptr_t)ep_cap,
+                                      5, 1024);
+    TEST_ASSERT(user >= 0, "SHM exhaustion user task created");
+    if (user < 0) {
+        for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+            (void)kshm_delete_cap(roots[i]);
+        }
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)user);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "SHM exhaustion endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(user);
+        for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+            (void)kshm_delete_cap(roots[i]);
+        }
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(user);
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+        ipc_cap_xfer_t xfer;
+        xfer.src_cap = roots[i];
+        xfer.rights = CAP_READ | CAP_WRITE;
+        xfer.flags = IPC_CAP_COPY;
+
+        uint32_t msg = 0x53000000U | i;
+        err = endpoint_send_caps(ep, &msg, &xfer, 1, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "kernel sent SHM cap for exhaustion");
+        if (i < TASK_SHM_MAP_MAX) {
+            TEST_ASSERT_EQ((int)(i + 1U), (int)msg,
+                           "user mapped SHM region before exhaustion");
+        } else {
+            TEST_ASSERT_EQ(0xee, (int)msg,
+                           "user observed SHM map region exhaustion");
+        }
+        if (err != KERN_OK) {
+            break;
+        }
+    }
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(user, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "SHM exhaustion user joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "user SHM exhaustion result OK");
+
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX + 1; i++) {
+        err = kshm_delete_cap(roots[i]);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "SHM exhaustion root cap deleted");
+    }
+    endpoint_delete(ep);
+    TEST_ASSERT_EQ((int)outstanding, (int)mem_get_outstanding_allocs(),
+                   "SHM exhaustion cleanup restored outstanding");
+#else
+    test_skip("MPU, capability, dynamic memory, or endpoint disabled");
+#endif
+}
+
 /*============================================================================
  * 测试 10: 用户态服务通过 sleepable endpoint syscall 处理请求
  *============================================================================*/
@@ -302,6 +806,81 @@ static void user_endpoint_service_task(void *arg) {
     }
 
     sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_reply_cap_service_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *req = (uint32_t *)msg_buf;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    err = sys_ep_recv(ep_cap, msg_buf, 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(uintptr_t)(0x1000 | ((uint32_t)(-err) & 0xffU)));
+    }
+    if (err == KERN_OK) {
+        int reply_cap = sys_ep_take_reply(ep_cap);
+        if (reply_cap < 0) {
+            if (reply_cap == KERN_ERR_CAP) {
+                err = 0x2100;
+            } else if (reply_cap == KERN_INVALID_ID) {
+                err = 0x2200;
+            } else {
+                err = (int)(0x2000 | ((uint32_t)(-reply_cap) & 0xffU));
+            }
+        } else {
+            *req += 200;
+            err = sys_ep_reply(reply_cap, msg_buf);
+            if (err != KERN_OK) {
+                err = (int)(0x3000 | ((uint32_t)(-err) & 0xffU));
+            } else {
+                int second = sys_ep_reply(reply_cap, msg_buf);
+                if (second == KERN_OK) {
+                    err = 0x4000;
+                } else {
+                    err = KERN_OK;
+                }
+            }
+        }
+    }
+
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_reply_cap_timeout_service_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    err = sys_ep_recv(ep_cap, msg_buf, 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(uintptr_t)(0x1000 | ((uint32_t)(-err) & 0xffU)));
+    }
+
+    int reply_cap = sys_ep_take_reply(ep_cap);
+    if (reply_cap < 0) {
+        sys_task_exit((void *)(uintptr_t)(0x2000 | ((uint32_t)(-reply_cap) & 0xffU)));
+    }
+
+    err = sys_task_delay(20);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(uintptr_t)(0x3000 | ((uint32_t)(-err) & 0xffU)));
+    }
+
+    err = sys_ep_reply(reply_cap, msg_buf);
+    if (err == KERN_OK) {
+        sys_task_exit((void *)(uintptr_t)0x4000);
+    }
+
+    sys_task_exit((void *)(uintptr_t)KERN_OK);
 }
 
 static void user_endpoint_recv_timeout_task(void *arg) {
@@ -331,6 +910,99 @@ static void user_endpoint_client_task(void *arg) {
     err = sys_ep_send(ep_cap, msg_buf, 1000);
     if (err == KERN_OK && *msg != 177) {
         err = KERN_ERR;
+    }
+
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_send_caps_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t src_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        xfers[i].src_cap = KERN_INVALID_ID;
+        xfers[i].rights = 0;
+        xfers[i].flags = IPC_CAP_COPY;
+    }
+
+    *msg = 55;
+    xfers[0].src_cap = src_cap;
+    xfers[0].rights = CAP_READ;
+    xfers[0].flags = IPC_CAP_COPY;
+
+    err = sys_ep_send_caps(ep_cap, msg_buf, xfers, 1, 1000);
+    if (err == KERN_OK && *msg != 56) {
+        err = KERN_ERR;
+    }
+
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_recv_caps_service_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    cap_id_t caps[IPC_CAPS_MAX];
+    uint8_t cap_count = 0;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        caps[i] = KERN_INVALID_ID;
+    }
+
+    err = sys_ep_recv_caps(ep_cap, msg_buf, caps, &cap_count, 1000);
+    if (err == KERN_OK && cap_count != 1) {
+        err = KERN_ERR;
+    }
+
+    if (err == KERN_OK) {
+        err = sys_sem_post(caps[0]);
+    }
+
+    if (err == KERN_OK) {
+        *msg += 2;
+        err = sys_ep_reply(ep_cap, msg_buf);
+    }
+
+    sys_task_exit((void *)(uintptr_t)err);
+}
+
+static void user_endpoint_recv_mem_cap_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    cap_id_t caps[IPC_CAPS_MAX];
+    uint8_t cap_count = 0;
+    int err;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        caps[i] = KERN_INVALID_ID;
+    }
+
+    err = sys_ep_recv_caps(ep_cap, msg_buf, caps, &cap_count, 1000);
+    if (err == KERN_OK && cap_count != 1) {
+        err = KERN_ERR_RESOURCE;
+    }
+    if (err == KERN_OK && sys_mem_size(caps[0]) != 48) {
+        err = KERN_ERR_STATE;
+    }
+    if (err == KERN_OK) {
+        *msg += 3;
+        err = sys_ep_reply(ep_cap, msg_buf);
     }
 
     sys_task_exit((void *)(uintptr_t)err);
@@ -434,6 +1106,122 @@ static void user_mqueue_send_task(void *arg) {
     int err = sys_mqueue_send(mq_cap, msg_buf, 1000);
     sys_task_exit((void *)(intptr_t)err);
 }
+
+static void user_event_wait_task(void *arg) {
+    int event_cap = (int)(uintptr_t)arg;
+    int err = sys_event_wait(event_cap, 0x4U, 1000);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_event_wait_timeout_task(void *arg) {
+    int event_cap = (int)(uintptr_t)arg;
+    int err = sys_event_wait(event_cap, 0x8U, 2);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_channel_recv_task(void *arg) {
+    int ch_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_CH_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    int err = sys_ch_recv(ch_cap, msg_buf, 1000);
+    if (err == KERN_OK && *msg != 0x43485258U) {
+        err = KERN_ERR_STATE;
+    }
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_channel_recv_timeout_task(void *arg) {
+    int ch_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_CH_MSG_SIZE];
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    int err = sys_ch_recv(ch_cap, msg_buf, 2);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_channel_send_twice_task(void *arg) {
+    int ch_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_CH_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    *msg = 0x43485331U;
+    int err = sys_ch_send(ch_cap, msg_buf, 1000);
+    if (err == KERN_OK) {
+        *msg = 0x43485332U;
+        err = sys_ch_send(ch_cap, msg_buf, 1000);
+    }
+    if (err == KERN_OK) {
+        (void)sys_task_delay(20);
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_channel_send_caps_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ch_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t src_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    uint8_t msg_buf[KERN_CH_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        xfers[i].src_cap = KERN_INVALID_ID;
+        xfers[i].rights = 0;
+        xfers[i].flags = IPC_CAP_COPY;
+    }
+
+    *msg = 0x43484353U;
+    xfers[0].src_cap = src_cap;
+    xfers[0].rights = CAP_READ;
+    xfers[0].flags = IPC_CAP_COPY;
+
+    int err = sys_ch_send_caps(ch_cap, msg_buf, xfers, 1, 1000);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void user_channel_recv_caps_task(void *arg) {
+    int ch_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_CH_MSG_SIZE];
+    uint32_t *msg = (uint32_t *)msg_buf;
+    cap_id_t caps[IPC_CAPS_MAX];
+    uint8_t cap_count = 0;
+
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        caps[i] = KERN_INVALID_ID;
+    }
+
+    int err = sys_ch_recv_caps(ch_cap, msg_buf, caps, &cap_count, 1000);
+    if (err == KERN_OK && *msg != 0x43485243U) {
+        err = KERN_ERR_STATE;
+    }
+    if (err == KERN_OK && cap_count != 1) {
+        err = KERN_ERR_RESOURCE;
+    }
+    if (err == KERN_OK) {
+        err = sys_sem_post(caps[0]);
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
 #endif
 
 static void test_user_endpoint_service_nonblocking(void) {
@@ -490,8 +1278,134 @@ static void test_user_endpoint_service_nonblocking(void) {
 #endif
 }
 
+static void test_user_endpoint_reply_cap(void) {
+    test_section("Test 10: User endpoint reply cap");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_r cap", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "reply-cap endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "reply-cap endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ep_rcap",
+                                         user_endpoint_reply_cap_service_task,
+                                         (void *)(uintptr_t)ep_cap,
+                                         5, 768);
+    TEST_ASSERT(service >= 0, "reply-cap service created");
+    if (service < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "reply-cap endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(service);
+
+    uint32_t msg = 31;
+    err = endpoint_send(ep, &msg, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel client reply-cap send OK");
+    TEST_ASSERT_EQ(231, (int)msg, "user service replied through reply cap");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "reply-cap service joined OK");
+    int rv = (int)(uintptr_t)retval;
+    TEST_ASSERT((rv & 0xF000) != 0x1000, "reply cap service recv stage OK");
+    TEST_ASSERT(rv != 0x2100, "reply cap endpoint cap resolve OK");
+    TEST_ASSERT(rv != 0x2200, "reply cap endpoint binding exists");
+    TEST_ASSERT((rv & 0xF000) != 0x2000, "reply cap service take stage OK");
+    TEST_ASSERT((rv & 0xF000) != 0x3000, "reply cap service reply stage OK");
+    TEST_ASSERT((rv & 0xF000) != 0x4000, "reply cap service single-use stage OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(uintptr_t)retval,
+                   "reply cap syscall result OK");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_reply_cap_timeout(void) {
+    test_section("Test 10b: User endpoint reply cap timeout invalidation");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_rcap_to", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "reply-cap-timeout endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "reply-cap-timeout endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ep_rcto",
+                                         user_endpoint_reply_cap_timeout_service_task,
+                                         (void *)(uintptr_t)ep_cap,
+                                         5, 768);
+    TEST_ASSERT(service >= 0, "reply-cap-timeout service created");
+    if (service < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "reply-cap-timeout endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(service);
+
+    uint32_t msg = 41;
+    err = endpoint_send(ep, &msg, 3);
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)err,
+                   "reply cap client timed out");
+    TEST_ASSERT_EQ(41, (int)msg, "timed-out client buffer unchanged");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "reply-cap-timeout service joined OK");
+    int rv = (int)(uintptr_t)retval;
+    TEST_ASSERT((rv & 0xF000) != 0x1000,
+                "reply cap timeout service recv stage OK");
+    TEST_ASSERT((rv & 0xF000) != 0x2000,
+                "reply cap timeout service take stage OK");
+    TEST_ASSERT((rv & 0xF000) != 0x3000,
+                "reply cap timeout service delay stage OK");
+    TEST_ASSERT(rv != 0x4000, "reply cap invalid after client timeout");
+    TEST_ASSERT_EQ((int)KERN_OK, rv,
+                   "reply cap timeout service result OK");
+
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
 static void test_user_endpoint_recv_sleep_timeout(void) {
-    test_section("Test 10: User endpoint recv sleep timeout");
+    test_section("Test 11: User endpoint recv sleep timeout");
 
 #if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
     ep_id_t ep = endpoint_create("u_svc_to", sizeof(uint32_t), 1);
@@ -593,6 +1507,274 @@ static void test_user_endpoint_send_sleep_reply(void) {
     endpoint_delete(ep);
 #else
     test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_send_caps_sleepable(void) {
+    test_section("Test 11b: User endpoint send_caps sleepable");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_caps", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "send_caps endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "send_caps endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    int cap_object = 0x5151;
+    cap_id_t src_cap = cap_create(&cap_object, CAP_OBJ_ENDPOINT,
+                                  CAP_FULL, 0);
+    TEST_ASSERT(src_cap >= 0, "send_caps source cap created");
+    if (src_cap < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    uint32_t packed = ((uint32_t)(uint16_t)src_cap << 16) |
+                      (uint32_t)(uint16_t)ep_cap;
+    task_id_t client = task_create_user("u_ep_caps",
+                                        user_endpoint_send_caps_task,
+                                        (void *)(uintptr_t)packed,
+                                        5, 768);
+    TEST_ASSERT(client >= 0, "send_caps user client created");
+    if (client < 0) {
+        cap_delete(src_cap);
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send_caps endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(client);
+        cap_delete(src_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    err = cap_transfer(src_cap, (uint8_t)client);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send_caps source cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(client);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(client);
+
+    uint32_t msg = 0;
+    cap_id_t caps[IPC_CAPS_MAX];
+    uint8_t cap_count = 0;
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        caps[i] = KERN_INVALID_ID;
+    }
+
+    err = endpoint_recv_caps(ep, &msg, caps, &cap_count, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "kernel received user send_caps request");
+    TEST_ASSERT_EQ(55, (int)msg, "kernel received send_caps payload");
+    TEST_ASSERT_EQ(1, (int)cap_count, "kernel received one copied cap");
+    void *ptr = cap_resolve(caps[0], CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(ptr == &cap_object, "kernel received copied endpoint cap");
+
+    msg += 1;
+    err = endpoint_reply(ep, &msg);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel replied to send_caps client");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(client, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "send_caps client joined OK");
+    int rv = (int)(uintptr_t)retval;
+    TEST_ASSERT_EQ((int)KERN_OK, rv,
+                   "sleepable ep_send_caps returned OK");
+
+    if (caps[0] >= 0) {
+        cap_delete(caps[0]);
+    }
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_recv_caps_sleepable(void) {
+    test_section("Test 11c: User endpoint recv_caps sleepable");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
+    ep_id_t ep = endpoint_create("u_rcaps", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "recv_caps endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "recv_caps endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    sem_id_t sem = sem_create(0, 1);
+    TEST_ASSERT(sem >= 0, "recv_caps semaphore created");
+    if (sem < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    cap_id_t sem_cap = cap_create((void *)(uintptr_t)(sem + 1),
+                                  CAP_OBJ_SEMAPHORE,
+                                  CAP_WRITE | CAP_TRANSFER,
+                                  0);
+    TEST_ASSERT(sem_cap >= 0, "recv_caps semaphore cap created");
+    if (sem_cap < 0) {
+        sem_delete(sem);
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ep_rcaps",
+                                         user_endpoint_recv_caps_service_task,
+                                         (void *)(uintptr_t)ep_cap,
+                                         5, 768);
+    TEST_ASSERT(service >= 0, "recv_caps service created");
+    if (service < 0) {
+        cap_delete(sem_cap);
+        sem_delete(sem);
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "recv_caps endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        cap_delete(sem_cap);
+        sem_delete(sem);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(service);
+
+    ipc_cap_xfer_t xfer;
+    xfer.src_cap = sem_cap;
+    xfer.rights = CAP_WRITE;
+    xfer.flags = IPC_CAP_COPY;
+
+    uint32_t msg = 70;
+    err = endpoint_send_caps(ep, &msg, &xfer, 1, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "kernel endpoint_send_caps to user recv_caps OK");
+    TEST_ASSERT_EQ(72, (int)msg, "user recv_caps service replied");
+
+    err = sem_wait(sem, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "user recv_caps service used transferred sem cap");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "recv_caps service joined OK");
+    int rv = (int)(uintptr_t)retval;
+    TEST_ASSERT_EQ((int)KERN_OK, rv,
+                   "sleepable ep_recv_caps service result OK");
+
+    cap_delete(sem_cap);
+    sem_delete(sem);
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, semaphore, or capability disabled");
+#endif
+}
+
+static void test_user_endpoint_recv_mem_cap_sleepable(void) {
+    test_section("Test 11d: User endpoint recv memory cap sleepable");
+
+#if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE && MEM_DYNAMIC
+    ep_id_t ep = endpoint_create("u_rmem", sizeof(uint32_t), 2);
+    TEST_ASSERT(ep >= 0, "recv mem cap endpoint created");
+    if (ep < 0) return;
+
+    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    TEST_ASSERT(ep_cap >= 0, "recv mem cap endpoint cap created");
+    if (ep_cap < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    cap_id_t mem_cap = kmem_alloc_cap(48,
+                                      CAP_READ | CAP_WRITE |
+                                      CAP_TRANSFER | CAP_MANAGE);
+    TEST_ASSERT(mem_cap >= 0, "recv mem cap source created");
+    if (mem_cap < 0) {
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ep_rmem",
+                                         user_endpoint_recv_mem_cap_task,
+                                         (void *)(uintptr_t)ep_cap,
+                                         5, 768);
+    TEST_ASSERT(service >= 0, "recv mem cap service created");
+    if (service < 0) {
+        kmem_free_cap(mem_cap);
+        cap_delete(ep_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(ep_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "recv mem cap endpoint cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        kmem_free_cap(mem_cap);
+        endpoint_delete(ep);
+        return;
+    }
+
+    task_start(service);
+
+    ipc_cap_xfer_t xfer;
+    xfer.src_cap = mem_cap;
+    xfer.rights = CAP_READ;
+    xfer.flags = IPC_CAP_COPY;
+
+    uint32_t msg = 80;
+    err = endpoint_send_caps(ep, &msg, &xfer, 1, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "kernel endpoint_send_caps memory cap OK");
+    TEST_ASSERT_EQ(83, (int)msg, "user recv memory cap service replied");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "recv memory cap service joined OK");
+    int rv = (int)(uintptr_t)retval;
+    TEST_ASSERT_EQ((int)KERN_OK, rv,
+                   "sleepable ep_recv_caps memory cap service result OK");
+
+    void *base = NULL;
+    size_t size = 0;
+    err = kmem_get_bounds(mem_cap, &base, &size);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "original memory cap still resolves after IPC copy");
+    TEST_ASSERT_EQ(48, (int)size, "original memory cap size preserved");
+
+    kmem_free_cap(mem_cap);
+    endpoint_delete(ep);
+#else
+    test_skip("MPU, endpoint, capability, or dynamic memory disabled");
 #endif
 }
 
@@ -745,18 +1927,14 @@ static void test_user_endpoint_send_nowait_timeout(void) {
 #endif
 }
 
-static void test_blocking_ipc_syscalls_rejected(void) {
-    test_section("Test 15: Non-continuation IPC blocking rejected");
+static void test_cap_ipc_syscalls_rejected(void) {
+    test_section("Test 15: Invalid cap-transfer IPC syscalls rejected");
 
-    uint8_t ep_msg[KERN_EP_MSG_SIZE];
     uint8_t ch_msg[KERN_CH_MSG_SIZE];
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
     cap_id_t out_caps[IPC_CAPS_MAX];
     uint8_t out_count = 0;
 
-    for (uint32_t i = 0; i < sizeof(ep_msg); i++) {
-        ep_msg[i] = 0;
-    }
     for (uint32_t i = 0; i < sizeof(ch_msg); i++) {
         ch_msg[i] = 0;
     }
@@ -767,29 +1945,21 @@ static void test_blocking_ipc_syscalls_rejected(void) {
         out_caps[i] = KERN_INVALID_ID;
     }
 
-    int err = sys_ep_send_caps(0, ep_msg, xfers, 0, 1);
-    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
-                   "blocking ep_send_caps rejected");
-
-    err = sys_ep_recv_caps(0, ep_msg, out_caps, &out_count, 1);
-    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
-                   "blocking ep_recv_caps rejected");
-
-    err = sys_ch_send(0, ch_msg, 1);
-    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
-                   "blocking ch_send rejected");
-
-    err = sys_ch_recv(0, ch_msg, 1);
-    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
-                   "blocking ch_recv rejected");
+    uint8_t ep_msg[KERN_EP_MSG_SIZE];
+    for (uint32_t i = 0; i < sizeof(ep_msg); i++) {
+        ep_msg[i] = 0;
+    }
+    int err = sys_ep_recv_caps(0, ep_msg, out_caps, &out_count, 1);
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, err,
+                   "invalid ep_recv_caps cap rejected");
 
     err = sys_ch_send_caps(0, ch_msg, xfers, 0, 1);
-    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
-                   "blocking ch_send_caps rejected");
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, err,
+                   "invalid ch_send_caps cap rejected");
 
     err = sys_ch_recv_caps(0, ch_msg, out_caps, &out_count, 1);
-    TEST_ASSERT_EQ((int)KERN_ERR_BUSY, err,
-                   "blocking ch_recv_caps rejected");
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, err,
+                   "invalid ch_recv_caps cap rejected");
 }
 
 static void test_user_sem_wait_sleepable(void) {
@@ -894,8 +2064,59 @@ static void test_user_sem_wait_sleep_timeout(void) {
 #endif
 }
 
+static void test_user_sem_wait_delete_wakeup(void) {
+    test_section("Test 18: User semaphore wait delete wakeup");
+
+#if MPU_ENABLE && CAP_ENABLE
+    sem_id_t sem = sem_create(0, 1);
+    TEST_ASSERT(sem >= 0, "delete-wakeup semaphore created");
+    if (sem < 0) return;
+
+    cap_id_t sem_cap = cap_create((void *)(uintptr_t)(sem + 1),
+                                  CAP_OBJ_SEMAPHORE, CAP_FULL, 0);
+    TEST_ASSERT(sem_cap >= 0, "delete-wakeup semaphore cap created");
+    if (sem_cap < 0) {
+        sem_delete(sem);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_sem_del",
+                                        user_sem_wait_task,
+                                        (void *)(uintptr_t)sem_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "delete-wakeup semaphore waiter created");
+    if (waiter < 0) {
+        cap_delete(sem_cap);
+        sem_delete(sem);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(sem_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "delete-wakeup sem cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        sem_delete(sem);
+        return;
+    }
+
+    task_start(waiter);
+    task_delay(1);
+
+    err = sem_delete(sem);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "sem_delete woke syscall waiter");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "sem delete waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)(intptr_t)retval,
+                   "sleepable sem wait returned noexist after delete");
+#else
+    test_skip("MPU or capability disabled");
+#endif
+}
+
 static void test_user_mutex_lock_sleepable(void) {
-    test_section("Test 18: User mutex lock sleepable");
+    test_section("Test 19: User mutex lock sleepable");
 
 #if MPU_ENABLE && CAP_ENABLE
     mutex_id_t mid = mutex_create();
@@ -958,7 +2179,7 @@ static void test_user_mutex_lock_sleepable(void) {
 }
 
 static void test_user_mutex_lock_sleep_timeout(void) {
-    test_section("Test 19: User mutex lock sleep timeout");
+    test_section("Test 20: User mutex lock sleep timeout");
 
 #if MPU_ENABLE && CAP_ENABLE
     mutex_id_t mid = mutex_create();
@@ -1190,6 +2411,617 @@ static void test_user_mqueue_send_sleepable(void) {
 #endif
 }
 
+static void test_user_event_wait_sleepable(void) {
+    test_section("Test 23: User event wait sleepable");
+
+#if MPU_ENABLE && CAP_ENABLE
+    event_id_t eid = event_create(0);
+    TEST_ASSERT(eid >= 0, "sleepable event created");
+    if (eid < 0) return;
+
+    cap_id_t event_cap = cap_create((void *)(uintptr_t)(eid + 1),
+                                    CAP_OBJ_EVENT, CAP_FULL, 0);
+    TEST_ASSERT(event_cap >= 0, "sleepable event cap created");
+    if (event_cap < 0) {
+        event_delete(eid);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_evt_wait",
+                                        user_event_wait_task,
+                                        (void *)(uintptr_t)event_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "sleepable event waiter created");
+    if (waiter < 0) {
+        cap_delete(event_cap);
+        event_delete(eid);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(event_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "sleepable event cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        event_delete(eid);
+        return;
+    }
+
+    task_start(waiter);
+    task_delay(1);
+
+    err = event_set(eid, 0x4U);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel event_set woke syscall");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "event waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "sleepable event wait returned OK");
+
+    event_delete(eid);
+#else
+    test_skip("MPU or capability disabled");
+#endif
+}
+
+static void test_user_event_wait_sleep_timeout(void) {
+    test_section("Test 24: User event wait sleep timeout");
+
+#if MPU_ENABLE && CAP_ENABLE
+    event_id_t eid = event_create(0);
+    TEST_ASSERT(eid >= 0, "timeout event created");
+    if (eid < 0) return;
+
+    cap_id_t event_cap = cap_create((void *)(uintptr_t)(eid + 1),
+                                    CAP_OBJ_EVENT, CAP_FULL, 0);
+    TEST_ASSERT(event_cap >= 0, "timeout event cap created");
+    if (event_cap < 0) {
+        event_delete(eid);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_evt_to",
+                                        user_event_wait_timeout_task,
+                                        (void *)(uintptr_t)event_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "timeout event waiter created");
+    if (waiter < 0) {
+        cap_delete(event_cap);
+        event_delete(eid);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(event_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "timeout event cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        event_delete(eid);
+        return;
+    }
+
+    task_start(waiter);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "event timeout waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)(intptr_t)retval,
+                   "sleepable event wait returned timeout");
+
+    event_delete(eid);
+#else
+    test_skip("MPU or capability disabled");
+#endif
+}
+
+static void test_user_event_wait_delete_wakeup(void) {
+    test_section("Test 25: User event wait delete wakeup");
+
+#if MPU_ENABLE && CAP_ENABLE
+    event_id_t eid = event_create(0);
+    TEST_ASSERT(eid >= 0, "delete-wakeup event created");
+    if (eid < 0) return;
+
+    cap_id_t event_cap = cap_create((void *)(uintptr_t)(eid + 1),
+                                    CAP_OBJ_EVENT, CAP_FULL, 0);
+    TEST_ASSERT(event_cap >= 0, "delete-wakeup event cap created");
+    if (event_cap < 0) {
+        event_delete(eid);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_evt_del",
+                                        user_event_wait_task,
+                                        (void *)(uintptr_t)event_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "delete-wakeup event waiter created");
+    if (waiter < 0) {
+        cap_delete(event_cap);
+        event_delete(eid);
+        return;
+    }
+
+    kern_err_t err = cap_transfer(event_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "delete-wakeup event cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        event_delete(eid);
+        return;
+    }
+
+    task_start(waiter);
+    task_delay(1);
+
+    err = event_delete(eid);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "event_delete woke syscall waiter");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "event delete waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)(intptr_t)retval,
+                   "sleepable event wait returned noexist after delete");
+#else
+    test_skip("MPU or capability disabled");
+#endif
+}
+
+static void test_user_channel_recv_sleepable(void) {
+    test_section("Test 26: User channel recv sleepable");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_CHANNEL
+    ch_id_t ch = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(ch >= 0, "sleepable channel created");
+    if (ch < 0) return;
+
+    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
+                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    TEST_ASSERT(ch_cap >= 0, "sleepable channel cap created");
+    if (ch_cap < 0) {
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_ch_recv",
+                                        user_channel_recv_task,
+                                        (void *)(uintptr_t)ch_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "sleepable channel recv task created");
+    if (waiter < 0) {
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t self = task_self();
+    kern_err_t err = channel_connect(ch, waiter, self);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "sleepable channel connected");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(ch_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "sleepable channel cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        channel_delete(ch);
+        return;
+    }
+
+    task_start(waiter);
+    task_delay(1);
+
+    uint32_t msg = 0x43485258U;
+    err = channel_send(ch, &msg, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel send woke channel recv syscall");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "channel recv waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "sleepable channel recv returned OK");
+
+    channel_delete(ch);
+#else
+    test_skip("MPU, capability, or channel disabled");
+#endif
+}
+
+static void test_user_channel_recv_sleep_timeout(void) {
+    test_section("Test 27: User channel recv sleep timeout");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_CHANNEL
+    ch_id_t ch = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(ch >= 0, "timeout channel created");
+    if (ch < 0) return;
+
+    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
+                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    TEST_ASSERT(ch_cap >= 0, "timeout channel cap created");
+    if (ch_cap < 0) {
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_ch_to",
+                                        user_channel_recv_timeout_task,
+                                        (void *)(uintptr_t)ch_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "timeout channel recv task created");
+    if (waiter < 0) {
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t self = task_self();
+    kern_err_t err = channel_connect(ch, waiter, self);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "timeout channel connected");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(ch_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "timeout channel cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        channel_delete(ch);
+        return;
+    }
+
+    task_start(waiter);
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "channel timeout waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_TIMEOUT, (int)(intptr_t)retval,
+                   "sleepable channel recv returned timeout");
+
+    channel_delete(ch);
+#else
+    test_skip("MPU, capability, or channel disabled");
+#endif
+}
+
+static void test_user_channel_recv_delete_wakeup(void) {
+    test_section("Test 28: User channel recv delete wakeup");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_CHANNEL
+    ch_id_t ch = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(ch >= 0, "delete-wakeup channel created");
+    if (ch < 0) return;
+
+    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
+                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    TEST_ASSERT(ch_cap >= 0, "delete-wakeup channel cap created");
+    if (ch_cap < 0) {
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t waiter = task_create_user("u_ch_del",
+                                        user_channel_recv_task,
+                                        (void *)(uintptr_t)ch_cap,
+                                        5, 512);
+    TEST_ASSERT(waiter >= 0, "delete-wakeup channel waiter created");
+    if (waiter < 0) {
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t self = task_self();
+    kern_err_t err = channel_connect(ch, waiter, self);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "delete-wakeup channel connected");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(ch_cap, (uint8_t)waiter);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "delete-wakeup channel cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(waiter);
+        channel_delete(ch);
+        return;
+    }
+
+    task_start(waiter);
+    task_delay(1);
+
+    err = channel_delete(ch);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "channel_delete woke syscall waiter");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(waiter, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "channel delete waiter joined OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST, (int)(intptr_t)retval,
+                   "sleepable channel recv returned noexist after delete");
+#else
+    test_skip("MPU, capability, or channel disabled");
+#endif
+}
+
+static void test_user_channel_send_sleepable(void) {
+    test_section("Test 29: User channel send sleepable");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_CHANNEL
+    ch_id_t ch = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(ch >= 0, "send channel created");
+    if (ch < 0) return;
+
+    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
+                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    TEST_ASSERT(ch_cap >= 0, "send channel cap created");
+    if (ch_cap < 0) {
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t sender = task_create_user("u_ch_send",
+                                        user_channel_send_twice_task,
+                                        (void *)(uintptr_t)ch_cap,
+                                        5, 512);
+    TEST_ASSERT(sender >= 0, "sleepable channel send task created");
+    if (sender < 0) {
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t self = task_self();
+    kern_err_t err = channel_connect(ch, sender, self);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send channel connected");
+    if (err != KERN_OK) {
+        (void)task_delete(sender);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(ch_cap, (uint8_t)sender);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send channel cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(sender);
+        channel_delete(ch);
+        return;
+    }
+
+    task_start(sender);
+    task_delay(1);
+
+    uint32_t got = 0;
+    err = channel_recv(ch, &got, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel recv opened channel slot");
+    TEST_ASSERT_EQ((int)0x43485331U, (int)got,
+                   "kernel received first channel msg");
+
+    got = 0;
+    err = channel_recv(ch, &got, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel received second channel msg");
+    TEST_ASSERT_EQ((int)0x43485332U, (int)got,
+                   "sleepable channel send copied message");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(sender, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "channel sender joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "sleepable channel send returned OK");
+
+    channel_delete(ch);
+#else
+    test_skip("MPU, capability, or channel disabled");
+#endif
+}
+
+static void test_user_channel_send_caps_sleepable(void) {
+    test_section("Test 30: User channel send_caps sleepable");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_CHANNEL
+    ch_id_t ch = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(ch >= 0, "send_caps channel created");
+    if (ch < 0) return;
+
+    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
+                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    TEST_ASSERT(ch_cap >= 0, "send_caps channel cap created");
+    if (ch_cap < 0) {
+        channel_delete(ch);
+        return;
+    }
+
+    int cap_object = 0x4348;
+    cap_id_t src_cap = cap_create(&cap_object, CAP_OBJ_ENDPOINT,
+                                  CAP_FULL, 0);
+    TEST_ASSERT(src_cap >= 0, "channel send_caps source cap created");
+    if (src_cap < 0) {
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    uint32_t packed = ((uint32_t)(uint16_t)src_cap << 16) |
+                      (uint32_t)(uint16_t)ch_cap;
+    task_id_t sender = task_create_user("u_ch_caps",
+                                        user_channel_send_caps_task,
+                                        (void *)(uintptr_t)packed,
+                                        5, 768);
+    TEST_ASSERT(sender >= 0, "channel send_caps user created");
+    if (sender < 0) {
+        cap_delete(src_cap);
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t self = task_self();
+    kern_err_t err = channel_connect(ch, sender, self);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send_caps channel connected");
+    if (err != KERN_OK) {
+        (void)task_delete(sender);
+        cap_delete(src_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(ch_cap, (uint8_t)sender);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "send_caps channel cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(sender);
+        cap_delete(src_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(src_cap, (uint8_t)sender);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "channel source cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(sender);
+        channel_delete(ch);
+        return;
+    }
+
+    task_start(sender);
+
+    uint32_t msg = 0;
+    cap_id_t caps[IPC_CAPS_MAX];
+    uint8_t cap_count = 0;
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        caps[i] = KERN_INVALID_ID;
+    }
+
+    err = channel_recv_caps(ch, &msg, caps, &cap_count, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "kernel received user channel send_caps request");
+    TEST_ASSERT_EQ((int)0x43484353U, (int)msg,
+                   "kernel received channel send_caps payload");
+    TEST_ASSERT_EQ(1, (int)cap_count,
+                   "kernel received one channel copied cap");
+    void *ptr = cap_resolve(caps[0], CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(ptr == &cap_object,
+                "kernel received copied cap from channel send_caps");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(sender, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "channel send_caps joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "sleepable ch_send_caps returned OK");
+
+    if (caps[0] >= 0) {
+        cap_delete(caps[0]);
+    }
+    channel_delete(ch);
+#else
+    test_skip("MPU, capability, or channel disabled");
+#endif
+}
+
+static void test_user_channel_recv_caps_sleepable(void) {
+    test_section("Test 31: User channel recv_caps sleepable");
+
+#if MPU_ENABLE && CAP_ENABLE && IPC_CHANNEL
+    ch_id_t ch = channel_create(sizeof(uint32_t), 0);
+    TEST_ASSERT(ch >= 0, "recv_caps channel created");
+    if (ch < 0) return;
+
+    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
+                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    TEST_ASSERT(ch_cap >= 0, "recv_caps channel cap created");
+    if (ch_cap < 0) {
+        channel_delete(ch);
+        return;
+    }
+
+    sem_id_t sem = sem_create(0, 1);
+    TEST_ASSERT(sem >= 0, "channel recv_caps semaphore created");
+    if (sem < 0) {
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    cap_id_t sem_cap = cap_create((void *)(uintptr_t)(sem + 1),
+                                  CAP_OBJ_SEMAPHORE,
+                                  CAP_WRITE | CAP_TRANSFER,
+                                  0);
+    TEST_ASSERT(sem_cap >= 0, "channel recv_caps semaphore cap created");
+    if (sem_cap < 0) {
+        sem_delete(sem);
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t service = task_create_user("u_ch_rcaps",
+                                         user_channel_recv_caps_task,
+                                         (void *)(uintptr_t)ch_cap,
+                                         5, 768);
+    TEST_ASSERT(service >= 0, "channel recv_caps service created");
+    if (service < 0) {
+        cap_delete(sem_cap);
+        sem_delete(sem);
+        cap_delete(ch_cap);
+        channel_delete(ch);
+        return;
+    }
+
+    task_id_t self = task_self();
+    kern_err_t err = channel_connect(ch, self, service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "recv_caps channel connected");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        cap_delete(sem_cap);
+        sem_delete(sem);
+        channel_delete(ch);
+        return;
+    }
+
+    err = cap_transfer(ch_cap, (uint8_t)service);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "recv_caps channel cap transferred");
+    if (err != KERN_OK) {
+        (void)task_delete(service);
+        cap_delete(sem_cap);
+        sem_delete(sem);
+        channel_delete(ch);
+        return;
+    }
+
+    task_start(service);
+    task_delay(1);
+
+    ipc_cap_xfer_t xfer;
+    xfer.src_cap = sem_cap;
+    xfer.rights = CAP_WRITE;
+    xfer.flags = IPC_CAP_COPY;
+
+    uint32_t msg = 0x43485243U;
+    err = channel_send_caps(ch, &msg, &xfer, 1, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "kernel channel_send_caps to user recv_caps OK");
+
+    err = sem_wait(sem, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "user channel recv_caps used transferred sem cap");
+
+    void *retval = NULL;
+    kern_err_t join_err = task_join(service, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "channel recv_caps service joined OK");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "sleepable ch_recv_caps returned OK");
+
+    cap_delete(sem_cap);
+    sem_delete(sem);
+    channel_delete(ch);
+#else
+    test_skip("MPU, capability, or channel disabled");
+#endif
+}
+
 /*============================================================================
  * Syscall 测试模块入口
  *============================================================================*/
@@ -1204,20 +3036,40 @@ static void test_syscall_module(void) {
     test_syscall_r2_integrity();
     test_syscall_bad_user_pointers();
     test_syscall_security_negative();
+    test_user_timer_endpoint_notification();
+    test_user_mem_cap_syscalls();
+    test_user_shm_map_syscalls();
+    test_kernel_shm_create_syscall_policy();
+    test_user_shm_map_region_exhaustion();
     test_user_endpoint_service_nonblocking();
+    test_user_endpoint_reply_cap();
+    test_user_endpoint_reply_cap_timeout();
     test_user_endpoint_recv_sleep_timeout();
     test_user_endpoint_send_sleep_reply();
+    test_user_endpoint_send_caps_sleepable();
+    test_user_endpoint_recv_caps_sleepable();
+    test_user_endpoint_recv_mem_cap_sleepable();
     test_user_endpoint_send_sleep_timeout();
     test_user_endpoint_send_sleep_delete();
     test_user_endpoint_send_nowait_timeout();
-    test_blocking_ipc_syscalls_rejected();
+    test_cap_ipc_syscalls_rejected();
     test_user_sem_wait_sleepable();
     test_user_sem_wait_sleep_timeout();
+    test_user_sem_wait_delete_wakeup();
     test_user_mutex_lock_sleepable();
     test_user_mutex_lock_sleep_timeout();
     test_user_mqueue_recv_sleepable();
     test_user_mqueue_recv_sleep_timeout();
     test_user_mqueue_send_sleepable();
+    test_user_event_wait_sleepable();
+    test_user_event_wait_sleep_timeout();
+    test_user_event_wait_delete_wakeup();
+    test_user_channel_recv_sleepable();
+    test_user_channel_recv_sleep_timeout();
+    test_user_channel_recv_delete_wakeup();
+    test_user_channel_send_sleepable();
+    test_user_channel_send_caps_sleepable();
+    test_user_channel_recv_caps_sleepable();
 }
 
 TEST_MODULE_REGISTER(syscall, test_syscall_module);

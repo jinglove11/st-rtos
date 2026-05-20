@@ -44,7 +44,10 @@
 #define CAP_OBJ_TASK       9
 #define CAP_OBJ_ENDPOINT   10
 #define CAP_OBJ_CHANNEL    11
-#define CAP_OBJ_TYPE_MAX   12
+#define CAP_OBJ_REPLY      12
+#define CAP_OBJ_MMIO       13
+#define CAP_OBJ_SHM        14
+#define CAP_OBJ_TYPE_MAX   15
 
 /*============================================================================
  * 能力池条目 (内部)
@@ -63,6 +66,8 @@ typedef struct {
 } cap_entry_t;
 
 typedef void (*cap_cleanup_fn_t)(void *object, uint8_t obj_type);
+typedef void (*cap_revoke_hook_fn_t)(cap_id_t cap, void *object,
+                                     uint8_t obj_type);
 
 /*============================================================================
  * API
@@ -84,7 +89,10 @@ cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights);
 kern_err_t cap_move_to(tcb_t *src, cap_id_t cap, tcb_t *dst, cap_id_t *out_dst);
 kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap);
 uint16_t cap_object_refcount(void *object, uint8_t obj_type);
+uint16_t cap_free_count(void);
 kern_err_t cap_register_cleanup(uint8_t obj_type, cap_cleanup_fn_t cleanup);
+kern_err_t cap_register_revoke_hook(uint8_t obj_type,
+                                    cap_revoke_hook_fn_t hook);
 
 #endif /* CAP_ENABLE */
 #endif /* CAPABILITY_H */

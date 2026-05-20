@@ -57,12 +57,13 @@ void stats_task_switch(tcb_t *prev, tcb_t *next) {
 
 void stats_tick_update(void) {
     tcb_t *current = sched_get_current();
-    if (current && current->id >= 0) {
+    if (current) {
         current->total_ticks++;
     }
 
     uint32_t tick = sched_get_tick_count();
-    if (tick - last_stat_tick < 1000) {
+    uint32_t elapsed = tick - last_stat_tick;
+    if (elapsed < 1000) {
         return;
     }
     last_stat_tick = tick;
@@ -72,7 +73,7 @@ void stats_tick_update(void) {
         if (bitmap & (1U << i)) {
             tcb_t *tcb = task_get_tcb((task_id_t)i);
             if (tcb) {
-                tcb->cpu_usage = tcb->total_ticks * 10000 / 1000;
+                tcb->cpu_usage = tcb->total_ticks * 10000 / elapsed;
                 tcb->total_ticks = 0;
             }
         }
@@ -80,7 +81,7 @@ void stats_tick_update(void) {
 
     tcb_t *idle = task_get_idle();
     if (idle) {
-        idle->cpu_usage = idle->total_ticks * 10000 / 1000;
+        idle->cpu_usage = idle->total_ticks * 10000 / elapsed;
         idle->total_ticks = 0;
     }
 
