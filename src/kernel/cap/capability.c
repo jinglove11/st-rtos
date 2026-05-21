@@ -28,6 +28,9 @@ static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
 #define CAP_TASK_CSPACE_SLOTS \
     ((int)(sizeof(((tcb_t *)0)->cap_set) / sizeof(((tcb_t *)0)->cap_set[0])))
 
+typedef char cap_task_cspace_size_matches_config[
+    (CAP_TASK_CSPACE_SLOTS == KERN_TASK_CAP_SLOTS) ? 1 : -1];
+
 static cap_id_t cap_encode(uint16_t slot, uint16_t generation) {
     if (slot >= CAP_MAX_COUNT_VAL || generation == 0 ||
         generation > CAP_GENERATION_MAX) {
@@ -93,7 +96,7 @@ static int cap_task_has(tcb_t *task, cap_id_t cap) {
     }
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        if ((task->capabilities & (uint16_t)BIT(i)) != 0 &&
+        if ((task->capabilities & (uint32_t)BIT(i)) != 0 &&
             task->cap_set[i] == cap) {
             return 1;
         }
@@ -114,7 +117,7 @@ static kern_err_t cap_task_add(tcb_t *task, cap_id_t cap) {
     }
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        uint16_t bit = (uint16_t)BIT(i);
+        uint32_t bit = (uint32_t)BIT(i);
         if ((task->capabilities & bit) == 0) {
             task->cap_set[i] = cap;
             task->capabilities |= bit;
@@ -131,9 +134,9 @@ static void cap_task_remove(tcb_t *task, cap_id_t cap) {
     }
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        uint16_t bit = (uint16_t)BIT(i);
+        uint32_t bit = (uint32_t)BIT(i);
         if ((task->capabilities & bit) != 0 && task->cap_set[i] == cap) {
-            task->capabilities &= (uint16_t)~bit;
+            task->capabilities &= ~bit;
             task->cap_set[i] = 0;
             return;
         }
@@ -512,6 +515,32 @@ kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap) {
 
 kern_err_t cap_revoke(cap_id_t cap) {
     return cap_revoke_for(sched_get_current(), cap);
+}
+
+kern_err_t cap_revoke_object(void *object, uint8_t obj_type) {
+    if (obj_type >= CAP_OBJ_TYPE_MAX) {
+        return KERN_ERR_PARAM;
+    }
+
+    int revoked = 0;
+    for (;;) {
+        int slot = -1;
+        for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
+            if (cap_pool[i].in_use &&
+                cap_pool[i].object == object &&
+                cap_pool[i].obj_type == obj_type) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            break;
+        }
+        cap_revoke_slot_tree(slot);
+        revoked = 1;
+    }
+
+    return revoked ? KERN_OK : KERN_ERR_NOEXIST;
 }
 
 uint16_t cap_object_refcount(void *object, uint8_t obj_type) {

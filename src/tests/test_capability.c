@@ -464,11 +464,111 @@ static void test_cap_cspace_install_and_revoke(void) {
 }
 
 /*============================================================================
- * Test 21: cap_copy_to installs a reduced child cap into another CSpace
+ * Test 21: user CSpace holds more than the legacy 16 slots
+ *============================================================================*/
+
+static void test_cap_cspace_extended_slots(void) {
+    test_section("Test 21: extended user CSpace slots");
+
+    task_id_t tid = task_create("capcs32", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "create task for extended CSpace test");
+
+    tcb_t *tcb = task_get_tcb(tid);
+    TEST_ASSERT(tcb != NULL, "get extended CSpace task TCB");
+    if (tcb == NULL) {
+        return;
+    }
+    tcb->attrs = TASK_ATTR_USER;
+
+    int objects[20];
+    cap_id_t caps[20];
+    for (uint32_t i = 0; i < 20U; i++) {
+        objects[i] = 600 + (int)i;
+        caps[i] = cap_create_for(tcb, &objects[i],
+                                 CAP_OBJ_CHANNEL, CAP_READ);
+        TEST_ASSERT(caps[i] >= 0, "extended CSpace cap created");
+        void *ptr = cap_lookup_for(tcb, caps[i], CAP_OBJ_CHANNEL, CAP_READ);
+        TEST_ASSERT(ptr == &objects[i], "extended CSpace cap resolves");
+    }
+
+    TEST_ASSERT((tcb->capabilities & BIT(16)) != 0,
+                "extended CSpace uses slot 16");
+    TEST_ASSERT((tcb->capabilities & BIT(19)) != 0,
+                "extended CSpace uses slot 19");
+
+    for (uint32_t i = 0; i < 20U; i++) {
+        kern_err_t err = cap_revoke_for(tcb, caps[i]);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "extended CSpace cap revoked");
+    }
+    TEST_ASSERT_EQ(0, (int)tcb->capabilities,
+                   "extended CSpace fully cleared");
+
+    (void)task_delete(tid);
+}
+
+/*============================================================================
+ * Test 22: revoke all caps for one object without touching another object
+ *============================================================================*/
+
+static void test_cap_revoke_object(void) {
+    test_section("Test 22: cap_revoke_object");
+
+    task_id_t a_id = task_create("capobj_a", cap_test_task, NULL, 10, 512);
+    task_id_t b_id = task_create("capobj_b", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(a_id >= 0 && b_id >= 0, "create object revoke tasks");
+
+    tcb_t *a = task_get_tcb(a_id);
+    tcb_t *b = task_get_tcb(b_id);
+    TEST_ASSERT(a != NULL && b != NULL, "get object revoke TCBs");
+    if (a == NULL || b == NULL) {
+        return;
+    }
+    a->attrs = TASK_ATTR_USER;
+    b->attrs = TASK_ATTR_USER;
+
+    int obj = 700;
+    int other = 701;
+    cap_id_t root = cap_create_for(a, &obj, CAP_OBJ_ENDPOINT,
+                                   CAP_FULL);
+    cap_id_t copy = cap_copy_to(a, root, b, CAP_READ);
+    cap_id_t direct = cap_create_for(b, &obj, CAP_OBJ_ENDPOINT,
+                                     CAP_READ | CAP_WRITE);
+    cap_id_t other_cap = cap_create_for(a, &other, CAP_OBJ_ENDPOINT,
+                                        CAP_READ);
+    TEST_ASSERT(root >= 0, "object revoke root cap created");
+    TEST_ASSERT(copy >= 0, "object revoke copied cap created");
+    TEST_ASSERT(direct >= 0, "object revoke direct cap created");
+    TEST_ASSERT(other_cap >= 0, "object revoke other cap created");
+    TEST_ASSERT_EQ(3, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "object revoke sees all refs");
+
+    kern_err_t err = cap_revoke_object(&obj, CAP_OBJ_ENDPOINT);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "cap_revoke_object OK");
+    TEST_ASSERT_EQ(0, (int)cap_object_refcount(&obj, CAP_OBJ_ENDPOINT),
+                   "object revoke clears all refs");
+
+    void *ptr = cap_lookup_for(a, root, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT_NULL(ptr, "object revoke clears owner root cap");
+    ptr = cap_lookup_for(b, copy, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT_NULL(ptr, "object revoke clears copied child cap");
+    ptr = cap_lookup_for(b, direct, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT_NULL(ptr, "object revoke clears direct cap");
+    ptr = cap_lookup_for(a, other_cap, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT_EQ((uintptr_t)&other, (uintptr_t)ptr,
+                   "object revoke preserves other object cap");
+
+    cap_delete(other_cap);
+    (void)task_delete(a_id);
+    (void)task_delete(b_id);
+}
+
+/*============================================================================
+ * Test 23: cap_copy_to installs a reduced child cap into another CSpace
  *============================================================================*/
 
 static void test_cap_copy_to_task(void) {
-    test_section("Test 21: cap_copy_to task");
+    test_section("Test 23: cap_copy_to task");
 
     task_id_t src_id = task_create("capsrc", cap_test_task, NULL, 10, 512);
     task_id_t dst_id = task_create("capdst", cap_test_task, NULL, 10, 512);
@@ -805,6 +905,8 @@ static void test_capability_module(void) {
     test_cap_delete_preserves_children();
     test_cap_cspace_required_for_user();
     test_cap_cspace_install_and_revoke();
+    test_cap_cspace_extended_slots();
+    test_cap_revoke_object();
     test_cap_copy_to_task();
     test_cap_move_to_task();
     test_ipc_cap_transfer_rollback();

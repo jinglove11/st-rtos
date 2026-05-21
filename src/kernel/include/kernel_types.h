@@ -176,8 +176,8 @@ typedef struct tcb {
 
     // --- 能力 ---
 #if CAP_ENABLE
-    uint16_t    capabilities;         // 能力位图
-    cap_id_t    cap_set[16];         // 持有的能力集 (Phase 2)
+    uint32_t    capabilities;         // 能力位图
+    cap_id_t    cap_set[32];         // 持有的能力集 (Phase 2)
 #endif
 
     // --- 统计信息 ---
@@ -391,7 +391,7 @@ typedef struct {
 #define ALIGN_DOWN(x, align)   ((x) & ~((align) - 1))
 
 #ifndef BIT
-#define BIT(n)                 (1U << (n))
+#define BIT(n)                 (1UL << (n))
 #endif
 #define SET_BIT(x, n)          ((x) |= BIT(n))
 #define CLR_BIT(x, n)          ((x) &= ~BIT(n))

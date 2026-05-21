@@ -12,9 +12,86 @@
 #include "trace.h"
 #include "stats.h"
 #include "user_api.h"
+#include "root_bootstrap.h"
+#include "task.h"
+#include "capability.h"
+#include "endpoint.h"
+#include "driver_proto.h"
+#include "nameserver.h"
 #include <string.h>
 
 #if DRIVER_ENABLE && TEST_ENABLE
+
+static void driver_root_dummy_task(void *arg) {
+    (void)arg;
+    task_exit(NULL);
+}
+
+static void uart_server_task(void *arg) {
+    int err = uart_server_run((int)(uintptr_t)arg, 2);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void uart_server_error_task(void *arg) {
+    int err = uart_server_run((int)(uintptr_t)arg, 4);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void driver_nameserver_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 2);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void uart_server_ping_task(void *arg) {
+    int err = uart_server_run((int)(uintptr_t)arg, 1);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void driver_register_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int err;
+
+    if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = nameserver_register(ns_ep_cap, "dev.uart0", service_ep_cap,
+                              0x55415254U, 1000);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void driver_lookup_ping_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t inbox_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    cap_id_t driver_cap = KERN_INVALID_ID;
+    int err;
+
+    if (ns_ep_cap <= 0 || inbox_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = nameserver_lookup_begin(ns_ep_cap, "dev.uart0", inbox_cap,
+                                  &driver_cap, 1000);
+    if (err == KERN_OK) {
+        err = driver_ping(driver_cap, 1000);
+    }
+    if (err == KERN_OK) {
+        err = nameserver_lookup_ack(inbox_cap);
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void driver_test_set_arg(task_id_t task_id, uint32_t arg) {
+    tcb_t *tcb = task_get_tcb(task_id);
+    if (tcb != NULL && tcb->sp != NULL) {
+        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
+        *stacked_r0 = arg;
+    }
+}
 
 /*============================================================================
  * Test 1: device_alloc 基本分配
@@ -332,6 +409,480 @@ static void test_device_event_ioctl(void) {
 }
 
 /*============================================================================
+ * Test 13: user-space driver server protocol ABI
+ *============================================================================*/
+
+static void test_driver_server_protocol_layout(void) {
+    test_section("Test 13: driver server protocol ABI");
+
+    drv_msg_t msg;
+    driver_msg_init(&msg, DRV_OP_PING, 42);
+
+    TEST_ASSERT_EQ((int)DRV_MAGIC, (int)msg.magic,
+                   "driver protocol magic initialized");
+    TEST_ASSERT_EQ((int)DRV_OP_PING, (int)msg.opcode,
+                   "driver protocol opcode initialized");
+    TEST_ASSERT_EQ((int)DRV_FLAG_NONE, (int)msg.flags,
+                   "driver protocol flags initialized");
+    TEST_ASSERT_EQ(42, (int)msg.seq,
+                   "driver protocol sequence initialized");
+    TEST_ASSERT_EQ(0, (int)msg.status,
+                   "driver protocol status initialized");
+    TEST_ASSERT_EQ(0, (int)msg.result,
+                   "driver protocol result initialized");
+    TEST_ASSERT(driver_opcode_valid(DRV_OP_PING),
+                "driver protocol ping opcode valid");
+    TEST_ASSERT(driver_opcode_valid(DRV_OP_WRITE),
+                "driver protocol write opcode valid");
+    TEST_ASSERT(!driver_opcode_valid(0),
+                "driver protocol zero opcode rejected");
+    TEST_ASSERT(!driver_opcode_valid(DRV_OP_POLL + 1U),
+                "driver protocol unknown opcode rejected");
+    TEST_ASSERT(sizeof(drv_msg_t) <= KERN_EP_MSG_SIZE,
+                "driver message fits endpoint message");
+
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, driver_ping(0, 1000),
+                   "driver ping rejects invalid endpoint");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, driver_write(0, "x", 1, 1000),
+                   "driver write rejects invalid endpoint");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, driver_write(1, NULL, 1, 1000),
+                   "driver write rejects NULL buffer");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   driver_write(1, "x", DRV_PAYLOAD_MAX + 1U, 1000),
+                   "driver write rejects oversized payload");
+}
+
+/*============================================================================
+ * Test 14: root-created user-space UART server IPC
+ *============================================================================*/
+
+static void test_uart_user_server_ipc(void) {
+    test_section("Test 14: user UART server IPC");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_drv",
+                                           driver_root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver server creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t server_id = KERN_INVALID_ID;
+    cap_id_t server_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("uart_srv",
+                                        uart_server_task,
+                                        NULL, 13, 768,
+                                        &server_id, &server_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server task created");
+
+    ep_id_t server_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t server_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(server_task_cap,
+                                                     "uart_srv_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     2,
+                                                     &server_ep,
+                                                     &root_ep_cap,
+                                                     &server_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server endpoint created");
+    TEST_ASSERT(server_ep >= 0, "UART server endpoint id valid");
+    TEST_ASSERT(root_ep_cap >= 0, "root receives UART server endpoint cap");
+    TEST_ASSERT(server_ep_cap >= 0, "UART server receives endpoint cap");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(server_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server task started");
+
+    drv_msg_t msg;
+    driver_msg_init(&msg, DRV_OP_PING, 100);
+    if (err == KERN_OK) {
+        err = endpoint_send(server_ep, &msg, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server ping send OK");
+    TEST_ASSERT_EQ((int)DRV_MAGIC, (int)msg.magic,
+                   "UART server ping keeps magic");
+    TEST_ASSERT_EQ((int)DRV_OP_PING, (int)msg.opcode,
+                   "UART server ping keeps opcode");
+    TEST_ASSERT_EQ(100, (int)msg.seq,
+                   "UART server ping keeps sequence");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)msg.status,
+                   "UART server ping status OK");
+
+    driver_msg_init(&msg, DRV_OP_WRITE, 101);
+    msg.payload[0] = 'O';
+    msg.payload[1] = 'K';
+    msg.length = 2;
+    if (err == KERN_OK) {
+        err = endpoint_send(server_ep, &msg, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server write send OK");
+    TEST_ASSERT_EQ((int)DRV_OP_WRITE, (int)msg.opcode,
+                   "UART server write keeps opcode");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)msg.status,
+                   "UART server write status OK");
+    TEST_ASSERT_EQ(2, (int)msg.result,
+                   "UART server write returns byte count");
+
+    void *retval = NULL;
+    if (server_id >= 0) {
+        err = task_join(server_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "UART server task joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "UART server task retval OK");
+    }
+
+    if (server_id >= 0 &&
+        task_get_state(server_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(server_id);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "driver server root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "driver server cleanup restored caps");
+}
+
+/*============================================================================
+ * Test 15: user-space UART server protocol errors
+ *============================================================================*/
+
+static void test_uart_user_server_protocol_errors(void) {
+    test_section("Test 15: user UART server protocol errors");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_drv_err",
+                                           driver_root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver error server creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t server_id = KERN_INVALID_ID;
+    cap_id_t server_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("uart_srv_err",
+                                        uart_server_error_task,
+                                        NULL, 13, 768,
+                                        &server_id, &server_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART error server task created");
+
+    ep_id_t server_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t server_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(server_task_cap,
+                                                     "uart_srv_err_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     4,
+                                                     &server_ep,
+                                                     &root_ep_cap,
+                                                     &server_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART error server endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(server_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART error server task started");
+
+    drv_msg_t msg;
+    driver_msg_init(&msg, DRV_OP_PING, 200);
+    msg.magic = 0;
+    if (err == KERN_OK) {
+        err = endpoint_send(server_ep, &msg, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server bad magic send OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, (int)msg.status,
+                   "UART server rejects bad magic");
+
+    driver_msg_init(&msg, DRV_OP_POLL + 1U, 201);
+    if (err == KERN_OK) {
+        err = endpoint_send(server_ep, &msg, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server bad opcode send OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, (int)msg.status,
+                   "UART server rejects bad opcode");
+
+    driver_msg_init(&msg, DRV_OP_READ, 202);
+    if (err == KERN_OK) {
+        err = endpoint_send(server_ep, &msg, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server unsupported read send OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE, (int)msg.status,
+                   "UART server rejects unsupported read");
+
+    driver_msg_init(&msg, DRV_OP_WRITE, 203);
+    msg.length = DRV_PAYLOAD_MAX + 1U;
+    if (err == KERN_OK) {
+        err = endpoint_send(server_ep, &msg, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "UART server oversized write send OK");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, (int)msg.status,
+                   "UART server rejects oversized write");
+
+    void *retval = NULL;
+    if (server_id >= 0) {
+        err = task_join(server_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "UART error server task joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "UART error server task retval OK");
+    }
+
+    if (server_id >= 0 &&
+        task_get_state(server_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(server_id);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "driver error server root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "driver error server cleanup restored caps");
+}
+
+/*============================================================================
+ * Test 16: UART driver registration through name server
+ *============================================================================*/
+
+static void test_uart_driver_nameserver_lookup(void) {
+    test_section("Test 16: UART driver name-server lookup");
+
+    root_bootstrap_init();
+
+    uint16_t cap_free_before = cap_free_count();
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_drv_ns",
+                                           driver_root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver ns creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("drv_ns",
+                                        driver_nameserver_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ns_ep_cap = KERN_INVALID_ID;
+    cap_id_t service_ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "drv_ns_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     2,
+                                                     &ns_ep,
+                                                     &root_ns_ep_cap,
+                                                     &service_ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver name server endpoint created");
+
+    task_id_t uart_id = KERN_INVALID_ID;
+    cap_id_t uart_task_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service("drv_uart_srv",
+                                            uart_server_ping_task,
+                                            NULL, 13, 768,
+                                            &uart_id, &uart_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver UART service task created");
+
+    ep_id_t uart_ep = KERN_INVALID_ID;
+    cap_id_t root_uart_ep_cap = KERN_INVALID_ID;
+    cap_id_t service_uart_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(uart_task_cap,
+                                                     "drv_uart_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     2,
+                                                     &uart_ep,
+                                                     &root_uart_ep_cap,
+                                                     &service_uart_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver UART service endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver name server task started");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(uart_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "driver UART service task started");
+
+    ep_id_t inbox_ep = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        inbox_ep = endpoint_create("drv_lookup_inbox", KERN_EP_MSG_SIZE, 2);
+    }
+    TEST_ASSERT(inbox_ep >= 0, "driver lookup inbox endpoint created");
+
+    task_id_t reg_client = KERN_INVALID_ID;
+    task_id_t lookup_client = KERN_INVALID_ID;
+    if (inbox_ep >= 0) {
+        reg_client = task_create_user("drv_reg_client",
+                                      driver_register_client_task,
+                                      NULL, 14, 896);
+        lookup_client = task_create_user("drv_lookup_client",
+                                         driver_lookup_ping_client_task,
+                                         NULL, 14, 1024);
+    }
+    TEST_ASSERT(reg_client >= 0, "driver register client created");
+    TEST_ASSERT(lookup_client >= 0, "driver lookup client created");
+
+    cap_id_t reg_ns_cap = KERN_INVALID_ID;
+    cap_id_t reg_uart_cap = KERN_INVALID_ID;
+    tcb_t *reg_tcb = task_get_tcb(reg_client);
+    if (reg_tcb != NULL) {
+        reg_ns_cap = cap_create_for(reg_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+        reg_uart_cap = cap_create_for(reg_tcb,
+                                      (void *)(uintptr_t)(uart_ep + 1),
+                                      CAP_OBJ_ENDPOINT,
+                                      CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+
+    cap_id_t lookup_ns_cap = KERN_INVALID_ID;
+    cap_id_t lookup_inbox_cap = KERN_INVALID_ID;
+    tcb_t *lookup_tcb = task_get_tcb(lookup_client);
+    if (lookup_tcb != NULL) {
+        lookup_ns_cap = cap_create_for(lookup_tcb,
+                                       (void *)(uintptr_t)(ns_ep + 1),
+                                       CAP_OBJ_ENDPOINT,
+                                       CAP_READ | CAP_WRITE);
+        lookup_inbox_cap = cap_create_for(lookup_tcb,
+                                          (void *)(uintptr_t)(inbox_ep + 1),
+                                          CAP_OBJ_ENDPOINT,
+                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+
+    TEST_ASSERT(reg_ns_cap >= 0, "driver register client receives ns cap");
+    TEST_ASSERT(reg_uart_cap >= 0, "driver register client receives UART cap");
+    TEST_ASSERT(lookup_ns_cap >= 0, "driver lookup client receives ns cap");
+    TEST_ASSERT(lookup_inbox_cap >= 0,
+                "driver lookup client receives inbox cap");
+
+    if (reg_client >= 0 && reg_ns_cap >= 0 && reg_uart_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)reg_uart_cap << 16) |
+                          (uint32_t)(uint16_t)reg_ns_cap;
+        driver_test_set_arg(reg_client, packed);
+        err = task_start(reg_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "driver register client started");
+    }
+
+    void *retval = NULL;
+    if (reg_client >= 0) {
+        err = task_join(reg_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "driver register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "driver register client retval OK");
+    }
+
+    if (lookup_client >= 0 && lookup_ns_cap >= 0 && lookup_inbox_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)lookup_inbox_cap << 16) |
+                          (uint32_t)(uint16_t)lookup_ns_cap;
+        driver_test_set_arg(lookup_client, packed);
+        err = task_start(lookup_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "driver lookup client started");
+    }
+
+    retval = NULL;
+    if (lookup_client >= 0) {
+        err = task_join(lookup_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "driver lookup client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "driver lookup client retval OK");
+    }
+
+    retval = NULL;
+    if (uart_id >= 0) {
+        err = task_join(uart_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "driver UART service joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "driver UART service retval OK");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "driver name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "driver name server retval OK");
+    }
+
+    if (reg_client >= 0 &&
+        task_get_state(reg_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(reg_client);
+    }
+    if (lookup_client >= 0 &&
+        task_get_state(lookup_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(lookup_client);
+    }
+    if (uart_id >= 0 && task_get_state(uart_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(uart_id);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (inbox_ep >= 0) {
+        (void)endpoint_delete(inbox_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "driver ns root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "driver name-server cleanup restored caps");
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -348,6 +899,10 @@ static void test_driver_module(void) {
     test_led_devices();
     test_device_probe_remove_diag();
     test_device_event_ioctl();
+    test_driver_server_protocol_layout();
+    test_uart_user_server_ipc();
+    test_uart_user_server_protocol_errors();
+    test_uart_driver_nameserver_lookup();
 }
 
 TEST_MODULE_REGISTER(driver, test_driver_module);

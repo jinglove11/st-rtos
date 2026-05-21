@@ -337,6 +337,10 @@ static inline int sys_ep_take_reply(int ep_id) {
     return sys_call1(SYSCALL_EP_TAKE_REPLY, ep_id);
 }
 
+static inline int sys_cap_revoke(int cap) {
+    return sys_call1(SYSCALL_CAP_REVOKE, cap);
+}
+
 /*============================================================================
  * Channel (P2P) — 用户态内联封装
  *============================================================================*/

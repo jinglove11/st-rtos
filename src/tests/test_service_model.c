@@ -9,6 +9,7 @@
 #include "endpoint.h"
 #include "user_api.h"
 #include "task.h"
+#include "nameserver.h"
 
 #if TEST_ENABLE && CAP_ENABLE && MPU_ENABLE
 
@@ -41,6 +42,380 @@ static void service_ipc_task(void *arg) {
     }
 
     sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_ping_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 1);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_register_once_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 1);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_register_lookup_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 2);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_negative_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 3);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_unregister_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 3);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_protocol_errors_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 6);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_recycle_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 36);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_registry_full_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg,
+                                     NS_REGISTRY_MAX + 1U);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_owner_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 3);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_register_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    const char name[] = "svc.echo";
+    int err;
+
+    if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = nameserver_register(ns_ep_cap, name, service_ep_cap, 0x42U, 1000);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_lookup_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t inbox_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    const char name[] = "svc.echo";
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int err;
+
+    if (ns_ep_cap <= 0 || inbox_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = nameserver_lookup_begin(ns_ep_cap, name, inbox_cap,
+                                  &service_cap, 1000);
+    if (err == KERN_OK) {
+        uint8_t probe[KERN_EP_MSG_SIZE];
+        for (uint32_t i = 0; i < sizeof(probe); i++) {
+            probe[i] = 0;
+        }
+        err = sys_ep_send(service_cap, probe, 0);
+        if (err == KERN_ERR_TIMEOUT) {
+            err = KERN_OK;
+        }
+    }
+    if (err == KERN_OK) {
+        err = nameserver_lookup_ack(inbox_cap);
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_missing_lookup_client_task(void *arg) {
+    int ns_ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
+    const char name[] = "svc.missing";
+    int err;
+
+    if (ns_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+
+    ns_msg_init(&msg->hdr, NS_OP_LOOKUP, 99);
+    for (uint32_t i = 0; i < sizeof(name) && i < NS_NAME_MAX; i++) {
+        msg->name[i] = name[i];
+    }
+
+    err = sys_ep_send(ns_ep_cap, msg_buf, 1000);
+    if (err == KERN_OK &&
+        (msg->hdr.magic != NS_MAGIC ||
+         msg->hdr.opcode != NS_OP_LOOKUP ||
+         msg->hdr.seq != 99 ||
+         msg->hdr.status != KERN_ERR_NOEXIST)) {
+        err = KERN_ERR_STATE;
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_duplicate_register_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    const char name[] = "svc.echo";
+    int err;
+
+    if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+        xfers[i].src_cap = KERN_INVALID_ID;
+        xfers[i].rights = 0;
+        xfers[i].flags = IPC_CAP_COPY;
+    }
+
+    ns_msg_init(&msg->hdr, NS_OP_REGISTER, 100);
+    for (uint32_t i = 0; i < sizeof(name) && i < NS_NAME_MAX; i++) {
+        msg->name[i] = name[i];
+    }
+    msg->owner_badge = 0x42U;
+    xfers[0].src_cap = service_ep_cap;
+    xfers[0].rights = CAP_READ | CAP_WRITE | CAP_TRANSFER;
+    xfers[0].flags = IPC_CAP_COPY;
+
+    err = sys_ep_send_caps(ns_ep_cap, msg_buf, xfers, 1, 1000);
+    if (err == KERN_OK &&
+        (msg->hdr.magic != NS_MAGIC ||
+         msg->hdr.opcode != NS_OP_REGISTER ||
+         msg->hdr.seq != 100 ||
+         msg->hdr.status != KERN_ERR_BUSY)) {
+        err = KERN_ERR_STATE;
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_unregister_client_task(void *arg) {
+    int ns_ep_cap = (int)(uintptr_t)arg;
+    const char name[] = "svc.echo";
+    int err;
+
+    if (ns_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = nameserver_unregister(ns_ep_cap, name, 0x42U, 1000);
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_bad_owner_unregister_client_task(void *arg) {
+    int ns_ep_cap = (int)(uintptr_t)arg;
+    const char name[] = "svc.echo";
+    int err;
+
+    if (ns_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = nameserver_unregister(ns_ep_cap, name, 0x99U, 1000);
+    if (err == KERN_ERR_PERM) {
+        err = KERN_OK;
+    } else if (err == KERN_OK) {
+        err = KERN_ERR_STATE;
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_recycle_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    const char name[] = "svc.recycle";
+    int err = KERN_OK;
+
+    if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    for (uint32_t round = 0; round < 18U && err == KERN_OK; round++) {
+        for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+            msg_buf[i] = 0;
+        }
+        for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+            xfers[i].src_cap = KERN_INVALID_ID;
+            xfers[i].rights = 0;
+            xfers[i].flags = IPC_CAP_COPY;
+        }
+
+        ns_msg_init(&msg->hdr, NS_OP_REGISTER, 300U + round);
+        for (uint32_t i = 0; i < sizeof(name) && i < NS_NAME_MAX; i++) {
+            msg->name[i] = name[i];
+        }
+        msg->owner_badge = 0x33U;
+        xfers[0].src_cap = service_ep_cap;
+        xfers[0].rights = CAP_READ | CAP_WRITE | CAP_TRANSFER;
+        xfers[0].flags = IPC_CAP_COPY;
+
+        err = sys_ep_send_caps(ns_ep_cap, msg_buf, xfers, 1, 1000);
+        if (err == KERN_OK &&
+            (msg->hdr.magic != NS_MAGIC ||
+             msg->hdr.opcode != NS_OP_REGISTER ||
+             msg->hdr.status != KERN_OK)) {
+            err = KERN_ERR_STATE;
+        }
+
+        if (err != KERN_OK) {
+            break;
+        }
+
+        for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+            msg_buf[i] = 0;
+        }
+        ns_msg_init(&msg->hdr, NS_OP_UNREG, 400U + round);
+        for (uint32_t i = 0; i < sizeof(name) && i < NS_NAME_MAX; i++) {
+            msg->name[i] = name[i];
+        }
+        msg->owner_badge = 0x33U;
+
+        err = sys_ep_send(ns_ep_cap, msg_buf, 1000);
+        if (err == KERN_OK &&
+            (msg->hdr.magic != NS_MAGIC ||
+             msg->hdr.opcode != NS_OP_UNREG ||
+             msg->hdr.status != KERN_OK)) {
+            err = KERN_ERR_STATE;
+        }
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_registry_full_client_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
+    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
+    ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
+    int err = KERN_OK;
+
+    if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    for (uint32_t round = 0; round < NS_REGISTRY_MAX + 1U &&
+                            err == KERN_OK; round++) {
+        for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+            msg_buf[i] = 0;
+        }
+        for (uint32_t i = 0; i < IPC_CAPS_MAX; i++) {
+            xfers[i].src_cap = KERN_INVALID_ID;
+            xfers[i].rights = 0;
+            xfers[i].flags = IPC_CAP_COPY;
+        }
+
+        ns_msg_init(&msg->hdr, NS_OP_REGISTER, 500U + round);
+        msg->name[0] = 's';
+        msg->name[1] = 'v';
+        msg->name[2] = 'c';
+        msg->name[3] = '.';
+        msg->name[4] = '0' + (char)(round / 10U);
+        msg->name[5] = '0' + (char)(round % 10U);
+        msg->name[6] = '\0';
+        msg->owner_badge = 0x55U;
+        xfers[0].src_cap = service_ep_cap;
+        xfers[0].rights = CAP_READ | CAP_WRITE | CAP_TRANSFER;
+        xfers[0].flags = IPC_CAP_COPY;
+
+        err = sys_ep_send_caps(ns_ep_cap, msg_buf, xfers, 1, 1000);
+        if (err == KERN_OK) {
+            int expected = (round < NS_REGISTRY_MAX) ?
+                           KERN_OK : KERN_ERR_RESOURCE;
+            if (msg->hdr.magic != NS_MAGIC ||
+                msg->hdr.opcode != NS_OP_REGISTER ||
+                msg->hdr.status != expected) {
+                err = KERN_ERR_STATE;
+            }
+        }
+    }
+
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void ns_test_clear_msg(uint8_t *msg_buf) {
+    for (uint32_t i = 0; i < KERN_EP_MSG_SIZE; i++) {
+        msg_buf[i] = 0;
+    }
+}
+
+static void ns_test_copy_name(ns_name_msg_t *msg, const char *name) {
+    for (uint32_t i = 0; i < NS_NAME_MAX; i++) {
+        msg->name[i] = name[i];
+        if (name[i] == '\0') {
+            return;
+        }
+    }
+    msg->name[NS_NAME_MAX - 1U] = '\0';
+}
+
+static void ns_test_send_expect(ep_id_t ep,
+                                uint32_t magic,
+                                uint16_t opcode,
+                                uint32_t seq,
+                                const char *name,
+                                int expected_status,
+                                const char *label) {
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
+
+    ns_test_clear_msg(msg_buf);
+    ns_msg_init(&msg->hdr, opcode, seq);
+    msg->hdr.magic = magic;
+    if (name != NULL) {
+        ns_test_copy_name(msg, name);
+    }
+
+    kern_err_t err = endpoint_send(ep, msg_buf, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, label);
+    TEST_ASSERT_EQ(expected_status, (int)msg->hdr.status, label);
+}
+
+static void ns_test_send_full_name_expect(ep_id_t ep,
+                                          uint16_t opcode,
+                                          uint32_t seq,
+                                          int expected_status,
+                                          const char *label) {
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
+
+    ns_test_clear_msg(msg_buf);
+    ns_msg_init(&msg->hdr, opcode, seq);
+    for (uint32_t i = 0; i < NS_NAME_MAX; i++) {
+        msg->name[i] = 'x';
+    }
+
+    kern_err_t err = endpoint_send(ep, msg_buf, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, label);
+    TEST_ASSERT_EQ(expected_status, (int)msg->hdr.status, label);
 }
 
 static void test_root_bootstrap_rejects_invalid_tasks(void) {
@@ -446,6 +821,14 @@ static void test_root_bootstrap_service_endpoint(void) {
     }
     TEST_ASSERT(!endpoint_exists(ep_id),
                 "service endpoint deleted with service task");
+    service_ep = cap_lookup_for(service, service_ep_cap,
+                                CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT_NULL(service_ep,
+                     "service endpoint cap revoked on endpoint delete");
+    root_ep = cap_lookup_for(root, root_ep_cap,
+                             CAP_OBJ_ENDPOINT, CAP_MANAGE);
+    TEST_ASSERT_NULL(root_ep,
+                     "root endpoint cap revoked on endpoint delete");
 
     if (root_id >= 0) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
@@ -506,15 +889,6 @@ static void test_root_bootstrap_service_ipc(void) {
     if (err == KERN_OK) {
         err = endpoint_send(ep_id, msg, 1000);
     }
-    if (err != KERN_OK) {
-        test_print_num("[DIAG] service IPC endpoint_send err=", err);
-        test_print_num("[DIAG] service IPC service_ep_cap=", service_ep_cap);
-        test_print_num("[DIAG] service IPC ep_id=", ep_id);
-        if (service_id >= 0) {
-            test_print_num("[DIAG] service IPC service_state=",
-                           (int32_t)task_get_state(service_id));
-        }
-    }
     TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                    "service IPC endpoint_send OK");
     TEST_ASSERT_EQ((int)0x7101U, (int)msg[0],
@@ -525,11 +899,6 @@ static void test_root_bootstrap_service_ipc(void) {
     void *retval = NULL;
     if (service_id >= 0) {
         err = task_join(service_id, &retval, 1000);
-        if (err != KERN_OK || (intptr_t)retval != KERN_OK) {
-            test_print_num("[DIAG] service IPC join err=", err);
-            test_print_num("[DIAG] service IPC retval=",
-                           (int32_t)(intptr_t)retval);
-        }
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "service IPC service exited OK");
         TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
@@ -547,6 +916,1446 @@ static void test_root_bootstrap_service_ipc(void) {
                    "service IPC cleanup restored all caps");
 }
 
+static void test_nameserver_protocol_layout(void) {
+    test_section("Test 9: name server protocol ABI");
+
+    ns_msg_hdr_t hdr;
+    ns_msg_init(&hdr, NS_OP_PING, 7);
+
+    TEST_ASSERT_EQ((int)NS_MAGIC, (int)hdr.magic,
+                   "name server magic initialized");
+    TEST_ASSERT_EQ((int)NS_OP_PING, (int)hdr.opcode,
+                   "name server opcode initialized");
+    TEST_ASSERT_EQ((int)NS_FLAG_NONE, (int)hdr.flags,
+                   "name server flags initialized");
+    TEST_ASSERT_EQ(7, (int)hdr.seq,
+                   "name server sequence initialized");
+    TEST_ASSERT_EQ(0, (int)hdr.status,
+                   "name server status initialized");
+
+    TEST_ASSERT(ns_opcode_valid(NS_OP_REGISTER),
+                "name server register opcode valid");
+    TEST_ASSERT(ns_opcode_valid(NS_OP_LOOKUP),
+                "name server lookup opcode valid");
+    TEST_ASSERT(ns_opcode_valid(NS_OP_UNREG),
+                "name server unregister opcode valid");
+    TEST_ASSERT(ns_opcode_valid(NS_OP_PING),
+                "name server ping opcode valid");
+    TEST_ASSERT(!ns_opcode_valid(0),
+                "name server zero opcode rejected");
+    TEST_ASSERT(!ns_opcode_valid(NS_OP_PING + 1U),
+                "name server unknown opcode rejected");
+
+    TEST_ASSERT_EQ(24, (int)NS_NAME_MAX,
+                   "name server name length fixed");
+    TEST_ASSERT_EQ(16, (int)NS_REGISTRY_MAX,
+                   "name server registry size fixed");
+    TEST_ASSERT(KERN_TASK_CAP_SLOTS > NS_REGISTRY_MAX,
+                "task CSpace can hold full name server registry");
+    TEST_ASSERT(sizeof(ns_msg_hdr_t) <= KERN_EP_MSG_SIZE,
+                "name server header fits endpoint message");
+    TEST_ASSERT(sizeof(ns_name_msg_t) <= KERN_EP_MSG_SIZE,
+                "name server named message fits endpoint message");
+    TEST_ASSERT(sizeof(ns_name_msg_t) ==
+                sizeof(ns_msg_hdr_t) + NS_NAME_MAX + sizeof(uint32_t),
+                "name server owner badge is part of named message");
+}
+
+static void test_nameserver_helper_validation(void) {
+    test_section("Test 10: name server helper validation");
+
+    char full_name[NS_NAME_MAX];
+    for (uint32_t i = 0; i < NS_NAME_MAX; i++) {
+        full_name[i] = 'z';
+    }
+
+    cap_id_t out_cap = 123;
+    int err = nameserver_ping(0, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper ping rejects invalid ns cap");
+
+    err = nameserver_register(1, NULL, 1, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper register rejects NULL name");
+    err = nameserver_register(1, "", 1, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper register rejects empty name");
+    err = nameserver_register(1, full_name, 1, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper register rejects unterminated name");
+    err = nameserver_register(0, "svc.helper", 1, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper register rejects invalid ns cap");
+    err = nameserver_register(1, "svc.helper", 0, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper register rejects invalid service cap");
+
+    err = nameserver_unregister(1, NULL, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper unregister rejects NULL name");
+    err = nameserver_unregister(1, full_name, 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper unregister rejects unterminated name");
+    err = nameserver_unregister(0, "svc.helper", 0x11U, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper unregister rejects invalid ns cap");
+
+    err = nameserver_lookup_begin(1, "", 1, &out_cap, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper lookup rejects empty name");
+    TEST_ASSERT_EQ((int)KERN_INVALID_ID, (int)out_cap,
+                   "helper lookup clears out cap before name validation");
+    out_cap = 123;
+    err = nameserver_lookup_begin(1, full_name, 1, &out_cap, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper lookup rejects unterminated name");
+    TEST_ASSERT_EQ((int)KERN_INVALID_ID, (int)out_cap,
+                   "helper lookup clears out cap on long name");
+    err = nameserver_lookup_begin(1, "svc.helper", 1, NULL, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper lookup rejects NULL out cap");
+    err = nameserver_lookup_begin(0, "svc.helper", 1, &out_cap, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper lookup rejects invalid ns cap");
+    err = nameserver_lookup_begin(1, "svc.helper", 0, &out_cap, 1000);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper lookup rejects invalid inbox cap");
+
+    err = nameserver_lookup_ack(0);
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM, err,
+                   "helper lookup ack rejects invalid inbox cap");
+}
+
+static void test_nameserver_ping_service(void) {
+    test_section("Test 11: name server ping service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server test creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("nameserver", nameserver_ping_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server task created by root");
+    TEST_ASSERT(ns_id >= 0, "name server task id valid");
+    TEST_ASSERT(ns_task_cap >= 0, "root receives name server task cap");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "nameserver_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     2,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server endpoint created by root");
+    TEST_ASSERT(ns_ep >= 0, "name server endpoint id valid");
+    TEST_ASSERT(root_ep_cap >= 0, "root receives name server endpoint cap");
+    TEST_ASSERT(ns_ep_cap >= 0, "name server receives endpoint cap");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server task started by root");
+
+    uint8_t msg_buf[KERN_EP_MSG_SIZE];
+    for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
+        msg_buf[i] = 0;
+    }
+    ns_msg_hdr_t *hdr = (ns_msg_hdr_t *)msg_buf;
+    ns_msg_init(hdr, NS_OP_PING, 42);
+
+    if (err == KERN_OK) {
+        err = endpoint_send(ns_ep, msg_buf, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server ping endpoint_send OK");
+    TEST_ASSERT_EQ((int)NS_MAGIC, (int)hdr->magic,
+                   "name server ping reply keeps magic");
+    TEST_ASSERT_EQ((int)NS_OP_PING, (int)hdr->opcode,
+                   "name server ping reply keeps opcode");
+    TEST_ASSERT_EQ(42, (int)hdr->seq,
+                   "name server ping reply keeps sequence");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)hdr->status,
+                   "name server ping status OK");
+
+    void *retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "name server ping task exited OK");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "name server ping service retval OK");
+    }
+
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "name server ping root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "name server ping cleanup restored caps");
+}
+
+static void test_nameserver_register_service(void) {
+    test_section("Test 11: name server register service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_reg", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server register creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_register",
+                                        nameserver_register_once_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server register task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_register_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     2,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server register endpoint created");
+    TEST_ASSERT(ns_ep >= 0, "name server register endpoint id valid");
+    TEST_ASSERT(root_ep_cap >= 0, "root receives register endpoint cap");
+    TEST_ASSERT(ns_ep_cap >= 0, "name server receives register endpoint cap");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server register task started");
+
+    ep_id_t service_ep = endpoint_create("svc_echo", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "service endpoint for registration created");
+
+    task_id_t client_id = KERN_INVALID_ID;
+    cap_id_t client_ns_cap = KERN_INVALID_ID;
+    cap_id_t client_service_cap = KERN_INVALID_ID;
+    if (service_ep >= 0) {
+        client_id = task_create_user("ns_reg_client",
+                                     nameserver_register_client_task,
+                                     NULL, 14, 768);
+        TEST_ASSERT(client_id >= 0, "name server register client created");
+    }
+
+    tcb_t *client = task_get_tcb(client_id);
+    if (client != NULL) {
+        client_ns_cap = cap_create_for(client,
+                                       (void *)(uintptr_t)(ns_ep + 1),
+                                       CAP_OBJ_ENDPOINT,
+                                       CAP_READ | CAP_WRITE);
+        client_service_cap = cap_create_for(client,
+                                            (void *)(uintptr_t)(service_ep + 1),
+                                            CAP_OBJ_ENDPOINT,
+                                            CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    TEST_ASSERT(client_ns_cap >= 0,
+                "client receives name server endpoint cap");
+    TEST_ASSERT(client_service_cap >= 0,
+                "client receives service endpoint cap to register");
+
+    if (client_id >= 0 && client_ns_cap >= 0 && client_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)client_service_cap << 16) |
+                          (uint32_t)(uint16_t)client_ns_cap;
+        tcb_t *client_tcb = task_get_tcb(client_id);
+        if (client_tcb != NULL && client_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(client_id);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "name server register client started");
+    }
+
+    void *client_retval = NULL;
+    if (client_id >= 0) {
+        err = task_join(client_id, &client_retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "name server register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)client_retval,
+                       "name server register client retval OK");
+    }
+
+    void *ns_retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &ns_retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "name server register service joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)ns_retval,
+                       "name server register service retval OK");
+    }
+
+    if (client_id >= 0 && task_get_state(client_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(client_id);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "name server register root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "name server register cleanup restored caps");
+}
+
+static void test_nameserver_lookup_service(void) {
+    test_section("Test 12: name server lookup service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_lookup", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server lookup creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_lookup",
+                                        nameserver_register_lookup_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server lookup task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_lookup_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     2,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server lookup endpoint created");
+    TEST_ASSERT(ns_ep >= 0, "name server lookup endpoint id valid");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server lookup task started");
+
+    ep_id_t service_ep = endpoint_create("svc_echo_lookup",
+                                         KERN_EP_MSG_SIZE, 2);
+    ep_id_t inbox_ep = endpoint_create("ns_lookup_inbox",
+                                       KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "lookup service endpoint created");
+    TEST_ASSERT(inbox_ep >= 0, "lookup client inbox endpoint created");
+
+    task_id_t reg_client = KERN_INVALID_ID;
+    task_id_t lookup_client = KERN_INVALID_ID;
+    cap_id_t reg_ns_cap = KERN_INVALID_ID;
+    cap_id_t reg_service_cap = KERN_INVALID_ID;
+    cap_id_t lookup_ns_cap = KERN_INVALID_ID;
+    cap_id_t lookup_inbox_cap = KERN_INVALID_ID;
+
+    if (service_ep >= 0 && inbox_ep >= 0) {
+        reg_client = task_create_user("ns_reg2",
+                                      nameserver_register_client_task,
+                                      NULL, 14, 768);
+        lookup_client = task_create_user("ns_lookup_client",
+                                         nameserver_lookup_client_task,
+                                         NULL, 14, 896);
+        TEST_ASSERT(reg_client >= 0, "lookup register client created");
+        TEST_ASSERT(lookup_client >= 0, "lookup client created");
+    }
+
+    tcb_t *reg_tcb = task_get_tcb(reg_client);
+    if (reg_tcb != NULL) {
+        reg_ns_cap = cap_create_for(reg_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+        reg_service_cap = cap_create_for(reg_tcb,
+                                         (void *)(uintptr_t)(service_ep + 1),
+                                         CAP_OBJ_ENDPOINT,
+                                         CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    tcb_t *lookup_tcb = task_get_tcb(lookup_client);
+    if (lookup_tcb != NULL) {
+        lookup_ns_cap = cap_create_for(lookup_tcb,
+                                       (void *)(uintptr_t)(ns_ep + 1),
+                                       CAP_OBJ_ENDPOINT,
+                                       CAP_READ | CAP_WRITE);
+        lookup_inbox_cap = cap_create_for(lookup_tcb,
+                                          (void *)(uintptr_t)(inbox_ep + 1),
+                                          CAP_OBJ_ENDPOINT,
+                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+
+    TEST_ASSERT(reg_ns_cap >= 0, "register client receives ns cap");
+    TEST_ASSERT(reg_service_cap >= 0, "register client receives service cap");
+    TEST_ASSERT(lookup_ns_cap >= 0, "lookup client receives ns cap");
+    TEST_ASSERT(lookup_inbox_cap >= 0, "lookup client receives inbox cap");
+
+    if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
+                          (uint32_t)(uint16_t)reg_ns_cap;
+        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(reg_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "lookup register client started");
+    }
+
+    void *retval = NULL;
+    if (reg_client >= 0) {
+        err = task_join(reg_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "lookup register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "lookup register client retval OK");
+    }
+
+    if (lookup_client >= 0 && lookup_ns_cap >= 0 && lookup_inbox_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)lookup_inbox_cap << 16) |
+                          (uint32_t)(uint16_t)lookup_ns_cap;
+        if (lookup_tcb != NULL && lookup_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)lookup_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(lookup_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "lookup client started");
+    }
+
+    retval = NULL;
+    if (lookup_client >= 0) {
+        err = task_join(lookup_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "lookup client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "lookup client retval OK");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "lookup name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "lookup name server retval OK");
+    }
+
+    if (reg_client >= 0 &&
+        task_get_state(reg_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(reg_client);
+    }
+    if (lookup_client >= 0 &&
+        task_get_state(lookup_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(lookup_client);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (inbox_ep >= 0) {
+        (void)endpoint_delete(inbox_ep);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "lookup root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "lookup cleanup restored caps");
+}
+
+static void test_nameserver_negative_paths(void) {
+    test_section("Test 13: name server negative paths");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_neg", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "name server negative creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_negative",
+                                        nameserver_negative_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "negative name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_negative_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     3,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "negative name server endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "negative name server task started");
+
+    ep_id_t service_ep = endpoint_create("svc_echo_neg",
+                                         KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "negative service endpoint created");
+
+    task_id_t missing_client = KERN_INVALID_ID;
+    task_id_t reg_client = KERN_INVALID_ID;
+    task_id_t dup_client = KERN_INVALID_ID;
+    cap_id_t missing_ns_cap = KERN_INVALID_ID;
+    cap_id_t reg_ns_cap = KERN_INVALID_ID;
+    cap_id_t reg_service_cap = KERN_INVALID_ID;
+    cap_id_t dup_ns_cap = KERN_INVALID_ID;
+    cap_id_t dup_service_cap = KERN_INVALID_ID;
+
+    if (service_ep >= 0) {
+        missing_client = task_create_user("ns_missing",
+                                          nameserver_missing_lookup_client_task,
+                                          NULL, 14, 768);
+        reg_client = task_create_user("ns_reg_neg",
+                                      nameserver_register_client_task,
+                                      NULL, 14, 768);
+        dup_client = task_create_user("ns_dup",
+                                      nameserver_duplicate_register_client_task,
+                                      NULL, 14, 768);
+        TEST_ASSERT(missing_client >= 0, "missing lookup client created");
+        TEST_ASSERT(reg_client >= 0, "negative register client created");
+        TEST_ASSERT(dup_client >= 0, "duplicate register client created");
+    }
+
+    tcb_t *missing_tcb = task_get_tcb(missing_client);
+    if (missing_tcb != NULL) {
+        missing_ns_cap = cap_create_for(missing_tcb,
+                                        (void *)(uintptr_t)(ns_ep + 1),
+                                        CAP_OBJ_ENDPOINT,
+                                        CAP_READ | CAP_WRITE);
+    }
+    tcb_t *reg_tcb = task_get_tcb(reg_client);
+    if (reg_tcb != NULL) {
+        reg_ns_cap = cap_create_for(reg_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+        reg_service_cap = cap_create_for(reg_tcb,
+                                         (void *)(uintptr_t)(service_ep + 1),
+                                         CAP_OBJ_ENDPOINT,
+                                         CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    tcb_t *dup_tcb = task_get_tcb(dup_client);
+    if (dup_tcb != NULL) {
+        dup_ns_cap = cap_create_for(dup_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+        dup_service_cap = cap_create_for(dup_tcb,
+                                         (void *)(uintptr_t)(service_ep + 1),
+                                         CAP_OBJ_ENDPOINT,
+                                         CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+
+    TEST_ASSERT(missing_ns_cap >= 0, "missing lookup client receives ns cap");
+    TEST_ASSERT(reg_ns_cap >= 0, "negative register client receives ns cap");
+    TEST_ASSERT(reg_service_cap >= 0,
+                "negative register client receives service cap");
+    TEST_ASSERT(dup_ns_cap >= 0, "duplicate client receives ns cap");
+    TEST_ASSERT(dup_service_cap >= 0, "duplicate client receives service cap");
+
+    if (missing_client >= 0 && missing_ns_cap >= 0) {
+        if (missing_tcb != NULL && missing_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)missing_tcb->sp + 32U);
+            *stacked_r0 = (uint32_t)(uint16_t)missing_ns_cap;
+        }
+        err = task_start(missing_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "missing lookup client started");
+    }
+
+    void *retval = NULL;
+    if (missing_client >= 0) {
+        err = task_join(missing_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "missing lookup client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "missing lookup returned NOEXIST");
+    }
+
+    if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
+                          (uint32_t)(uint16_t)reg_ns_cap;
+        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(reg_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "negative register client started");
+    }
+
+    retval = NULL;
+    if (reg_client >= 0) {
+        err = task_join(reg_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "negative register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "negative register client retval OK");
+    }
+
+    if (dup_client >= 0 && dup_ns_cap >= 0 && dup_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)dup_service_cap << 16) |
+                          (uint32_t)(uint16_t)dup_ns_cap;
+        if (dup_tcb != NULL && dup_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)dup_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(dup_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "duplicate register client started");
+    }
+
+    retval = NULL;
+    if (dup_client >= 0) {
+        err = task_join(dup_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "duplicate register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "duplicate register returned BUSY");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "negative name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "negative name server retval OK");
+    }
+
+    if (missing_client >= 0 &&
+        task_get_state(missing_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(missing_client);
+    }
+    if (reg_client >= 0 &&
+        task_get_state(reg_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(reg_client);
+    }
+    if (dup_client >= 0 &&
+        task_get_state(dup_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(dup_client);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "negative root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "negative cleanup restored caps");
+}
+
+static void test_nameserver_unregister_service(void) {
+    test_section("Test 14: name server unregister service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_unreg", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "unregister creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_unregister",
+                                        nameserver_unregister_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "unregister name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_unreg_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     3,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "unregister name server endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "unregister name server task started");
+
+    ep_id_t service_ep = endpoint_create("svc_echo_unreg",
+                                         KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "unregister service endpoint created");
+
+    task_id_t reg_client = KERN_INVALID_ID;
+    task_id_t unreg_client = KERN_INVALID_ID;
+    task_id_t missing_client = KERN_INVALID_ID;
+    cap_id_t reg_ns_cap = KERN_INVALID_ID;
+    cap_id_t reg_service_cap = KERN_INVALID_ID;
+    cap_id_t unreg_ns_cap = KERN_INVALID_ID;
+    cap_id_t missing_ns_cap = KERN_INVALID_ID;
+
+    if (service_ep >= 0) {
+        reg_client = task_create_user("ns_reg_unreg",
+                                      nameserver_register_client_task,
+                                      NULL, 14, 768);
+        unreg_client = task_create_user("ns_unreg_client",
+                                        nameserver_unregister_client_task,
+                                        NULL, 14, 768);
+        missing_client = task_create_user("ns_lookup_after_unreg",
+                                          nameserver_missing_lookup_client_task,
+                                          NULL, 14, 768);
+        TEST_ASSERT(reg_client >= 0, "unregister register client created");
+        TEST_ASSERT(unreg_client >= 0, "unregister client created");
+        TEST_ASSERT(missing_client >= 0, "post-unregister lookup client created");
+    }
+
+    tcb_t *reg_tcb = task_get_tcb(reg_client);
+    if (reg_tcb != NULL) {
+        reg_ns_cap = cap_create_for(reg_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+        reg_service_cap = cap_create_for(reg_tcb,
+                                         (void *)(uintptr_t)(service_ep + 1),
+                                         CAP_OBJ_ENDPOINT,
+                                         CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    tcb_t *unreg_tcb = task_get_tcb(unreg_client);
+    if (unreg_tcb != NULL) {
+        unreg_ns_cap = cap_create_for(unreg_tcb,
+                                      (void *)(uintptr_t)(ns_ep + 1),
+                                      CAP_OBJ_ENDPOINT,
+                                      CAP_READ | CAP_WRITE);
+    }
+    tcb_t *missing_tcb = task_get_tcb(missing_client);
+    if (missing_tcb != NULL) {
+        missing_ns_cap = cap_create_for(missing_tcb,
+                                        (void *)(uintptr_t)(ns_ep + 1),
+                                        CAP_OBJ_ENDPOINT,
+                                        CAP_READ | CAP_WRITE);
+    }
+
+    TEST_ASSERT(reg_ns_cap >= 0, "unregister register client receives ns cap");
+    TEST_ASSERT(reg_service_cap >= 0,
+                "unregister register client receives service cap");
+    TEST_ASSERT(unreg_ns_cap >= 0, "unregister client receives ns cap");
+    TEST_ASSERT(missing_ns_cap >= 0, "post-unregister lookup receives ns cap");
+
+    if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
+                          (uint32_t)(uint16_t)reg_ns_cap;
+        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(reg_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "unregister register client started");
+    }
+
+    void *retval = NULL;
+    if (reg_client >= 0) {
+        err = task_join(reg_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "unregister register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "unregister register client retval OK");
+    }
+
+    if (unreg_client >= 0 && unreg_ns_cap >= 0) {
+        if (unreg_tcb != NULL && unreg_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)unreg_tcb->sp + 32U);
+            *stacked_r0 = (uint32_t)(uint16_t)unreg_ns_cap;
+        }
+        err = task_start(unreg_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "unregister client started");
+    }
+
+    retval = NULL;
+    if (unreg_client >= 0) {
+        err = task_join(unreg_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "unregister client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "unregister client retval OK");
+    }
+
+    if (missing_client >= 0 && missing_ns_cap >= 0) {
+        if (missing_tcb != NULL && missing_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)missing_tcb->sp + 32U);
+            *stacked_r0 = (uint32_t)(uint16_t)missing_ns_cap;
+        }
+        err = task_start(missing_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "post-unregister lookup client started");
+    }
+
+    retval = NULL;
+    if (missing_client >= 0) {
+        err = task_join(missing_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "post-unregister lookup client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "post-unregister lookup returned NOEXIST");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "unregister name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "unregister name server retval OK");
+    }
+
+    if (reg_client >= 0 &&
+        task_get_state(reg_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(reg_client);
+    }
+    if (unreg_client >= 0 &&
+        task_get_state(unreg_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(unreg_client);
+    }
+    if (missing_client >= 0 &&
+        task_get_state(missing_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(missing_client);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "unregister root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "unregister cleanup restored caps");
+}
+
+static void test_nameserver_protocol_error_service(void) {
+    test_section("Test 15: name server protocol error service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_errors", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "protocol errors create root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_errors",
+                                        nameserver_protocol_errors_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "protocol errors name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_errors_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     4,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "protocol errors endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "protocol errors name server task started");
+
+    if (err == KERN_OK && ns_ep >= 0) {
+        ns_test_send_expect(ns_ep, 0x12345678U, NS_OP_PING, 200,
+                            NULL, KERN_ERR_PARAM,
+                            "bad magic rejected");
+        ns_test_send_expect(ns_ep, NS_MAGIC, NS_OP_REGISTER, 201,
+                            NULL, KERN_ERR_PARAM,
+                            "empty register name rejected");
+        ns_test_send_full_name_expect(ns_ep, NS_OP_REGISTER, 202,
+                                      KERN_ERR_PARAM,
+                                      "unterminated register name rejected");
+        ns_test_send_expect(ns_ep, NS_MAGIC, NS_OP_REGISTER, 203,
+                            "svc.badreg", KERN_ERR_CAP,
+                            "register without cap rejected");
+        ns_test_send_expect(ns_ep, NS_MAGIC, NS_OP_UNREG, 204,
+                            "svc.missing", KERN_ERR_NOEXIST,
+                            "unregister missing service rejected");
+        ns_test_send_expect(ns_ep, NS_MAGIC, NS_OP_PING, 205,
+                            NULL, KERN_OK,
+                            "ping after protocol errors OK");
+    }
+
+    void *retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "protocol errors name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "protocol errors name server retval OK");
+    }
+
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "protocol errors root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "protocol errors cleanup restored caps");
+}
+
+static void test_nameserver_cap_recycle_service(void) {
+    test_section("Test 16: name server cap recycle service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_recycle", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "cap recycle creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_recycle",
+                                        nameserver_recycle_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "cap recycle name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_recycle_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     4,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "cap recycle endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "cap recycle name server task started");
+
+    ep_id_t service_ep = endpoint_create("svc_recycle", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "cap recycle service endpoint created");
+
+    task_id_t client_id = KERN_INVALID_ID;
+    cap_id_t client_ns_cap = KERN_INVALID_ID;
+    cap_id_t client_service_cap = KERN_INVALID_ID;
+    if (service_ep >= 0) {
+        client_id = task_create_user("ns_recycle_client",
+                                     nameserver_recycle_client_task,
+                                     NULL, 14, 896);
+        TEST_ASSERT(client_id >= 0, "cap recycle client created");
+    }
+
+    tcb_t *client_tcb = task_get_tcb(client_id);
+    if (client_tcb != NULL) {
+        client_ns_cap = cap_create_for(client_tcb,
+                                       (void *)(uintptr_t)(ns_ep + 1),
+                                       CAP_OBJ_ENDPOINT,
+                                       CAP_READ | CAP_WRITE);
+        client_service_cap = cap_create_for(client_tcb,
+                                            (void *)(uintptr_t)(service_ep + 1),
+                                            CAP_OBJ_ENDPOINT,
+                                            CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    TEST_ASSERT(client_ns_cap >= 0, "cap recycle client receives ns cap");
+    TEST_ASSERT(client_service_cap >= 0,
+                "cap recycle client receives service cap");
+
+    if (client_id >= 0 && client_ns_cap >= 0 && client_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)client_service_cap << 16) |
+                          (uint32_t)(uint16_t)client_ns_cap;
+        if (client_tcb != NULL && client_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(client_id);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "cap recycle client started");
+    }
+
+    void *retval = NULL;
+    if (client_id >= 0) {
+        err = task_join(client_id, &retval, 2000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "cap recycle client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "cap recycle client retval OK");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 2000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "cap recycle name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "cap recycle name server retval OK");
+    }
+
+    if (client_id >= 0 && task_get_state(client_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(client_id);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "cap recycle root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "cap recycle cleanup restored caps");
+}
+
+static void test_nameserver_registry_full_service(void) {
+    test_section("Test 17: name server registry full service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_full", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "registry full creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_full",
+                                        nameserver_registry_full_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "registry full name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_full_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     4,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "registry full endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "registry full name server task started");
+
+    ep_id_t service_ep = endpoint_create("svc_full", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "registry full service endpoint created");
+
+    task_id_t client_id = KERN_INVALID_ID;
+    cap_id_t client_ns_cap = KERN_INVALID_ID;
+    cap_id_t client_service_cap = KERN_INVALID_ID;
+    if (service_ep >= 0) {
+        client_id = task_create_user("ns_full_client",
+                                     nameserver_registry_full_client_task,
+                                     NULL, 14, 896);
+        TEST_ASSERT(client_id >= 0, "registry full client created");
+    }
+
+    tcb_t *client_tcb = task_get_tcb(client_id);
+    if (client_tcb != NULL) {
+        client_ns_cap = cap_create_for(client_tcb,
+                                       (void *)(uintptr_t)(ns_ep + 1),
+                                       CAP_OBJ_ENDPOINT,
+                                       CAP_READ | CAP_WRITE);
+        client_service_cap = cap_create_for(client_tcb,
+                                            (void *)(uintptr_t)(service_ep + 1),
+                                            CAP_OBJ_ENDPOINT,
+                                            CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    TEST_ASSERT(client_ns_cap >= 0, "registry full client receives ns cap");
+    TEST_ASSERT(client_service_cap >= 0,
+                "registry full client receives service cap");
+
+    if (client_id >= 0 && client_ns_cap >= 0 && client_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)client_service_cap << 16) |
+                          (uint32_t)(uint16_t)client_ns_cap;
+        if (client_tcb != NULL && client_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(client_id);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "registry full client started");
+    }
+
+    void *retval = NULL;
+    if (client_id >= 0) {
+        err = task_join(client_id, &retval, 2000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "registry full client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "registry full client retval OK");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 2000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "registry full name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "registry full name server retval OK");
+    }
+
+    if (client_id >= 0 && task_get_state(client_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(client_id);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "registry full root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "registry full cleanup restored caps");
+}
+
+static void test_nameserver_unregister_owner_service(void) {
+    test_section("Test 18: name server unregister owner service");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_ns_owner", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "owner unregister creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_task_cap = KERN_INVALID_ID;
+    err = root_bootstrap_create_service("ns_owner",
+                                        nameserver_owner_task,
+                                        NULL, 13, 1536,
+                                        &ns_id, &ns_task_cap);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "owner unregister name server task created");
+
+    ep_id_t ns_ep = KERN_INVALID_ID;
+    cap_id_t root_ep_cap = KERN_INVALID_ID;
+    cap_id_t ns_ep_cap = KERN_INVALID_ID;
+    if (err == KERN_OK) {
+        err = root_bootstrap_create_service_endpoint(ns_task_cap,
+                                                     "ns_owner_ep",
+                                                     KERN_EP_MSG_SIZE,
+                                                     4,
+                                                     &ns_ep,
+                                                     &root_ep_cap,
+                                                     &ns_ep_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "owner unregister endpoint created");
+
+    if (err == KERN_OK) {
+        err = root_bootstrap_start_service(ns_task_cap);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "owner unregister name server task started");
+
+    ep_id_t service_ep = endpoint_create("svc_owner", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "owner unregister service endpoint created");
+
+    task_id_t reg_client = KERN_INVALID_ID;
+    task_id_t bad_client = KERN_INVALID_ID;
+    task_id_t good_client = KERN_INVALID_ID;
+    cap_id_t reg_ns_cap = KERN_INVALID_ID;
+    cap_id_t reg_service_cap = KERN_INVALID_ID;
+    cap_id_t bad_ns_cap = KERN_INVALID_ID;
+    cap_id_t good_ns_cap = KERN_INVALID_ID;
+
+    if (service_ep >= 0) {
+        reg_client = task_create_user("ns_owner_reg",
+                                      nameserver_register_client_task,
+                                      NULL, 14, 768);
+        bad_client = task_create_user("ns_bad_unreg",
+                                      nameserver_bad_owner_unregister_client_task,
+                                      NULL, 14, 768);
+        good_client = task_create_user("ns_good_unreg",
+                                       nameserver_unregister_client_task,
+                                       NULL, 14, 768);
+        TEST_ASSERT(reg_client >= 0, "owner register client created");
+        TEST_ASSERT(bad_client >= 0, "bad owner unregister client created");
+        TEST_ASSERT(good_client >= 0, "good owner unregister client created");
+    }
+
+    tcb_t *reg_tcb = task_get_tcb(reg_client);
+    if (reg_tcb != NULL) {
+        reg_ns_cap = cap_create_for(reg_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+        reg_service_cap = cap_create_for(reg_tcb,
+                                         (void *)(uintptr_t)(service_ep + 1),
+                                         CAP_OBJ_ENDPOINT,
+                                         CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    tcb_t *bad_tcb = task_get_tcb(bad_client);
+    if (bad_tcb != NULL) {
+        bad_ns_cap = cap_create_for(bad_tcb,
+                                    (void *)(uintptr_t)(ns_ep + 1),
+                                    CAP_OBJ_ENDPOINT,
+                                    CAP_READ | CAP_WRITE);
+    }
+    tcb_t *good_tcb = task_get_tcb(good_client);
+    if (good_tcb != NULL) {
+        good_ns_cap = cap_create_for(good_tcb,
+                                     (void *)(uintptr_t)(ns_ep + 1),
+                                     CAP_OBJ_ENDPOINT,
+                                     CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(reg_ns_cap >= 0, "owner register client receives ns cap");
+    TEST_ASSERT(reg_service_cap >= 0,
+                "owner register client receives service cap");
+    TEST_ASSERT(bad_ns_cap >= 0, "bad owner client receives ns cap");
+    TEST_ASSERT(good_ns_cap >= 0, "good owner client receives ns cap");
+
+    if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
+                          (uint32_t)(uint16_t)reg_ns_cap;
+        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
+            *stacked_r0 = packed;
+        }
+        err = task_start(reg_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "owner register client started");
+    }
+
+    void *retval = NULL;
+    if (reg_client >= 0) {
+        err = task_join(reg_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "owner register client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "owner register client retval OK");
+    }
+
+    if (bad_client >= 0 && bad_ns_cap >= 0) {
+        if (bad_tcb != NULL && bad_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)bad_tcb->sp + 32U);
+            *stacked_r0 = (uint32_t)(uint16_t)bad_ns_cap;
+        }
+        err = task_start(bad_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "bad owner unregister client started");
+    }
+
+    retval = NULL;
+    if (bad_client >= 0) {
+        err = task_join(bad_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "bad owner unregister client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "bad owner unregister rejected");
+    }
+
+    if (good_client >= 0 && good_ns_cap >= 0) {
+        if (good_tcb != NULL && good_tcb->sp != NULL) {
+            uint32_t *stacked_r0 =
+                (uint32_t *)((uint8_t *)good_tcb->sp + 32U);
+            *stacked_r0 = (uint32_t)(uint16_t)good_ns_cap;
+        }
+        err = task_start(good_client);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "good owner unregister client started");
+    }
+
+    retval = NULL;
+    if (good_client >= 0) {
+        err = task_join(good_client, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "good owner unregister client joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "good owner unregister retval OK");
+    }
+
+    retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "owner unregister name server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "owner unregister name server retval OK");
+    }
+
+    if (reg_client >= 0 &&
+        task_get_state(reg_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(reg_client);
+    }
+    if (bad_client >= 0 &&
+        task_get_state(bad_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(bad_client);
+    }
+    if (good_client >= 0 &&
+        task_get_state(good_client) != TASK_STATE_TERMINATED) {
+        (void)task_delete(good_client);
+    }
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "owner unregister root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "owner unregister cleanup restored caps");
+}
+
 #endif
 
 void test_service_model_module(void) {
@@ -559,6 +2368,17 @@ void test_service_model_module(void) {
     test_root_bootstrap_start_service();
     test_root_bootstrap_service_endpoint();
     test_root_bootstrap_service_ipc();
+    test_nameserver_protocol_layout();
+    test_nameserver_helper_validation();
+    test_nameserver_ping_service();
+    test_nameserver_register_service();
+    test_nameserver_lookup_service();
+    test_nameserver_negative_paths();
+    test_nameserver_unregister_service();
+    test_nameserver_protocol_error_service();
+    test_nameserver_cap_recycle_service();
+    test_nameserver_registry_full_service();
+    test_nameserver_unregister_owner_service();
 #else
     test_print("Service model tests disabled\r\n");
 #endif

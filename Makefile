@@ -134,6 +134,8 @@ CFLAGS      += -I$(SRC_DIR)/hal
 CFLAGS      += -I$(SRC_DIR)/drivers/include
 CFLAGS      += -I$(SRC_DIR)/board/$(TARGET_MCU)
 CFLAGS      += -I$(SRC_DIR)/kernel
+CFLAGS      += -I$(SRC_DIR)/user/nameserver
+CFLAGS      += -I$(SRC_DIR)/user/drivers
 CFLAGS      += -I$(SRC_DIR)/arch/arm/cortex-m7
 CFLAGS      += -I$(SRC_DIR)/tests
 CFLAGS      += -I$(SRC_DIR)/app
@@ -216,6 +218,8 @@ HAL_SOURCES  = $(HAL_SRC)
 
 APP_SOURCES  = src/app/main.c
 APP_SOURCES  += src/app/shell.c
+APP_SOURCES  += src/user/nameserver/nameserver.c
+APP_SOURCES  += src/user/drivers/uart_server.c
 APP_SOURCES  += $(UART_SRC)
 APP_SOURCES  += $(GPIO_SRC)
 APP_SOURCES  += src/drivers/uart_dev.c

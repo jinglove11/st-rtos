@@ -1,6 +1,8 @@
 # My-RTOS P4 Microkernel Refactor Plan
 
-Status: Phase 6 memory-object slice in progress.
+Status: Phase 8 name-server core complete and board-validated. Phases 0-7 core
+slices have board test coverage; Phase 7 root/init bootstrap remains on the
+compatibility boot path until init/service migration is enabled by default.
 
 Scope: STM32F767 mainline first. Keep the current `make BOARD=stm32f767`
 workflow, board test harness, and UART shell as the validation loop. P4 is a
@@ -459,6 +461,8 @@ system.
 ## Phase 8: Name Server
 
 Priority: P2.
+
+Status: Design starting. See `docs/NAME_SERVER_DESIGN.md`.
 
 ### Problem
 
@@ -993,3 +997,80 @@ This slice closes real security holes without requiring service migration yet.
   the service endpoint, the user service receives through `sys_ep_recv()` and
   replies through `sys_ep_reply()`, and the test joins the service and verifies
   cleanup.
+- Done: completed Phase 7 core acceptance coverage. Board tests now cover
+  controlled root/init creation, initial task and endpoint caps, cap-based
+  service task creation/start, service endpoint creation with reduced service
+  rights, endpoint lifetime cleanup, and one root-created user service IPC round
+  trip using a full `KERN_EP_MSG_SIZE` receive buffer.
+- Remaining Phase 7 limits: the default boot still uses the compatibility path,
+  there is no production `src/user/init/init.c` policy loop yet, root/init crash
+  behavior is still test-scoped, and service endpoint delivery still uses the
+  initial-R0 bootstrap helper until the user runtime/name-server handoff exists.
+- Done: started Phase 8 name-server implementation with a stable
+  `src/user/nameserver/nameserver.h` IPC ABI and service-model coverage for
+  root-created user name-server `PING`.
+- Done: added name-server `REGISTER` coverage over real user IPC cap transfer:
+  a user client transfers a service endpoint cap with `CAP_TRANSFER`, the
+  user-space name-server receives it through `sys_ep_recv_caps()`, records it,
+  replies through endpoint IPC, and all cap resources are restored.
+- Done: fixed a sleepable endpoint send/cap-transfer race found by the
+  name-server tests. Syscall send now establishes the client reply-wait state
+  before waking a waiting server, and direct delivery failure rolls back the
+  client syscall state instead of falsely waking the receiver.
+- Done: added name-server `LOOKUP` happy-path coverage. A second user client
+  looks up the registered service name, provides an inbox endpoint cap, receives
+  a derived service endpoint cap from the name-server over cap-bearing IPC, and
+  verifies the returned cap is usable.
+- Done: extracted the test-proven name-server logic into
+  `src/user/nameserver/nameserver.c` as `nameserver_service_run()`, then updated
+  service-model tests to call the real user-service implementation for `PING`,
+  `REGISTER`, `LOOKUP`, missing lookup, and duplicate register.
+- Done: added name-server `UNREG` coverage. A registered service can be removed
+  through endpoint IPC, subsequent lookup returns `KERN_ERR_NOEXIST`, and
+  service/root cleanup restores the cap pool.
+- Done: added protocol error coverage for the user-space name-server. Bad magic,
+  empty names, register-without-cap, and unregister-missing-service all return
+  explicit errors, and the service continues to process a following `PING`.
+- Done: tightened name-server cap lifecycle. The service now revokes unused
+  transferred caps on error paths, revokes lookup inbox caps after use, revokes
+  registered service caps on `UNREG`, and drains registered caps on exit. Tests
+  now exercise repeated register/unregister cycles to catch long-lived CSpace
+  leaks.
+- Done: tightened name-server name validation. Named operations now require a
+  non-empty, NUL-terminated name within `NS_NAME_MAX`, release any transferred
+  caps on malformed requests, and tests cover unterminated-name rejection.
+- Done: expanded per-task CSpace from the legacy 16-slot bitmap to 32 slots.
+  This makes a 16-entry name-server registry viable for a long-lived user
+  service that also holds its own endpoint caps. Capability tests now verify
+  slots beyond 15, and service-model tests exercise registry-full behavior.
+- Done: added first name-server ownership policy. `REGISTER` records an
+  `owner_badge`, and `UNREG` now rejects mismatched owner badges with
+  `KERN_ERR_PERM`. Service-model coverage verifies that a non-owner cannot
+  unregister another service while the original owner still can.
+- Done: closed stale endpoint-cap lifetime gap. Capability now has
+  `cap_revoke_object()`, and `endpoint_delete()` revokes all caps that point to
+  the deleted endpoint object before freeing the endpoint id. Tests verify root
+  and service endpoint caps no longer resolve after endpoint cleanup, and the
+  capability module directly covers object-wide revoke behavior.
+- Done: added reusable user-side name-server client helpers for ping, register,
+  unregister, and two-phase lookup. Service-model clients now use the helpers
+  for the main happy paths while lower-level protocol tests still exercise raw
+  messages and malformed requests.
+- Done: added name-server helper validation coverage. The helper API now has
+  regression tests for invalid caps, NULL/empty/unterminated names, NULL lookup
+  output storage, and lookup output clearing before local validation failures.
+- Done: started Phase 9 driver server foundation with
+  `src/user/drivers/driver_proto.h` and `src/user/drivers/uart_server.c`.
+  Driver tests now create a root-managed user UART server, send `PING` and
+  `WRITE` requests over endpoint IPC, verify deterministic replies, and keep the
+  existing kernel/debug UART path intact.
+- Done: added first driver client helpers and protocol-error coverage.
+  `driver_ping()` and `driver_write()` now centralize the user-side ABI shape,
+  and driver tests verify local helper validation plus UART-server replies for
+  bad magic, unknown opcode, unsupported read, and oversized write requests.
+- Done: connected the UART driver-server prototype to service discovery.
+  Driver tests now create a user name-server, register `dev.uart0` with a
+  transferred endpoint cap, perform lookup from a second user client, and use
+  the returned cap through `driver_ping()`. This validates the intended path:
+  root-created driver service -> name-server registration -> client lookup ->
+  driver IPC.
