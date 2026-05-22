@@ -1074,3 +1074,87 @@ This slice closes real security holes without requiring service migration yet.
   the returned cap through `driver_ping()`. This validates the intended path:
   root-created driver service -> name-server registration -> client lookup ->
   driver IPC.
+- Done: added initial driver session semantics. The UART server now supports
+  `OPEN` and `CLOSE`, rejects duplicate open / close-before-open, and requires
+  an open session before `WRITE`. Client helpers now expose `driver_open()` and
+  `driver_close()`, and driver tests cover the ping -> open -> write -> close
+  path plus close-before-open, write-before-open, and duplicate-open rejection.
+- Done: added the first driver event ABI. `DRV_EVENT_*` bits and
+  `driver_poll()` now let a user client query service state without depending
+  on kernel `DEVICE_EVENT_*` definitions. The UART server reports writable
+  after `OPEN`, and tests cover helper validation plus poll replies.
+- Done: added a minimal driver `IOCTL` control path. `drv_msg_t` now carries an
+  explicit command field, `driver_ioctl()` validates and clears caller output,
+  and the UART server implements `DRV_IOCTL_GET_EVENTS` with unknown-command
+  rejection. Driver tests cover both normal get-events replies and invalid
+  IOCTL handling.
+- Done: added the first driver `READ` path. `driver_read()` validates and
+  clears caller buffers, copies returned payload bytes with overflow checks, and
+  the UART server now supports a nonblocking empty read after `OPEN`. Tests
+  cover helper validation, read-before-open rejection, oversized read rejection,
+  and the open -> empty-read path.
+- Done: upgraded the service-discovery driver client test from a health check
+  to a full helper sequence. After resolving `dev.uart0` through the
+  name-server, the user client now runs `PING`, `OPEN`, `POLL`,
+  `IOCTL(GET_EVENTS)`, `READ`, `WRITE`, and `CLOSE` through the transferred
+  endpoint cap.
+- Done: added the first resource-cap attach path for user-space drivers.
+  `DRV_OP_ATTACH` and `driver_attach_cap()` transfer one resource capability to
+  the UART server using endpoint cap passing; the server validates receipt and
+  revokes its received copy. Driver tests create an MMIO cap, copy it to a user
+  client, send it to the server, and verify cleanup restores cap accounting.
+- Done: added attach negative coverage. The UART server now has a regression
+  test for `DRV_OP_ATTACH` without an attached cap and must return
+  `KERN_ERR_CAP`, proving plain messages cannot impersonate resource grants.
+- Done: added attach transfer-right coverage. A user client with only a
+  read-only MMIO cap now attempts `driver_attach_cap()` and must fail before the
+  server receives a request, while the server exits by receive timeout. This
+  pins the rule that resource attach requires `CAP_TRANSFER`.
+- Done: typed driver resource attach. `DRV_RESOURCE_MMIO` and
+  `DRV_RESOURCE_IRQ` now define the resource class carried by `DRV_OP_ATTACH`;
+  the default helper sends MMIO, while `driver_attach_resource()` can specify
+  the type explicitly. The UART server rejects unknown resource types after
+  releasing the received cap, and tests cover local helper validation plus a
+  raw bad-type attach request.
+- Done: recorded attached driver resources in the user-space UART server.
+  Successful `DRV_OP_ATTACH` now updates MMIO/IRQ resource state, duplicate
+  attaches are rejected as busy, and `DRV_IOCTL_GET_RESOURCES` returns a stable
+  resource bitmask for diagnostics and later probe/remove policy.
+- Done: pinned duplicate driver resource attach behavior with a regression
+  test. Re-sending the same MMIO resource class to a running UART server now
+  must return `KERN_ERR_BUSY` while still releasing the transferred cap copy and
+  preserving cap accounting.
+- Done: covered the IRQ resource attach protocol path. The UART driver server
+  now has board-test coverage for `DRV_RESOURCE_IRQ` attach and verifies that
+  `DRV_IOCTL_GET_RESOURCES` reports the IRQ bit independently from the MMIO bit.
+- Done: started enforcing resource-dependent driver policy. Legacy no-resource
+  health tests can still open the prototype server, but once a server has
+  entered resource-managed mode with an IRQ resource, `OPEN` is rejected until
+  an MMIO resource is also attached.
+- Done: covered the positive resource-managed driver path. A UART server that
+  receives an MMIO resource cap now accepts `OPEN`, handles `WRITE`, and
+  closes cleanly, proving that attached resources are part of the usable driver
+  session path rather than only diagnostics.
+- Done: covered resource-managed event and resource lifetime. After MMIO attach
+  and `OPEN`, `POLL` reports writable; after `CLOSE`, `POLL` clears writable
+  while `DRV_IOCTL_GET_RESOURCES` still reports the MMIO resource owned by the
+  server.
+- Done: covered the full user-space resource-managed driver session. A user
+  client now receives endpoint and MMIO caps, calls `driver_attach_cap()`,
+  `driver_open()`, `driver_poll()`, `driver_write()`, and `driver_close()`
+  through sleepable syscalls, and the server completes the session with clean
+  cap accounting.
+- Done: covered the user-space negative resource policy. A user client that
+  attaches only an IRQ resource now reaches the driver server through the normal
+  helper path, but `driver_open()` is rejected with `KERN_ERR_CAP` until an MMIO
+  resource is available.
+- Done: added a typed `driver_get_resources()` user helper. The full
+  user-space resource-managed session now queries the server's resource bitmask
+  after `driver_attach_cap()` and verifies the MMIO bit before opening.
+- Done: added a typed `driver_get_events()` user helper. The full user-space
+  resource-managed session now verifies writable state through the ioctl event
+  helper, while the lower-level `driver_poll()` path remains separately tested.
+- Done: connected IRQ endpoint notification to the UART driver-server event
+  model. `irq_notify()` can now wake the UART server through a driver-specific
+  badge, and the server reports the interrupt as `DRV_EVENT_READABLE` through
+  the normal event query path.
