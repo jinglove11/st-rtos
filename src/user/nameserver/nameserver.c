@@ -295,6 +295,10 @@ int nameserver_service_run(int ep_cap, uint32_t max_requests) {
         cap_count = 0;
 
         err = sys_ep_recv_caps(ep_cap, msg_buf, caps, &cap_count, 1000);
+        if (err == KERN_ERR_TIMEOUT && max_requests == 0U) {
+            err = KERN_OK;
+            continue;
+        }
         if (err != KERN_OK) {
             break;
         }

@@ -10,6 +10,12 @@
 #include "user_api.h"
 #include "task.h"
 #include "nameserver.h"
+#include "fs_proto.h"
+#include "fs_runtime.h"
+#include "supervisor.h"
+#include "inode.h"
+#include "vfs.h"
+#include <string.h>
 
 #if TEST_ENABLE && CAP_ENABLE && MPU_ENABLE
 
@@ -47,6 +53,176 @@ static void service_ipc_task(void *arg) {
 static void nameserver_ping_task(void *arg) {
     int err = nameserver_service_run((int)(uintptr_t)arg, 1);
     sys_task_exit((void *)(intptr_t)err);
+}
+
+static void test_supervisor_service_stats(void) {
+    test_section("Test 0: supervisor service stats");
+
+    supervisor_service_t svc =
+        SUPERVISOR_SERVICE_INIT(KERN_ERR_STATE);
+    TEST_ASSERT(strcmp(supervisor_service_name(&svc), "(unnamed)") == 0,
+                "supervisor unnamed service has fallback name");
+    supervisor_set_service_name(&svc, "svc.test");
+    TEST_ASSERT(strcmp(supervisor_service_name(&svc), "svc.test") == 0,
+                "supervisor service name updates");
+    TEST_ASSERT_EQ(0, (int)supervisor_restart_count(&svc),
+                   "supervisor restart count starts at zero");
+    TEST_ASSERT_EQ(0, (int)supervisor_recover_count(&svc),
+                   "supervisor recover count starts at zero");
+    TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(&svc),
+                   "supervisor pending clients start at zero");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
+                   (int)supervisor_restart_policy(&svc),
+                   "supervisor restart policy starts manual");
+    TEST_ASSERT_EQ(0, (int)supervisor_max_restarts(&svc),
+                   "supervisor max restarts starts at zero");
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE,
+                   supervisor_last_health(&svc),
+                   "supervisor initial health recorded");
+
+    supervisor_record_restart(&svc);
+    supervisor_record_recover(&svc);
+    supervisor_set_restart_policy(&svc, SUPERVISOR_RESTART_AUTO, 3);
+    supervisor_client_blocked(&svc);
+    supervisor_client_blocked(&svc);
+    supervisor_client_unblocked(&svc);
+    supervisor_set_health(&svc, KERN_OK);
+    TEST_ASSERT_EQ(1, (int)supervisor_restart_count(&svc),
+                   "supervisor restart count increments");
+    TEST_ASSERT_EQ(1, (int)supervisor_recover_count(&svc),
+                   "supervisor recover count increments");
+    TEST_ASSERT_EQ(1, (int)supervisor_pending_clients(&svc),
+                   "supervisor pending clients track blocked clients");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_AUTO,
+                   (int)supervisor_restart_policy(&svc),
+                   "supervisor restart policy updates to auto");
+    TEST_ASSERT_EQ(3, (int)supervisor_max_restarts(&svc),
+                   "supervisor max restarts updates");
+    TEST_ASSERT(strcmp(supervisor_restart_policy_name(
+                           supervisor_restart_policy(&svc)),
+                       "auto") == 0,
+                "supervisor restart policy name reports auto");
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   supervisor_last_health(&svc),
+                   "supervisor health updates");
+
+    supervisor_set_restart_policy(&svc,
+                                  (supervisor_restart_policy_t)99,
+                                  5);
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
+                   (int)supervisor_restart_policy(&svc),
+                   "supervisor invalid restart policy falls back to manual");
+    TEST_ASSERT_EQ(0, (int)supervisor_max_restarts(&svc),
+                   "supervisor invalid restart policy clears max restarts");
+
+    supervisor_set_pending_clients(&svc, 0);
+    supervisor_client_unblocked(&svc);
+    TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(&svc),
+                   "supervisor pending clients do not underflow");
+
+    supervisor_service_init(&svc, KERN_ERR_NOEXIST);
+    TEST_ASSERT(strcmp(supervisor_service_name(&svc), "(unnamed)") == 0,
+                "supervisor init clears service name");
+    TEST_ASSERT_EQ(0, (int)supervisor_restart_count(&svc),
+                   "supervisor init clears restart count");
+    TEST_ASSERT_EQ(0, (int)supervisor_recover_count(&svc),
+                   "supervisor init clears recover count");
+    TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(&svc),
+                   "supervisor init clears pending clients");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
+                   (int)supervisor_restart_policy(&svc),
+                   "supervisor init resets restart policy");
+    TEST_ASSERT_EQ(0, (int)supervisor_max_restarts(&svc),
+                   "supervisor init clears max restarts");
+    TEST_ASSERT_EQ((int)KERN_ERR_NOEXIST,
+                   supervisor_last_health(&svc),
+                   "supervisor init resets health");
+
+    supervisor_record_restart(NULL);
+    supervisor_record_recover(NULL);
+    supervisor_set_pending_clients(NULL, 1);
+    supervisor_client_blocked(NULL);
+    supervisor_client_unblocked(NULL);
+    supervisor_set_health(NULL, KERN_OK);
+    TEST_ASSERT_EQ(0, (int)supervisor_restart_count(NULL),
+                   "supervisor NULL restart count safe");
+    TEST_ASSERT_EQ(0, (int)supervisor_recover_count(NULL),
+                   "supervisor NULL recover count safe");
+    TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(NULL),
+                   "supervisor NULL pending clients safe");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
+                   (int)supervisor_restart_policy(NULL),
+                   "supervisor NULL restart policy safe");
+    TEST_ASSERT_EQ(0, (int)supervisor_max_restarts(NULL),
+                   "supervisor NULL max restarts safe");
+    TEST_ASSERT(strcmp(supervisor_service_name(NULL), "(unnamed)") == 0,
+                "supervisor NULL service name safe");
+    TEST_ASSERT(strcmp(supervisor_restart_policy_name(
+                           SUPERVISOR_RESTART_MANUAL),
+                       "manual") == 0,
+                "supervisor restart policy name reports manual");
+    supervisor_restart_policy_t parsed_policy = SUPERVISOR_RESTART_MANUAL;
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   supervisor_parse_restart_policy("auto", &parsed_policy),
+                   "supervisor parses auto restart policy");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_AUTO,
+                   (int)parsed_policy,
+                   "supervisor parsed auto restart policy value");
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   supervisor_parse_restart_policy("manual", &parsed_policy),
+                   "supervisor parses manual restart policy");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
+                   (int)parsed_policy,
+                   "supervisor parsed manual restart policy value");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   supervisor_parse_restart_policy("bad", &parsed_policy),
+                   "supervisor rejects invalid restart policy string");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   supervisor_parse_restart_policy(NULL, &parsed_policy),
+                   "supervisor rejects NULL restart policy string");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   supervisor_parse_restart_policy("auto", NULL),
+                   "supervisor rejects NULL restart policy output");
+
+    supervisor_service_init_named(&svc, "svc.named", KERN_ERR_STATE);
+    TEST_ASSERT(strcmp(supervisor_service_name(&svc), "svc.named") == 0,
+                "supervisor named init records service name");
+
+    supervisor_registry_init();
+    TEST_ASSERT_EQ(0, (int)supervisor_service_count(),
+                   "supervisor registry starts empty");
+
+    supervisor_service_t *a =
+        supervisor_register_service("svc.a", KERN_ERR_STATE);
+    supervisor_service_t *b =
+        supervisor_register_service("svc.b", KERN_ERR_NOEXIST);
+    TEST_ASSERT(a != NULL, "supervisor registry registers first service");
+    TEST_ASSERT(b != NULL, "supervisor registry registers second service");
+    TEST_ASSERT_EQ(2, (int)supervisor_service_count(),
+                   "supervisor registry counts services");
+    TEST_ASSERT(supervisor_find_service("svc.a") == a,
+                "supervisor registry finds service by name");
+    TEST_ASSERT(supervisor_register_service("svc.a", KERN_OK) == a,
+                "supervisor registry duplicate returns existing service");
+    TEST_ASSERT_EQ(2, (int)supervisor_service_count(),
+                   "supervisor registry duplicate does not allocate");
+    TEST_ASSERT(supervisor_service_at(0) == a,
+                "supervisor registry iterates first service");
+    TEST_ASSERT(supervisor_service_at(1) == b,
+                "supervisor registry iterates second service");
+    TEST_ASSERT(supervisor_service_at(2) == NULL,
+                "supervisor registry iteration stops at count");
+
+    TEST_ASSERT(supervisor_register_service("svc.c", KERN_ERR_STATE) != NULL,
+                "supervisor registry registers third service");
+    TEST_ASSERT(supervisor_register_service("svc.d", KERN_ERR_STATE) != NULL,
+                "supervisor registry registers fourth service");
+    TEST_ASSERT(supervisor_register_service("svc.e", KERN_ERR_STATE) == NULL,
+                "supervisor registry reports full table");
+    TEST_ASSERT(supervisor_register_service(NULL, KERN_ERR_STATE) == NULL,
+                "supervisor registry rejects NULL service name");
+
+    supervisor_registry_init();
 }
 
 static void nameserver_register_once_task(void *arg) {
@@ -88,6 +264,423 @@ static void nameserver_registry_full_task(void *arg) {
 static void nameserver_owner_task(void *arg) {
     int err = nameserver_service_run((int)(uintptr_t)arg, 3);
     sys_task_exit((void *)(intptr_t)err);
+}
+
+static void nameserver_fs_runtime_task(void *arg) {
+    int err = nameserver_service_run((int)(uintptr_t)arg, 5);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void fs_service_session_task(void *arg) {
+    int err = fs_server_run((int)(uintptr_t)arg, 19);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void fs_service_negative_task(void *arg) {
+    int err = fs_server_run((int)(uintptr_t)arg, 8);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void fs_client_session_task(void *arg) {
+    int fs_ep_cap = (int)(uintptr_t)arg;
+    char buf[FS_PAYLOAD_MAX];
+    const char payload[] = "fs-ok";
+    dirent_t entry;
+    int fd;
+    int err;
+
+    if (fs_ep_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = fs_ping(fs_ep_cap, 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    fd = fs_open(fs_ep_cap, "/tmp/fssvc",
+                 O_RDWR | O_CREAT | O_TRUNC, 1000);
+    if (fd <= 0) {
+        sys_task_exit((void *)(intptr_t)fd);
+    }
+
+    err = fs_write(fs_ep_cap, fd, payload,
+                   (uint32_t)(sizeof(payload) - 1U), 1000);
+    if (err != (int)(sizeof(payload) - 1U)) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    err = fs_lseek(fs_ep_cap, fd, 0, SEEK_SET, 1000);
+    if (err != 0) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    for (uint32_t i = 0; i < sizeof(buf); i++) {
+        buf[i] = 0;
+    }
+    err = fs_read(fs_ep_cap, fd, buf,
+                  (uint32_t)(sizeof(payload) - 1U), 1000);
+    if (err != (int)(sizeof(payload) - 1U)) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+    for (uint32_t i = 0; i < sizeof(payload) - 1U; i++) {
+        if (buf[i] != payload[i]) {
+            (void)fs_close(fs_ep_cap, fd, 1000);
+            sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+        }
+    }
+
+    err = fs_close(fs_ep_cap, fd, 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    vfs_stat_t st;
+    err = fs_stat(fs_ep_cap, "/tmp/fssvc", &st, 1000);
+    if (err != KERN_OK || st.type != INODE_TYPE_FILE ||
+        st.size != (uint32_t)(sizeof(payload) - 1U)) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    err = fs_unlink(fs_ep_cap, "/tmp/fssvc", 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    fd = fs_open(fs_ep_cap, "/tmp/fssvc", O_RDONLY, 1000);
+    if (fd != KERN_ERR_NOEXIST) {
+        if (fd > 0) {
+            (void)fs_close(fs_ep_cap, fd, 1000);
+        }
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    err = fs_mkdir(fs_ep_cap, "/tmp/fsdir", 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    err = fs_stat(fs_ep_cap, "/tmp/fsdir", &st, 1000);
+    if (err != KERN_OK || st.type != INODE_TYPE_DIR) {
+        (void)fs_unlink(fs_ep_cap, "/tmp/fsdir", 1000);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    fd = fs_open(fs_ep_cap, "/tmp/fsdir", O_RDONLY, 1000);
+    if (fd <= 0) {
+        (void)fs_unlink(fs_ep_cap, "/tmp/fsdir", 1000);
+        sys_task_exit((void *)(intptr_t)fd);
+    }
+
+    err = fs_readdir(fs_ep_cap, fd, &entry, 1000);
+    if (err != KERN_OK) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        (void)fs_unlink(fs_ep_cap, "/tmp/fsdir", 1000);
+        sys_task_exit((void *)(intptr_t)err);
+    }
+    if (entry.name[0] != '.' || entry.name[1] != '\0' ||
+        entry.type != INODE_TYPE_DIR) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        (void)fs_unlink(fs_ep_cap, "/tmp/fsdir", 1000);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    err = fs_close(fs_ep_cap, fd, 1000);
+    if (err != KERN_OK) {
+        (void)fs_unlink(fs_ep_cap, "/tmp/fsdir", 1000);
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    err = fs_unlink(fs_ep_cap, "/tmp/fsdir", 1000);
+    if (err != KERN_OK) {
+        sys_task_exit((void *)(intptr_t)err);
+    }
+
+    fd = fs_open(fs_ep_cap, "/tmp/fsdir", O_RDONLY, 1000);
+    if (fd != KERN_ERR_NOEXIST) {
+        if (fd > 0) {
+            (void)fs_close(fs_ep_cap, fd, 1000);
+        }
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    fd = fs_open(fs_ep_cap, "/tmp", O_RDONLY, 1000);
+    if (fd <= 0) {
+        sys_task_exit((void *)(intptr_t)fd);
+    }
+
+    err = fs_readdir(fs_ep_cap, fd, &entry, 1000);
+    if (err != KERN_OK) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        sys_task_exit((void *)(intptr_t)err);
+    }
+    if (entry.name[0] != '.' || entry.name[1] != '\0' ||
+        entry.type != INODE_TYPE_DIR) {
+        (void)fs_close(fs_ep_cap, fd, 1000);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    err = fs_close(fs_ep_cap, fd, 1000);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static kern_err_t service_model_tmp_unlink(const char *name) {
+    inode_t *tmp = vfs_lookup("/tmp");
+    if (tmp == NULL) {
+        return KERN_ERR_NOEXIST;
+    }
+
+    kern_err_t err = KERN_ERR_NOEXIST;
+    if (tmp->dir_ops != NULL && tmp->dir_ops->unlink != NULL) {
+        err = tmp->dir_ops->unlink(tmp, name);
+    }
+    inode_put(tmp);
+    return err;
+}
+
+static void fs_test_copy_path(fs_msg_t *msg, const char *path) {
+    for (uint32_t i = 0; i < FS_PATH_MAX; i++) {
+        msg->path[i] = path[i];
+        if (path[i] == '\0') {
+            return;
+        }
+    }
+    msg->path[FS_PATH_MAX - 1U] = '\0';
+}
+
+static void fs_test_send_expect(ep_id_t ep,
+                                fs_msg_t *msg,
+                                int expected_status,
+                                const char *label) {
+    kern_err_t err = endpoint_send(ep, msg, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, label);
+    TEST_ASSERT_EQ(expected_status, (int)msg->status, label);
+}
+
+static void test_fs_runtime_state_helpers(void) {
+    test_section("Test 22: FS runtime state helpers");
+
+    fs_runtime_clear_name_server();
+    fs_runtime_clear_inbox();
+
+    TEST_ASSERT(!fs_runtime_name_server_bound(),
+                "FS runtime reports name-server unbound");
+    TEST_ASSERT_EQ((int)KERN_INVALID_ID,
+                   (int)fs_runtime_name_server_cap(),
+                   "FS runtime clears name-server cap");
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE,
+                   fs_runtime_name_server_status(0),
+                   "FS runtime reports unbound name-server");
+    TEST_ASSERT(!fs_runtime_inbox_bound(),
+                "FS runtime reports inbox unbound");
+    TEST_ASSERT_EQ((int)KERN_INVALID_ID,
+                   (int)fs_runtime_inbox_cap(),
+                   "FS runtime clears inbox cap");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   fs_runtime_bind_name_server(0),
+                   "FS runtime rejects bad name-server cap");
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   fs_runtime_bind_owned_inbox(0),
+                   "FS runtime rejects bad inbox cap");
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE,
+                   fs_runtime_release_service(0),
+                   "FS runtime release reports missing inbox");
+
+    const char *ready_reason = NULL;
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE,
+                   fs_runtime_lookup_ready(0, &ready_reason),
+                   "FS runtime lookup ready rejects missing name-server");
+    TEST_ASSERT(ready_reason != NULL &&
+                strcmp(ready_reason, "name-server") == 0,
+                "FS runtime lookup ready reports missing name-server");
+
+    cap_id_t service_cap = 123;
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   fs_runtime_lookup_service(NULL, &service_cap, 0),
+                   "FS runtime lookup rejects NULL name");
+    TEST_ASSERT_EQ((int)KERN_INVALID_ID, (int)service_cap,
+                   "FS runtime clears output on NULL name");
+    service_cap = 123;
+    TEST_ASSERT_EQ((int)KERN_ERR_PARAM,
+                   fs_runtime_lookup_service("fs.ramfs", NULL, 0),
+                   "FS runtime lookup rejects NULL output");
+    TEST_ASSERT_EQ(123, (int)service_cap,
+                   "FS runtime leaves caller variable untouched on NULL output");
+
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   fs_runtime_bind_name_server(123),
+                   "FS runtime records name-server cap");
+    TEST_ASSERT(fs_runtime_name_server_bound(),
+                "FS runtime reports bound name-server");
+    TEST_ASSERT_EQ(123, (int)fs_runtime_name_server_cap(),
+                   "FS runtime returns name-server cap");
+    TEST_ASSERT(fs_runtime_name_server_status(0) != KERN_OK,
+                "FS runtime bad name-server cap reports non-OK");
+    ready_reason = NULL;
+    TEST_ASSERT(fs_runtime_lookup_ready(0, &ready_reason) != KERN_OK,
+                "FS runtime lookup ready rejects bad name-server cap");
+    TEST_ASSERT(ready_reason != NULL &&
+                strcmp(ready_reason, "name-server") == 0,
+                "FS runtime lookup ready reports bad name-server");
+    service_cap = 123;
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE,
+                   fs_runtime_lookup_service("fs.ramfs", &service_cap, 0),
+                   "FS runtime lookup reports missing inbox");
+    TEST_ASSERT_EQ((int)KERN_INVALID_ID, (int)service_cap,
+                   "FS runtime clears output on missing inbox");
+
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   fs_runtime_bind_owned_inbox(456),
+                   "FS runtime records inbox cap");
+    TEST_ASSERT(fs_runtime_inbox_bound(),
+                "FS runtime reports inbox bound");
+    TEST_ASSERT_EQ(456, (int)fs_runtime_inbox_cap(),
+                   "FS runtime returns inbox cap");
+    ready_reason = NULL;
+    TEST_ASSERT(fs_runtime_lookup_ready(0, &ready_reason) != KERN_OK,
+                "FS runtime lookup ready still rejects bad name-server cap");
+    TEST_ASSERT(ready_reason != NULL &&
+                strcmp(ready_reason, "name-server") == 0,
+                "FS runtime lookup ready keeps name-server blocker first");
+    fs_runtime_clear_inbox();
+    TEST_ASSERT(!fs_runtime_inbox_bound(),
+                "FS runtime clears inbox");
+    fs_runtime_clear_name_server();
+    TEST_ASSERT(!fs_runtime_name_server_bound(),
+                "FS runtime clears name-server");
+}
+
+static void test_fs_runtime_lookup_release_caps(void) {
+    test_section("Test 23: FS runtime lookup release restores caps");
+
+    fs_runtime_clear_name_server();
+    fs_runtime_clear_inbox();
+
+    uint16_t cap_free_before = cap_free_count();
+    ep_id_t ns_ep = endpoint_create("fs_rt_ns", KERN_EP_MSG_SIZE, 4);
+    TEST_ASSERT(ns_ep >= 0, "FS runtime name-server endpoint created");
+
+    task_id_t ns_id = KERN_INVALID_ID;
+    cap_id_t ns_service_cap = KERN_INVALID_ID;
+    cap_id_t ns_root_cap = KERN_INVALID_ID;
+    if (ns_ep >= 0) {
+        ns_id = task_create_user("fs_rt_ns", nameserver_fs_runtime_task,
+                                 NULL, 13, 1536);
+        TEST_ASSERT(ns_id >= 0, "FS runtime name-server task created");
+    }
+
+    tcb_t *ns_tcb = task_get_tcb(ns_id);
+    if (ns_tcb != NULL) {
+        ns_service_cap = cap_create_for(ns_tcb,
+                                        (void *)(uintptr_t)(ns_ep + 1),
+                                        CAP_OBJ_ENDPOINT,
+                                        CAP_READ | CAP_WRITE);
+    }
+    if (ns_ep >= 0) {
+        ns_root_cap = cap_create((void *)(uintptr_t)(ns_ep + 1),
+                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    }
+    TEST_ASSERT(ns_service_cap >= 0,
+                "FS runtime name-server receives endpoint cap");
+    TEST_ASSERT(ns_root_cap >= 0,
+                "FS runtime root receives name-server cap");
+
+    kern_err_t err = KERN_ERR_STATE;
+    if (ns_id >= 0 && ns_service_cap >= 0 && ns_tcb != NULL &&
+        ns_tcb->sp != NULL) {
+        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)ns_tcb->sp + 32U);
+        *stacked_r0 = (uint32_t)ns_service_cap;
+        err = task_start(ns_id);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "FS runtime name-server task started");
+
+    ep_id_t service_ep = endpoint_create("fs_rt_svc", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(service_ep >= 0, "FS runtime service endpoint created");
+    cap_id_t service_cap = KERN_INVALID_ID;
+    if (service_ep >= 0) {
+        service_cap = cap_create((void *)(uintptr_t)(service_ep + 1),
+                                 CAP_OBJ_ENDPOINT,
+                                 CAP_READ | CAP_WRITE | CAP_TRANSFER, 0);
+    }
+    TEST_ASSERT(service_cap >= 0, "FS runtime service cap created");
+
+    if (ns_root_cap >= 0 && service_cap >= 0) {
+        err = nameserver_register(ns_root_cap, "fs.ramfs", service_cap,
+                                  0x46530001U, 1000);
+    }
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "FS runtime service registered");
+
+    ep_id_t inbox_ep = endpoint_create("fs_rt_inbox", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(inbox_ep >= 0, "FS runtime inbox endpoint created");
+    cap_id_t inbox_cap = KERN_INVALID_ID;
+    if (inbox_ep >= 0) {
+        inbox_cap = cap_create((void *)(uintptr_t)(inbox_ep + 1),
+                               CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    }
+    TEST_ASSERT(inbox_cap >= 0, "FS runtime inbox cap created");
+
+    if (ns_root_cap >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK,
+                       fs_runtime_bind_name_server(ns_root_cap),
+                       "FS runtime binds name-server cap for leak test");
+    }
+    if (inbox_cap >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK,
+                       fs_runtime_bind_owned_inbox(inbox_cap),
+                       "FS runtime binds inbox cap for leak test");
+    }
+
+    uint16_t cap_free_before_lookups = cap_free_count();
+    for (uint32_t i = 0; i < 4U; i++) {
+        cap_id_t lookup_cap = KERN_INVALID_ID;
+        err = fs_runtime_lookup_service("fs.ramfs", &lookup_cap, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS runtime lookup returns service cap");
+        TEST_ASSERT(lookup_cap > 0, "FS runtime lookup cap valid");
+        TEST_ASSERT(cap_free_count() < cap_free_before_lookups,
+                    "FS runtime lookup consumes temporary caps");
+        TEST_ASSERT_EQ((int)KERN_OK,
+                       fs_runtime_release_service(lookup_cap),
+                       "FS runtime release service OK");
+        for (uint32_t wait = 0;
+             wait < 4U && cap_free_count() != cap_free_before_lookups;
+             wait++) {
+            task_delay(1);
+        }
+        TEST_ASSERT(cap_free_count() >= cap_free_before_lookups,
+                    "FS runtime release restores temporary cap");
+    }
+
+    void *retval = NULL;
+    if (ns_id >= 0) {
+        err = task_join(ns_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS runtime name-server joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "FS runtime name-server retval OK");
+    }
+
+    fs_runtime_clear_inbox();
+    fs_runtime_clear_name_server();
+    if (ns_id >= 0 && task_get_state(ns_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(ns_id);
+    }
+    if (inbox_ep >= 0) {
+        (void)endpoint_delete(inbox_ep);
+    }
+    if (service_ep >= 0) {
+        (void)endpoint_delete(service_ep);
+    }
+    if (ns_ep >= 0) {
+        (void)endpoint_delete(ns_ep);
+    }
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "FS runtime lookup release cleanup restored caps");
 }
 
 static void nameserver_register_client_task(void *arg) {
@@ -2356,10 +2949,243 @@ static void test_nameserver_unregister_owner_service(void) {
                    "owner unregister cleanup restored caps");
 }
 
+static void test_fs_server_basic_session(void) {
+    test_section("Test 24: FS server basic read/write/readdir session");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_fs", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "FS server test creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    (void)service_model_tmp_unlink("fssvc");
+
+    ep_id_t fs_ep = endpoint_create("fs_svc", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(fs_ep >= 0, "FS server endpoint created");
+
+    task_id_t fs_id = KERN_INVALID_ID;
+    task_id_t client_id = KERN_INVALID_ID;
+    cap_id_t fs_service_cap = KERN_INVALID_ID;
+    cap_id_t client_fs_cap = KERN_INVALID_ID;
+
+    if (fs_ep >= 0) {
+        fs_id = task_create_user("fs_svc",
+                                 fs_service_session_task,
+                                 NULL, 13, 1536);
+        client_id = task_create_user("fs_client",
+                                     fs_client_session_task,
+                                     NULL, 14, 1024);
+    }
+    TEST_ASSERT(fs_id >= 0, "FS server task created");
+    TEST_ASSERT(client_id >= 0, "FS client task created");
+
+    tcb_t *fs_tcb = task_get_tcb(fs_id);
+    if (fs_tcb != NULL) {
+        fs_service_cap = cap_create_for(fs_tcb,
+                                        (void *)(uintptr_t)(fs_ep + 1),
+                                        CAP_OBJ_ENDPOINT,
+                                        CAP_READ | CAP_WRITE);
+    }
+    tcb_t *client_tcb = task_get_tcb(client_id);
+    if (client_tcb != NULL) {
+        client_fs_cap = cap_create_for(client_tcb,
+                                       (void *)(uintptr_t)(fs_ep + 1),
+                                       CAP_OBJ_ENDPOINT,
+                                       CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(fs_service_cap >= 0, "FS server receives endpoint cap");
+    TEST_ASSERT(client_fs_cap >= 0, "FS client receives endpoint cap");
+
+    if (fs_id >= 0 && fs_service_cap >= 0 && fs_tcb != NULL &&
+        fs_tcb->sp != NULL) {
+        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)fs_tcb->sp + 32U);
+        *stacked_r0 = (uint32_t)fs_service_cap;
+        err = task_start(fs_id);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS server task started");
+    }
+
+    if (client_id >= 0 && client_fs_cap >= 0 && client_tcb != NULL &&
+        client_tcb->sp != NULL) {
+        uint32_t *stacked_r0 =
+            (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
+        *stacked_r0 = (uint32_t)client_fs_cap;
+        err = task_start(client_id);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS client task started");
+    }
+
+    void *retval = NULL;
+    if (client_id >= 0) {
+        err = task_join(client_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS client task joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "FS client session retval OK");
+    }
+
+    retval = NULL;
+    if (fs_id >= 0) {
+        err = task_join(fs_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS server task joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "FS server session retval OK");
+    }
+
+    if (client_id >= 0 &&
+        task_get_state(client_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(client_id);
+    }
+    if (fs_id >= 0 && task_get_state(fs_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(fs_id);
+    }
+    if (fs_ep >= 0) {
+        (void)endpoint_delete(fs_ep);
+    }
+    err = service_model_tmp_unlink("fssvc");
+    TEST_ASSERT(err == KERN_OK || err == KERN_ERR_NOEXIST,
+                "FS server test file removed");
+    err = service_model_tmp_unlink("fsdir");
+    TEST_ASSERT(err == KERN_OK || err == KERN_ERR_NOEXIST,
+                "FS server test directory removed");
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "FS server root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "FS server cleanup restored caps");
+}
+
+static void test_fs_server_negative_protocol(void) {
+    test_section("Test 25: FS server protocol and error paths");
+
+    root_bootstrap_init();
+
+    task_id_t root_id = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create("root_fsneg", root_dummy_task,
+                                           NULL, 12, 512, &root_id);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "FS negative test creates root");
+    if (err != KERN_OK || root_id < 0) {
+        return;
+    }
+
+    uint16_t cap_free_after_root = cap_free_count();
+    ep_id_t fs_ep = endpoint_create("fs_neg", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(fs_ep >= 0, "FS negative endpoint created");
+
+    task_id_t fs_id = KERN_INVALID_ID;
+    cap_id_t fs_service_cap = KERN_INVALID_ID;
+    if (fs_ep >= 0) {
+        fs_id = task_create_user("fs_neg",
+                                 fs_service_negative_task,
+                                 NULL, 13, 1536);
+    }
+    TEST_ASSERT(fs_id >= 0, "FS negative server task created");
+
+    tcb_t *fs_tcb = task_get_tcb(fs_id);
+    if (fs_tcb != NULL) {
+        fs_service_cap = cap_create_for(fs_tcb,
+                                        (void *)(uintptr_t)(fs_ep + 1),
+                                        CAP_OBJ_ENDPOINT,
+                                        CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(fs_service_cap >= 0,
+                "FS negative server receives endpoint cap");
+
+    if (fs_id >= 0 && fs_service_cap >= 0 && fs_tcb != NULL &&
+        fs_tcb->sp != NULL) {
+        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)fs_tcb->sp + 32U);
+        *stacked_r0 = (uint32_t)fs_service_cap;
+        err = task_start(fs_id);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS negative server task started");
+    }
+
+    fs_msg_t msg;
+    fs_msg_init(&msg, FS_OP_PING, 1);
+    msg.magic = 0x12345678U;
+    fs_test_send_expect(fs_ep, &msg, KERN_ERR_PARAM,
+                        "FS rejects bad magic");
+
+    fs_msg_init(&msg, 0xffffU, 2);
+    fs_test_send_expect(fs_ep, &msg, KERN_ERR_PARAM,
+                        "FS rejects bad opcode");
+
+    fs_msg_init(&msg, FS_OP_OPEN, 3);
+    msg.flags = O_RDONLY;
+    for (uint32_t i = 0; i < FS_PATH_MAX; i++) {
+        msg.path[i] = 'x';
+    }
+    fs_test_send_expect(fs_ep, &msg, KERN_ERR_PARAM,
+                        "FS rejects unterminated path");
+
+    fs_msg_init(&msg, FS_OP_OPEN, 4);
+    msg.flags = O_RDONLY;
+    fs_test_copy_path(&msg, "/tmp");
+    fs_test_send_expect(fs_ep, &msg, KERN_OK,
+                        "FS opens directory for negative checks");
+    int dir_fd = msg.result;
+    TEST_ASSERT(dir_fd > 0, "FS directory fd token valid");
+
+    fs_msg_init(&msg, FS_OP_READ, 5);
+    msg.fd = dir_fd;
+    msg.length = FS_PAYLOAD_MAX;
+    fs_test_send_expect(fs_ep, &msg, KERN_ERR_ISDIR,
+                        "FS rejects read from directory");
+
+    fs_msg_init(&msg, FS_OP_READ, 6);
+    msg.fd = 99;
+    msg.length = 1;
+    fs_test_send_expect(fs_ep, &msg, KERN_ERR_PARAM,
+                        "FS rejects bad fd token");
+
+    fs_msg_init(&msg, FS_OP_READ, 7);
+    msg.fd = dir_fd;
+    msg.length = FS_PAYLOAD_MAX + 1U;
+    fs_test_send_expect(fs_ep, &msg, KERN_ERR_PARAM,
+                        "FS rejects oversized read");
+
+    fs_msg_init(&msg, FS_OP_CLOSE, 8);
+    msg.fd = dir_fd;
+    fs_test_send_expect(fs_ep, &msg, KERN_OK,
+                        "FS closes directory fd after negative checks");
+
+    void *retval = NULL;
+    if (fs_id >= 0) {
+        err = task_join(fs_id, &retval, 1000);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                       "FS negative server task joined");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "FS negative server retval OK");
+    }
+
+    if (fs_id >= 0 && task_get_state(fs_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(fs_id);
+    }
+    if (fs_ep >= 0) {
+        (void)endpoint_delete(fs_ep);
+    }
+    if (root_id >= 0) {
+        TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
+                       "FS negative root deleted");
+    }
+    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+                   "FS negative cleanup restored caps");
+}
+
 #endif
 
 void test_service_model_module(void) {
 #if TEST_ENABLE && CAP_ENABLE && MPU_ENABLE
+    test_supervisor_service_stats();
     test_root_bootstrap_rejects_invalid_tasks();
     test_root_bootstrap_initial_task_cap();
     test_root_bootstrap_create_validation();
@@ -2379,6 +3205,10 @@ void test_service_model_module(void) {
     test_nameserver_cap_recycle_service();
     test_nameserver_registry_full_service();
     test_nameserver_unregister_owner_service();
+    test_fs_runtime_state_helpers();
+    test_fs_runtime_lookup_release_caps();
+    test_fs_server_basic_session();
+    test_fs_server_negative_protocol();
 #else
     test_print("Service model tests disabled\r\n");
 #endif

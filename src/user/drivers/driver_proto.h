@@ -21,6 +21,7 @@
 #define DRV_OP_IOCTL          6U
 #define DRV_OP_POLL           7U
 #define DRV_OP_ATTACH         8U
+#define DRV_OP_DETACH         9U
 
 #define DRV_FLAG_NONE         0U
 
@@ -31,12 +32,20 @@
 
 #define DRV_IOCTL_GET_EVENTS    1U
 #define DRV_IOCTL_GET_RESOURCES 2U
+#define DRV_IOCTL_GET_STATUS    3U
+#define DRV_IOCTL_CLEAR_STATUS  4U
 
 #define DRV_RESOURCE_MMIO     1U
 #define DRV_RESOURCE_IRQ      2U
 
 #define DRV_RESOURCE_BIT_MMIO (1U << 0)
 #define DRV_RESOURCE_BIT_IRQ  (1U << 1)
+
+#define DRV_STATUS_OPEN        (1U << 0)
+#define DRV_STATUS_MMIO_READY  (1U << 1)
+#define DRV_STATUS_IRQ_BOUND   (1U << 2)
+#define DRV_STATUS_IRQ_PENDING (1U << 3)
+#define DRV_STATUS_ERROR       (1U << 4)
 
 typedef struct {
     uint32_t magic;
@@ -64,9 +73,13 @@ int driver_ioctl(int ep_cap, uint32_t command, uint32_t *out_value,
 int driver_get_events(int ep_cap, uint32_t *out_events, uint32_t timeout);
 int driver_get_resources(int ep_cap, uint32_t *out_resources,
                          uint32_t timeout);
+int driver_get_status(int ep_cap, uint32_t *out_status, uint32_t timeout);
+int driver_clear_status(int ep_cap, uint32_t timeout);
 int driver_attach_resource(int ep_cap, uint32_t resource_type,
                            cap_id_t resource_cap, uint32_t timeout);
 int driver_attach_cap(int ep_cap, cap_id_t resource_cap, uint32_t timeout);
+int driver_detach_resource(int ep_cap, uint32_t resource_type,
+                           uint32_t timeout);
 
 int uart_server_run(int ep_cap, uint32_t max_requests);
 

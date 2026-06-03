@@ -735,6 +735,115 @@ kern_err_t vfs_rewinddir(int fd) {
 #endif
 }
 
+kern_err_t vfs_unlink(const char *path) {
+    char norm[VFS_PATH_MAX];
+    char parent_path[VFS_PATH_MAX];
+    char name[INODE_NAME_LEN];
+
+    kern_err_t err = vfs_normalize_path(path, norm, sizeof(norm));
+    if (err != KERN_OK) {
+        return err;
+    }
+    if (strcmp(norm, "/") == 0) {
+        return KERN_ERR_PERM;
+    }
+
+    if (vfs_split_path(norm, parent_path, sizeof(parent_path),
+                       name, sizeof(name)) < 0 || name[0] == '\0') {
+        return KERN_ERR_PARAM;
+    }
+    if ((name[0] == '.' && name[1] == '\0') ||
+        (name[0] == '.' && name[1] == '.' && name[2] == '\0')) {
+        return KERN_ERR_PERM;
+    }
+
+    for (int i = 0; i < MOUNT_MAX; i++) {
+        if (mount_table[i].in_use && strcmp(mount_table[i].path, norm) == 0) {
+            return KERN_ERR_BUSY;
+        }
+    }
+
+    inode_t *parent = vfs_lookup(parent_path);
+    if (parent == NULL) {
+        return KERN_ERR_NOEXIST;
+    }
+    if (parent->type != INODE_TYPE_DIR) {
+        inode_put(parent);
+        return KERN_ERR_NOTDIR;
+    }
+    if (parent->dir_ops == NULL || parent->dir_ops->unlink == NULL) {
+        inode_put(parent);
+        return KERN_ERR_PERM;
+    }
+
+    err = parent->dir_ops->unlink(parent, name);
+    inode_put(parent);
+    return err;
+}
+
+kern_err_t vfs_mkdir(const char *path) {
+    char norm[VFS_PATH_MAX];
+    char parent_path[VFS_PATH_MAX];
+    char name[INODE_NAME_LEN];
+
+    kern_err_t err = vfs_normalize_path(path, norm, sizeof(norm));
+    if (err != KERN_OK) {
+        return err;
+    }
+    if (strcmp(norm, "/") == 0) {
+        return KERN_ERR_BUSY;
+    }
+
+    inode_t *existing = vfs_lookup(norm);
+    if (existing != NULL) {
+        inode_put(existing);
+        return KERN_ERR_BUSY;
+    }
+
+    if (vfs_split_path(norm, parent_path, sizeof(parent_path),
+                       name, sizeof(name)) < 0 || name[0] == '\0') {
+        return KERN_ERR_PARAM;
+    }
+    if ((name[0] == '.' && name[1] == '\0') ||
+        (name[0] == '.' && name[1] == '.' && name[2] == '\0')) {
+        return KERN_ERR_PERM;
+    }
+
+    inode_t *parent = vfs_lookup(parent_path);
+    if (parent == NULL) {
+        return KERN_ERR_NOEXIST;
+    }
+    if (parent->type != INODE_TYPE_DIR) {
+        inode_put(parent);
+        return KERN_ERR_NOTDIR;
+    }
+    if (parent->dir_ops == NULL || parent->dir_ops->create == NULL) {
+        inode_put(parent);
+        return KERN_ERR_PERM;
+    }
+
+    err = parent->dir_ops->create(parent, name, INODE_TYPE_DIR);
+    inode_put(parent);
+    return err;
+}
+
+kern_err_t vfs_stat(const char *path, vfs_stat_t *st) {
+    if (st == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    inode_t *inode = vfs_lookup(path);
+    if (inode == NULL) {
+        return KERN_ERR_NOEXIST;
+    }
+
+    st->ino = inode->ino;
+    st->size = inode->size;
+    st->type = (uint8_t)inode->type;
+    inode_put(inode);
+    return KERN_OK;
+}
+
 /*============================================================================
  * 挂载
  *============================================================================*/

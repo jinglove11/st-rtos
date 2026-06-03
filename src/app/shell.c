@@ -13,6 +13,17 @@
 #include "hal.h"
 #include "fault.h"
 #include "device.h"
+#include "endpoint.h"
+#include "capability.h"
+#include "task.h"
+#include "nameserver.h"
+#include "driver_proto.h"
+#include "driver_registry.h"
+#include "driver_client.h"
+#include "driver_runtime.h"
+#include "fs_proto.h"
+#include "fs_runtime.h"
+#include "supervisor.h"
 #include <string.h>
 
 #if TRACE_ENABLE
@@ -878,6 +889,2514 @@ static void cmd_dev(int argc, char **argv) {
 #endif /* DRIVER_ENABLE */
 
 /*============================================================================
+ * 内置命令: driver
+ *============================================================================*/
+
+#if DRIVER_ENABLE
+
+#define DRIVER_SHELL_PROBE_TIMEOUT 100U
+#define DRIVER_SHELL_SERVICE_NAME  "dev.uart0"
+
+static task_id_t shell_driver_ns_task = KERN_INVALID_ID;
+static ep_id_t shell_driver_ns_ep = KERN_INVALID_ID;
+static cap_id_t shell_driver_ns_cap = KERN_INVALID_ID;
+static task_id_t shell_driver_uart_task = KERN_INVALID_ID;
+static ep_id_t shell_driver_uart_ep = KERN_INVALID_ID;
+static cap_id_t shell_driver_uart_cap = KERN_INVALID_ID;
+static supervisor_service_t *shell_driver_supervisor;
+
+static supervisor_service_t *shell_driver_supervisor_get(void) {
+    if (shell_driver_supervisor == NULL) {
+        shell_driver_supervisor =
+            supervisor_register_service(DRIVER_SHELL_SERVICE_NAME,
+                                        KERN_ERR_STATE);
+    }
+    return shell_driver_supervisor;
+}
+
+static void shell_driver_nameserver_task(void *arg) {
+    (void)nameserver_service_run((int)(uintptr_t)arg, 0);
+}
+
+static void shell_driver_uart_task_entry(void *arg) {
+    (void)uart_server_run((int)(uintptr_t)arg, 0);
+}
+
+static void shell_put_flag(uint32_t value, uint32_t flag,
+                           const char *name, int *first) {
+    if ((value & flag) == 0U) {
+        return;
+    }
+    if (!*first) {
+        sh_putc('|');
+    }
+    sh_puts(name);
+    *first = 0;
+}
+
+static void shell_put_driver_ops(uint32_t ops) {
+    int first = 1;
+    uint32_t bits[] = {
+        DRIVER_OP_BIT_PING,
+        DRIVER_OP_BIT_OPEN,
+        DRIVER_OP_BIT_CLOSE,
+        DRIVER_OP_BIT_READ,
+        DRIVER_OP_BIT_WRITE,
+        DRIVER_OP_BIT_IOCTL,
+        DRIVER_OP_BIT_POLL,
+        DRIVER_OP_BIT_ATTACH,
+        DRIVER_OP_BIT_DETACH,
+    };
+
+    for (uint32_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        const char *name = driver_op_bit_name(bits[i]);
+        if (name != NULL) {
+            shell_put_flag(ops, bits[i], name, &first);
+        }
+    }
+    if (first) {
+        sh_puts("none");
+    }
+}
+
+static void shell_put_driver_ioctls(uint32_t ioctls) {
+    int first = 1;
+    uint32_t bits[] = {
+        DRIVER_IOCTL_BIT_GET_EVENTS,
+        DRIVER_IOCTL_BIT_GET_RESOURCES,
+        DRIVER_IOCTL_BIT_GET_STATUS,
+        DRIVER_IOCTL_BIT_CLEAR_STATUS,
+    };
+
+    for (uint32_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        const char *name = driver_ioctl_bit_name(bits[i]);
+        if (name != NULL) {
+            shell_put_flag(ioctls, bits[i], name, &first);
+        }
+    }
+    if (first) {
+        sh_puts("none");
+    }
+}
+
+static void shell_put_driver_resources(uint32_t resources) {
+    int first = 1;
+    uint32_t bits[] = {
+        DRV_RESOURCE_BIT_MMIO,
+        DRV_RESOURCE_BIT_IRQ,
+    };
+
+    for (uint32_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        const char *name = driver_resource_bit_name(bits[i]);
+        if (name != NULL) {
+            shell_put_flag(resources, bits[i], name, &first);
+        }
+    }
+    if (first) {
+        sh_puts("none");
+    }
+}
+
+static void shell_put_driver_status_bits(uint32_t status) {
+    int first = 1;
+    uint32_t bits[] = {
+        DRV_STATUS_OPEN,
+        DRV_STATUS_MMIO_READY,
+        DRV_STATUS_IRQ_BOUND,
+        DRV_STATUS_IRQ_PENDING,
+        DRV_STATUS_ERROR,
+    };
+
+    for (uint32_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        const char *name = driver_status_bit_name(bits[i]);
+        if (name != NULL) {
+            shell_put_flag(status, bits[i], name, &first);
+        }
+    }
+    if (first) {
+        sh_puts("none");
+    }
+}
+
+static void cmd_driver_abi(void) {
+    sh_puts("User driver ABI\r\n");
+    sh_puts("  protocol magic: ");
+    sh_puthex(DRV_MAGIC);
+    sh_puts("\r\n");
+    sh_puts("  payload max: ");
+    sh_putdec(DRV_PAYLOAD_MAX);
+    sh_puts(" bytes\r\n");
+    sh_puts("  ops: ping open close read write ioctl poll attach detach\r\n");
+    sh_puts("  ioctls: events resources status clear-status\r\n");
+
+    uint32_t resources = DRV_RESOURCE_BIT_MMIO | DRV_RESOURCE_BIT_IRQ;
+    sh_puts("  resources: ");
+    shell_put_driver_resources(resources);
+    sh_puts("\r\n");
+
+    uint32_t status = DRV_STATUS_OPEN | DRV_STATUS_MMIO_READY |
+                      DRV_STATUS_IRQ_BOUND | DRV_STATUS_IRQ_PENDING |
+                      DRV_STATUS_ERROR;
+    sh_puts("  status bits: ");
+    shell_put_driver_status_bits(status);
+    sh_puts("\r\n");
+    sh_puts("  uart server: user-space service, debug UART path retained\r\n");
+}
+
+static void cmd_driver_print_desc(const driver_descriptor_t *desc) {
+    sh_puts("  service: ");
+    sh_puts(desc->service_name);
+    sh_puts(" device=");
+    sh_puts(desc->device_name);
+    sh_puts("\r\n");
+    sh_puts("    ops: ");
+    shell_put_driver_ops(desc->ops);
+    sh_puts("\r\n");
+    sh_puts("    ioctls: ");
+    shell_put_driver_ioctls(desc->ioctls);
+    sh_puts("\r\n");
+    sh_puts("    resources: ");
+    shell_put_driver_resources(desc->resources);
+    sh_puts("\r\n");
+    sh_puts("    required: ");
+    shell_put_driver_resources(desc->required_resources);
+    sh_puts("\r\n");
+    sh_puts("    optional: ");
+    shell_put_driver_resources(desc->optional_resources);
+    sh_puts("\r\n");
+    sh_puts("    status bits: ");
+    shell_put_driver_status_bits(desc->status_bits);
+    sh_puts("\r\n");
+}
+
+static void cmd_driver_print_ns_state(const char *label,
+                                      const char *live_word) {
+    cap_id_t ns_cap = driver_runtime_name_server_cap();
+    int err = KERN_OK;
+    driver_runtime_ns_state_t state =
+        driver_runtime_name_server_state(DRIVER_SHELL_PROBE_TIMEOUT, &err);
+
+    sh_puts("  ");
+    sh_puts(label);
+    sh_puts(": ");
+    if (state == DRIVER_RUNTIME_NS_LIVE) {
+        sh_puts(live_word);
+        sh_puts("\r\n");
+    } else if (state == DRIVER_RUNTIME_NS_BOUND) {
+        sh_puts("bound (");
+        sh_puts(driver_error_name(err));
+        sh_puts(")\r\n");
+    } else {
+        sh_puts("unbound (");
+        sh_puts(driver_error_name(err));
+        sh_puts(")\r\n");
+    }
+
+    sh_puts("  name-server cap: ");
+    if (!driver_runtime_name_server_bound()) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)ns_cap);
+        sh_puts("\r\n");
+    }
+}
+
+static void cmd_driver_print_inbox_state(void) {
+    sh_puts("  inbox cap: ");
+    if (!driver_runtime_inbox_bound()) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)driver_runtime_inbox_cap());
+        sh_puts(driver_runtime_inbox_owned() ? " (owned)" : " (external)");
+        sh_puts("\r\n");
+    }
+}
+
+static int cmd_driver_release_owned_inbox(void) {
+    if (!driver_runtime_inbox_bound()) {
+        return KERN_OK;
+    }
+    if (!driver_runtime_inbox_owned()) {
+        driver_runtime_clear_inbox();
+        return KERN_OK;
+    }
+
+    cap_id_t inbox_cap = driver_runtime_inbox_cap();
+    void *obj = cap_resolve(inbox_cap, CAP_OBJ_ENDPOINT, CAP_MANAGE);
+    if (obj != NULL) {
+        ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1U);
+        (void)endpoint_delete(ep_id);
+    } else {
+        cap_delete(inbox_cap);
+    }
+    driver_runtime_clear_inbox();
+    return KERN_OK;
+}
+
+static void cmd_driver_print_lookup_status(void) {
+    cmd_driver_print_ns_state("service lookup", "live");
+    cmd_driver_print_inbox_state();
+    sh_puts("  name-server task: ");
+    if (shell_driver_ns_task < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_driver_ns_task);
+        sh_puts(" (");
+        sh_puts(state_str(task_get_state(shell_driver_ns_task)));
+        sh_puts(")");
+        sh_puts("\r\n");
+    }
+    sh_puts("  uart service task: ");
+    if (shell_driver_uart_task < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_driver_uart_task);
+        sh_puts(" (");
+        sh_puts(state_str(task_get_state(shell_driver_uart_task)));
+        sh_puts(")\r\n");
+    }
+    sh_puts("  restart count: ");
+    supervisor_service_t *svc = shell_driver_supervisor_get();
+    sh_putdec(supervisor_restart_count(svc));
+    sh_puts("\r\n");
+    sh_puts("  recover count: ");
+    sh_putdec(supervisor_recover_count(svc));
+    sh_puts("\r\n");
+    sh_puts("  pending clients: ");
+    sh_putdec(supervisor_pending_clients(svc));
+    sh_puts("\r\n");
+    sh_puts("  last health: ");
+    sh_puts(driver_error_name(supervisor_last_health(svc)));
+    sh_puts("\r\n");
+}
+
+static void cmd_driver_status(const char *service_name) {
+    sh_puts("User driver status\r\n");
+    if (service_name != NULL) {
+        const driver_descriptor_t *desc = NULL;
+        int err = driver_registry_query(service_name, &desc);
+        if (err != KERN_OK || desc == NULL) {
+            sh_puts("  service not found: ");
+            sh_puts(service_name);
+            sh_puts("\r\n");
+            sh_puts("  reason: ");
+            sh_puts(driver_error_name(err));
+            sh_puts("\r\n");
+            return;
+        }
+        cmd_driver_print_desc(desc);
+        sh_puts("  descriptor valid: ");
+        sh_puts(driver_registry_validate_desc(desc) == KERN_OK ?
+                "yes\r\n" : "no\r\n");
+        cmd_driver_print_lookup_status();
+        sh_puts("  debug UART: active compatibility path\r\n");
+        return;
+    }
+
+    sh_puts("  registry entries: ");
+    sh_putdec(driver_registry_count());
+    sh_puts("\r\n");
+    sh_puts("  registry valid: ");
+    sh_puts(driver_registry_validate_all() == KERN_OK ? "yes\r\n" : "no\r\n");
+    for (uint32_t i = 0; i < driver_registry_count(); i++) {
+        const driver_descriptor_t *desc = driver_registry_get(i);
+        if (desc == NULL) {
+            continue;
+        }
+        cmd_driver_print_desc(desc);
+    }
+    cmd_driver_print_lookup_status();
+    sh_puts("  uart server: live IPC/name-server path validated\r\n");
+    sh_puts("  debug UART: active compatibility path\r\n");
+}
+
+static void cmd_driver_release_lookup(cap_id_t service_cap) {
+    (void)driver_release_service(driver_runtime_inbox_cap(), service_cap);
+    if (service_cap > 0) {
+        cap_delete(service_cap);
+    }
+}
+
+static int cmd_driver_get_service_cap(const char *service_name,
+                                      cap_id_t *out_service_cap);
+
+static void cmd_driver_lookup(const char *service_name) {
+    const driver_descriptor_t *desc = NULL;
+    int err;
+
+    if (service_name == NULL) {
+        sh_puts("Usage: driver lookup <service>\r\n");
+        return;
+    }
+
+    sh_puts("User driver lookup\r\n");
+    sh_puts("  service: ");
+    sh_puts(service_name);
+    sh_puts("\r\n");
+
+    err = driver_registry_query(service_name, &desc);
+    if (err != KERN_OK || desc == NULL) {
+        sh_puts("  registry: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = driver_registry_validate_desc(desc);
+    sh_puts("  descriptor: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    cmd_driver_print_ns_state("lookup", "ready");
+    const char *reason = NULL;
+    err = driver_runtime_lookup_ready(DRIVER_SHELL_PROBE_TIMEOUT, &reason);
+    sh_puts("  lookup ready: ");
+    if (err == KERN_OK) {
+        sh_puts("yes\r\n");
+    } else {
+        sh_puts("no (");
+        sh_puts(reason ? reason : driver_error_name(err));
+        sh_puts(": ");
+        sh_puts(driver_error_name(err));
+        sh_puts(")\r\n");
+    }
+    cmd_driver_print_inbox_state();
+
+    if (err == KERN_OK && strcmp(service_name, "dev.uart0") == 0) {
+        cap_id_t service_cap = KERN_INVALID_ID;
+        int lookup_err = driver_runtime_lookup_uart(driver_runtime_inbox_cap(),
+                                                    &service_cap,
+                                                    DRIVER_SHELL_PROBE_TIMEOUT);
+        sh_puts("  service cap: ");
+        if (lookup_err == KERN_OK) {
+            sh_putdec((uint32_t)service_cap);
+            sh_puts("\r\n");
+            int ping_err = driver_ping(service_cap,
+                                       DRIVER_SHELL_PROBE_TIMEOUT);
+            sh_puts("  ping: ");
+            sh_puts(driver_error_name(ping_err));
+            sh_puts("\r\n");
+            cmd_driver_release_lookup(service_cap);
+        } else {
+            sh_puts(driver_error_name(lookup_err));
+            sh_puts("\r\n");
+        }
+    }
+}
+
+static void cmd_driver_registered(const char *service_name) {
+    const driver_descriptor_t *desc = NULL;
+    const char *reason = NULL;
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int err;
+
+    if (service_name == NULL) {
+        service_name = "dev.uart0";
+    }
+
+    sh_puts("User driver registration\r\n");
+    sh_puts("  service: ");
+    sh_puts(service_name);
+    sh_puts("\r\n");
+
+    err = driver_registry_query(service_name, &desc);
+    if (err != KERN_OK || desc == NULL) {
+        sh_puts("  descriptor: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = driver_runtime_lookup_ready(DRIVER_SHELL_PROBE_TIMEOUT, &reason);
+    sh_puts("  lookup path: ");
+    if (err == KERN_OK) {
+        sh_puts("ready\r\n");
+    } else {
+        sh_puts(reason ? reason : driver_error_name(err));
+        sh_puts(": ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = cmd_driver_get_service_cap(service_name, &service_cap);
+    sh_puts("  service registered: ");
+    if (err != KERN_OK) {
+        sh_puts("no (");
+        sh_puts(driver_error_name(err));
+        sh_puts(")\r\n");
+        return;
+    }
+    sh_puts("yes\r\n");
+
+    err = driver_ping(service_cap, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  ping: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    cmd_driver_release_lookup(service_cap);
+}
+
+static int cmd_driver_get_service_cap(const char *service_name,
+                                      cap_id_t *out_service_cap) {
+    if (out_service_cap == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    *out_service_cap = KERN_INVALID_ID;
+    if (strcmp(service_name, "dev.uart0") != 0) {
+        return KERN_ERR_NOEXIST;
+    }
+    return driver_runtime_lookup_uart(driver_runtime_inbox_cap(),
+                                      out_service_cap,
+                                      DRIVER_SHELL_PROBE_TIMEOUT);
+}
+
+static void cmd_driver_probe(const char *service_name) {
+    const driver_descriptor_t *desc = NULL;
+    cap_id_t service_cap = KERN_INVALID_ID;
+    uint32_t value = 0;
+    int err;
+
+    if (service_name == NULL) {
+        sh_puts("Usage: driver probe <service>\r\n");
+        return;
+    }
+
+    sh_puts("User driver probe\r\n");
+    sh_puts("  service: ");
+    sh_puts(service_name);
+    sh_puts("\r\n");
+
+    err = driver_registry_query(service_name, &desc);
+    if (err != KERN_OK || desc == NULL) {
+        sh_puts("  registry: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = driver_registry_validate_desc(desc);
+    sh_puts("  descriptor: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    err = driver_runtime_lookup_ready(DRIVER_SHELL_PROBE_TIMEOUT, NULL);
+    sh_puts("  lookup ready: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    err = cmd_driver_get_service_cap(service_name, &service_cap);
+    sh_puts("  service cap: ");
+    if (err != KERN_OK) {
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+    sh_putdec((uint32_t)service_cap);
+    sh_puts("\r\n");
+
+    err = driver_ping(service_cap, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  ping: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+
+    value = 0;
+    err = driver_get_resources(service_cap, &value, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  resources: ");
+    sh_puts(driver_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ");
+        shell_put_driver_resources(value);
+    }
+    sh_puts("\r\n");
+
+    value = 0;
+    err = driver_get_status(service_cap, &value, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  status: ");
+    sh_puts(driver_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ");
+        shell_put_driver_status_bits(value);
+    }
+    sh_puts("\r\n");
+
+    value = 0;
+    err = driver_poll(service_cap, &value, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  poll: ");
+    sh_puts(driver_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" events=");
+        sh_puthex(value);
+    }
+    sh_puts("\r\n");
+
+    err = driver_open(service_cap, DRV_FLAG_NONE, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  open: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err == KERN_OK) {
+        int close_err = driver_close(service_cap, DRIVER_SHELL_PROBE_TIMEOUT);
+        sh_puts("  close: ");
+        sh_puts(driver_error_name(close_err));
+        sh_puts("\r\n");
+    }
+
+    cmd_driver_release_lookup(service_cap);
+}
+
+static void cmd_driver_probe_mmio(const char *service_name) {
+    const driver_descriptor_t *desc = NULL;
+    cap_id_t service_cap = KERN_INVALID_ID;
+    cap_id_t mmio_cap = KERN_INVALID_ID;
+    uint32_t value = 0;
+    int err;
+
+    if (service_name == NULL) {
+        sh_puts("Usage: driver probe-mmio <service>\r\n");
+        return;
+    }
+
+    sh_puts("User driver MMIO probe\r\n");
+    sh_puts("  service: ");
+    sh_puts(service_name);
+    sh_puts("\r\n");
+
+    err = driver_registry_query(service_name, &desc);
+    if (err != KERN_OK || desc == NULL) {
+        sh_puts("  registry: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = driver_registry_validate_desc(desc);
+    sh_puts("  descriptor: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    err = driver_runtime_lookup_ready(DRIVER_SHELL_PROBE_TIMEOUT, NULL);
+    sh_puts("  lookup ready: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    err = cmd_driver_get_service_cap(service_name, &service_cap);
+    sh_puts("  service cap: ");
+    if (err != KERN_OK) {
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+    sh_putdec((uint32_t)service_cap);
+    sh_puts("\r\n");
+
+    kern_err_t kerr = kmmio_create_cap(0x40000000UL, 16, 4, CAP_FULL,
+                                       &mmio_cap);
+    sh_puts("  mmio cap: ");
+    if (kerr != KERN_OK) {
+        sh_puts(driver_error_name((int)kerr));
+        sh_puts("\r\n");
+        cmd_driver_release_lookup(service_cap);
+        return;
+    }
+    sh_putdec((uint32_t)mmio_cap);
+    sh_puts("\r\n");
+
+    err = driver_attach_cap(service_cap, mmio_cap,
+                            DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  attach-mmio: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+
+    value = 0;
+    err = driver_get_resources(service_cap, &value, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  resources: ");
+    sh_puts(driver_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ");
+        shell_put_driver_resources(value);
+    }
+    sh_puts("\r\n");
+
+    value = 0;
+    err = driver_get_status(service_cap, &value, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  status: ");
+    sh_puts(driver_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ");
+        shell_put_driver_status_bits(value);
+    }
+    sh_puts("\r\n");
+
+    err = driver_open(service_cap, DRV_FLAG_NONE, DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  open: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+    if (err == KERN_OK) {
+        const char probe[] = "probe";
+        int write_err = driver_write(service_cap, probe,
+                                     (uint32_t)(sizeof(probe) - 1U),
+                                     DRIVER_SHELL_PROBE_TIMEOUT);
+        sh_puts("  write: ");
+        if (write_err >= 0) {
+            sh_puts("ok bytes=");
+            sh_putdec((uint32_t)write_err);
+        } else {
+            sh_puts(driver_error_name(write_err));
+        }
+        sh_puts("\r\n");
+
+        int close_err = driver_close(service_cap, DRIVER_SHELL_PROBE_TIMEOUT);
+        sh_puts("  close: ");
+        sh_puts(driver_error_name(close_err));
+        sh_puts("\r\n");
+    }
+
+    err = driver_detach_resource(service_cap, DRV_RESOURCE_MMIO,
+                                 DRIVER_SHELL_PROBE_TIMEOUT);
+    sh_puts("  detach-mmio: ");
+    sh_puts(driver_error_name(err));
+    sh_puts("\r\n");
+
+    kerr = kmmio_delete_cap(mmio_cap);
+    sh_puts("  delete-mmio: ");
+    sh_puts(driver_error_name((int)kerr));
+    sh_puts("\r\n");
+
+    cmd_driver_release_lookup(service_cap);
+}
+
+static void cmd_driver_bind_ns(const char *arg) {
+    int err;
+
+    if (arg == NULL) {
+        sh_puts("Usage: driver bind-ns <cap|clear>\r\n");
+        return;
+    }
+
+    if (strcmp(arg, "clear") == 0 || strcmp(arg, "none") == 0) {
+        driver_runtime_clear_name_server();
+        sh_puts("User driver name-server binding cleared\r\n");
+        cmd_driver_print_lookup_status();
+        return;
+    }
+
+    cap_id_t ns_cap = (cap_id_t)parse_dec(arg);
+    err = driver_runtime_bind_name_server(ns_cap);
+    if (err != KERN_OK) {
+        sh_puts("driver bind-ns: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    sh_puts("User driver name-server binding updated\r\n");
+    cmd_driver_print_lookup_status();
+}
+
+static void cmd_driver_bind_inbox(const char *arg) {
+    int err;
+
+    if (arg == NULL) {
+        sh_puts("Usage: driver bind-inbox <cap|auto|clear>\r\n");
+        return;
+    }
+
+    if (strcmp(arg, "clear") == 0 || strcmp(arg, "none") == 0) {
+        (void)cmd_driver_release_owned_inbox();
+        sh_puts("User driver inbox binding cleared\r\n");
+        cmd_driver_print_inbox_state();
+        return;
+    }
+
+    if (strcmp(arg, "auto") == 0) {
+        if (driver_runtime_inbox_bound()) {
+            sh_puts("driver bind-inbox: busy\r\n");
+            cmd_driver_print_inbox_state();
+            return;
+        }
+
+        ep_id_t ep_id = endpoint_create("drv_inbox", KERN_EP_MSG_SIZE, 2);
+        if (ep_id < 0) {
+            sh_puts("driver bind-inbox: resource\r\n");
+            return;
+        }
+
+        cap_id_t inbox_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
+                                        CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+        if (inbox_cap < 0) {
+            (void)endpoint_delete(ep_id);
+            sh_puts("driver bind-inbox: resource\r\n");
+            return;
+        }
+
+        err = driver_runtime_bind_owned_inbox(inbox_cap);
+        if (err != KERN_OK) {
+            (void)endpoint_delete(ep_id);
+            sh_puts("driver bind-inbox: ");
+            sh_puts(driver_error_name(err));
+            sh_puts("\r\n");
+            return;
+        }
+
+        sh_puts("User driver inbox created\r\n");
+        cmd_driver_print_inbox_state();
+        return;
+    }
+
+    cap_id_t inbox_cap = (cap_id_t)parse_dec(arg);
+    err = driver_runtime_bind_inbox(inbox_cap);
+    if (err != KERN_OK) {
+        sh_puts("driver bind-inbox: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    sh_puts("User driver inbox binding updated\r\n");
+    cmd_driver_print_inbox_state();
+}
+
+static void cmd_driver_ns_stop(void) {
+    if (shell_driver_uart_task >= 0 || shell_driver_uart_ep >= 0) {
+        sh_puts("driver ns-stop: uart service active\r\n");
+        return;
+    }
+    if (shell_driver_ns_task >= 0) {
+        (void)task_delete(shell_driver_ns_task);
+        shell_driver_ns_task = KERN_INVALID_ID;
+    }
+    if (shell_driver_ns_ep >= 0) {
+        (void)endpoint_delete(shell_driver_ns_ep);
+        shell_driver_ns_ep = KERN_INVALID_ID;
+    }
+    shell_driver_ns_cap = KERN_INVALID_ID;
+    driver_runtime_clear_name_server();
+    sh_puts("User driver name-server stopped\r\n");
+    cmd_driver_print_lookup_status();
+}
+
+static void cmd_driver_uart_stop(void) {
+    int unregister_err = KERN_ERR_STATE;
+
+    if (driver_runtime_name_server_bound()) {
+        unregister_err = nameserver_unregister(driver_runtime_name_server_cap(),
+                                               "dev.uart0", 0x55415254U,
+                                               DRIVER_SHELL_PROBE_TIMEOUT);
+    }
+    if (shell_driver_uart_task >= 0) {
+        (void)task_delete(shell_driver_uart_task);
+        shell_driver_uart_task = KERN_INVALID_ID;
+    }
+    if (shell_driver_uart_ep >= 0) {
+        (void)endpoint_delete(shell_driver_uart_ep);
+        shell_driver_uart_ep = KERN_INVALID_ID;
+    }
+    shell_driver_uart_cap = KERN_INVALID_ID;
+    sh_puts("User driver UART service stopped\r\n");
+    sh_puts("  unregister: ");
+    sh_puts(driver_error_name(unregister_err));
+    sh_puts("\r\n");
+    cmd_driver_print_lookup_status();
+}
+
+static void cmd_driver_uart_start(void) {
+    if (!driver_runtime_name_server_bound()) {
+        sh_puts("driver uart-start: name-server\r\n");
+        return;
+    }
+    if (shell_driver_uart_task >= 0 || shell_driver_uart_ep >= 0) {
+        sh_puts("driver uart-start: busy\r\n");
+        cmd_driver_print_lookup_status();
+        return;
+    }
+
+    ep_id_t ep_id = endpoint_create("drv_uart", KERN_EP_MSG_SIZE, 4);
+    if (ep_id < 0) {
+        sh_puts("driver uart-start: resource\r\n");
+        return;
+    }
+
+    task_id_t tid = task_create_user("drv_uart", shell_driver_uart_task_entry,
+                                     NULL, 13, 1536);
+    if (tid < 0) {
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver uart-start: resource\r\n");
+        return;
+    }
+
+    tcb_t *uart_tcb = task_get_tcb(tid);
+    cap_id_t service_cap = cap_create_for(uart_tcb,
+                                          (void *)(uintptr_t)(ep_id + 1),
+                                          CAP_OBJ_ENDPOINT,
+                                          CAP_READ | CAP_WRITE);
+    if (service_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver uart-start: resource\r\n");
+        return;
+    }
+
+    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
+                                   CAP_OBJ_ENDPOINT,
+                                   CAP_READ | CAP_WRITE | CAP_TRANSFER,
+                                   0);
+    if (root_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver uart-start: resource\r\n");
+        return;
+    }
+
+    tcb_t *task = task_get_tcb(tid);
+    if (task == NULL || task->sp == NULL) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver uart-start: state\r\n");
+        return;
+    }
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)task->sp + 32U);
+    *stacked_r0 = (uint32_t)service_cap;
+
+    kern_err_t err = task_start(tid);
+    if (err != KERN_OK) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver uart-start: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    (void)task_yield();
+    err = nameserver_register(driver_runtime_name_server_cap(),
+                              "dev.uart0", root_cap, 0x55415254U,
+                              DRIVER_SHELL_PROBE_TIMEOUT);
+    if (err != KERN_OK) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver uart-start: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    shell_driver_uart_task = tid;
+    shell_driver_uart_ep = ep_id;
+    shell_driver_uart_cap = root_cap;
+    sh_puts("User driver UART service started\r\n");
+    cmd_driver_print_lookup_status();
+}
+
+static void cmd_driver_ns_start(void) {
+    if (shell_driver_ns_task >= 0 || shell_driver_ns_ep >= 0 ||
+        driver_runtime_name_server_bound()) {
+        sh_puts("driver ns-start: busy\r\n");
+        cmd_driver_print_lookup_status();
+        return;
+    }
+
+    ep_id_t ep_id = endpoint_create("drv_ns", KERN_EP_MSG_SIZE, 4);
+    if (ep_id < 0) {
+        sh_puts("driver ns-start: resource\r\n");
+        return;
+    }
+
+    task_id_t tid = task_create_user("drv_ns", shell_driver_nameserver_task,
+                                     NULL, 13, 1536);
+    if (tid < 0) {
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver ns-start: resource\r\n");
+        return;
+    }
+
+    tcb_t *ns_tcb = task_get_tcb(tid);
+    cap_id_t ns_service_cap = cap_create_for(ns_tcb,
+                                             (void *)(uintptr_t)(ep_id + 1),
+                                             CAP_OBJ_ENDPOINT,
+                                             CAP_READ | CAP_WRITE);
+    if (ns_service_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver ns-start: resource\r\n");
+        return;
+    }
+
+    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
+                                   CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    if (root_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver ns-start: resource\r\n");
+        return;
+    }
+
+    tcb_t *task = task_get_tcb(tid);
+    if (task == NULL || task->sp == NULL) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver ns-start: state\r\n");
+        return;
+    }
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)task->sp + 32U);
+    *stacked_r0 = (uint32_t)ns_service_cap;
+
+    kern_err_t err = task_start(tid);
+    if (err != KERN_OK) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver ns-start: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = driver_runtime_bind_name_server(root_cap);
+    if (err != KERN_OK) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("driver ns-start: ");
+        sh_puts(driver_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    shell_driver_ns_task = tid;
+    shell_driver_ns_ep = ep_id;
+    shell_driver_ns_cap = root_cap;
+    sh_puts("User driver name-server started\r\n");
+    (void)task_yield();
+    cmd_driver_print_lookup_status();
+}
+
+static int cmd_driver_health_probe(void);
+
+static void cmd_driver_up(void) {
+    sh_puts("User driver stack up\r\n");
+
+    if (!driver_runtime_inbox_bound()) {
+        cmd_driver_bind_inbox("auto");
+        if (!driver_runtime_inbox_bound()) {
+            sh_puts("driver up: inbox failed\r\n");
+            return;
+        }
+    } else {
+        sh_puts("  inbox: already ready\r\n");
+    }
+
+    if (shell_driver_ns_task < 0 && shell_driver_ns_ep < 0 &&
+        !driver_runtime_name_server_bound()) {
+        cmd_driver_ns_start();
+        if (!driver_runtime_name_server_bound()) {
+            sh_puts("driver up: name-server failed\r\n");
+            return;
+        }
+    } else {
+        sh_puts("  name-server: already ready\r\n");
+    }
+
+    if (shell_driver_uart_task < 0 && shell_driver_uart_ep < 0 &&
+        shell_driver_uart_cap < 0) {
+        cmd_driver_uart_start();
+        if (shell_driver_uart_task < 0 || shell_driver_uart_ep < 0) {
+            sh_puts("driver up: service failed\r\n");
+            return;
+        }
+    } else {
+        sh_puts("  service: already ready\r\n");
+    }
+
+    sh_puts("User driver stack ready\r\n");
+    supervisor_set_health(shell_driver_supervisor_get(),
+                          cmd_driver_health_probe());
+    cmd_driver_status(NULL);
+}
+
+static void cmd_driver_down(void) {
+    sh_puts("User driver stack down\r\n");
+    supervisor_set_health(shell_driver_supervisor_get(), KERN_ERR_STATE);
+
+    if (shell_driver_uart_task >= 0 || shell_driver_uart_ep >= 0 ||
+        shell_driver_uart_cap >= 0) {
+        cmd_driver_uart_stop();
+    } else {
+        sh_puts("  service: already stopped\r\n");
+    }
+
+    if (shell_driver_ns_task >= 0 || shell_driver_ns_ep >= 0 ||
+        driver_runtime_name_server_bound()) {
+        cmd_driver_ns_stop();
+    } else {
+        sh_puts("  name-server: already stopped\r\n");
+    }
+
+    if (driver_runtime_inbox_bound()) {
+        cmd_driver_bind_inbox("clear");
+    } else {
+        sh_puts("  inbox: already cleared\r\n");
+    }
+
+    sh_puts("User driver stack stopped\r\n");
+    cmd_driver_status(NULL);
+}
+
+static void cmd_driver_restart(void) {
+    sh_puts("User driver stack restart\r\n");
+    supervisor_record_restart(shell_driver_supervisor_get());
+    cmd_driver_down();
+    cmd_driver_up();
+}
+
+static int cmd_driver_health_probe(void) {
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int err = driver_runtime_lookup_ready(DRIVER_SHELL_PROBE_TIMEOUT, NULL);
+    if (err != KERN_OK) {
+        return err;
+    }
+
+    err = cmd_driver_get_service_cap(DRIVER_SHELL_SERVICE_NAME, &service_cap);
+    if (err != KERN_OK) {
+        return err;
+    }
+
+    err = driver_ping(service_cap, DRIVER_SHELL_PROBE_TIMEOUT);
+    cmd_driver_release_lookup(service_cap);
+    return err;
+}
+
+static void cmd_driver_health(void) {
+    sh_puts("User driver health\r\n");
+    int err = cmd_driver_health_probe();
+    supervisor_set_health(shell_driver_supervisor_get(), err);
+    if (err != KERN_OK) {
+        sh_puts("  state: ");
+        sh_puts(err == KERN_ERR_STATE ? "stopped" : driver_error_name(err));
+        sh_puts("\r\n");
+        cmd_driver_status(NULL);
+        return;
+    }
+
+    sh_puts("  ping: ok\r\n");
+    cmd_driver_status(NULL);
+}
+
+static void cmd_driver_recover(void) {
+    sh_puts("User driver stack recover\r\n");
+    supervisor_record_recover(shell_driver_supervisor_get());
+    int err = cmd_driver_health_probe();
+    supervisor_set_health(shell_driver_supervisor_get(), err);
+    if (err != KERN_OK) {
+        sh_puts("  health: ");
+        sh_puts(err == KERN_ERR_STATE ? "stopped" : driver_error_name(err));
+        sh_puts("\r\n");
+        cmd_driver_up();
+        return;
+    }
+
+    sh_puts("  ping: ok\r\n");
+    supervisor_set_health(shell_driver_supervisor_get(), KERN_OK);
+    sh_puts("User driver stack healthy\r\n");
+    cmd_driver_status(NULL);
+}
+
+static void cmd_driver(int argc, char **argv) {
+    if (argc <= 1 || strcmp(argv[1], "abi") == 0) {
+        cmd_driver_abi();
+        return;
+    }
+    if (strcmp(argv[1], "status") == 0) {
+        cmd_driver_status((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "up") == 0) {
+        cmd_driver_up();
+        return;
+    }
+    if (strcmp(argv[1], "down") == 0) {
+        cmd_driver_down();
+        return;
+    }
+    if (strcmp(argv[1], "restart") == 0) {
+        cmd_driver_restart();
+        return;
+    }
+    if (strcmp(argv[1], "health") == 0) {
+        cmd_driver_health();
+        return;
+    }
+    if (strcmp(argv[1], "recover") == 0) {
+        cmd_driver_recover();
+        return;
+    }
+    if (strcmp(argv[1], "lookup") == 0) {
+        cmd_driver_lookup((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "registered") == 0) {
+        cmd_driver_registered((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "probe") == 0) {
+        cmd_driver_probe((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "probe-mmio") == 0) {
+        cmd_driver_probe_mmio((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "bind-ns") == 0) {
+        cmd_driver_bind_ns((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "bind-inbox") == 0) {
+        cmd_driver_bind_inbox((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "ns-start") == 0) {
+        cmd_driver_ns_start();
+        return;
+    }
+    if (strcmp(argv[1], "ns-stop") == 0) {
+        cmd_driver_ns_stop();
+        return;
+    }
+    if (strcmp(argv[1], "uart-start") == 0) {
+        cmd_driver_uart_start();
+        return;
+    }
+    if (strcmp(argv[1], "uart-stop") == 0) {
+        cmd_driver_uart_stop();
+        return;
+    }
+
+    sh_puts("Usage: driver [abi|status [service]|up|down|restart|health|recover|lookup <service>|registered [service]|probe <service>|probe-mmio <service>|bind-ns <cap|clear>|bind-inbox <cap|auto|clear>|ns-start|ns-stop|uart-start|uart-stop]\r\n");
+}
+
+#endif /* DRIVER_ENABLE */
+
+/*============================================================================
+ * 内置命令: fs
+ *============================================================================*/
+
+#if VFS_ENABLE && CAP_ENABLE
+
+#define FS_SHELL_PROBE_TIMEOUT 100U
+#define FS_SHELL_OWNER_BADGE   0x46530001U
+#define FS_SHELL_SERVICE_NAME  "fs.ramfs"
+
+static task_id_t shell_fs_task = KERN_INVALID_ID;
+static ep_id_t shell_fs_ep = KERN_INVALID_ID;
+static cap_id_t shell_fs_cap = KERN_INVALID_ID;
+static task_id_t shell_fs_ns_task = KERN_INVALID_ID;
+static ep_id_t shell_fs_ns_ep = KERN_INVALID_ID;
+static cap_id_t shell_fs_ns_cap = KERN_INVALID_ID;
+static ep_id_t shell_fs_inbox_ep = KERN_INVALID_ID;
+static cap_id_t shell_fs_inbox_cap = KERN_INVALID_ID;
+static supervisor_service_t *shell_fs_supervisor;
+
+static supervisor_service_t *shell_fs_supervisor_get(void) {
+    if (shell_fs_supervisor == NULL) {
+        shell_fs_supervisor =
+            supervisor_register_service(FS_SHELL_SERVICE_NAME,
+                                        KERN_ERR_STATE);
+    }
+    return shell_fs_supervisor;
+}
+
+static void shell_fs_task_entry(void *arg) {
+    (void)fs_server_run((int)(uintptr_t)arg, 0);
+}
+
+static void shell_fs_nameserver_task(void *arg) {
+    (void)nameserver_service_run((int)(uintptr_t)arg, 0);
+}
+
+static void cmd_fs_abi(void) {
+    sh_puts("User FS ABI\r\n");
+    sh_puts("  protocol magic: ");
+    sh_puthex(FS_MAGIC);
+    sh_puts("\r\n");
+    sh_puts("  path max: ");
+    sh_putdec(FS_PATH_MAX);
+    sh_puts(" bytes\r\n");
+    sh_puts("  payload max: ");
+    sh_putdec(FS_PAYLOAD_MAX);
+    sh_puts(" bytes\r\n");
+    sh_puts("  service fds: ");
+    sh_putdec(FS_FD_MAX);
+    sh_puts("\r\n");
+    sh_puts("  ops: ping open close read write lseek readdir unlink mkdir stat\r\n");
+    sh_puts("  backend: compatibility VFS syscalls\r\n");
+}
+
+static void cmd_fs_print_lookup_ready(void) {
+    const char *reason = NULL;
+    int err = fs_runtime_lookup_ready(FS_SHELL_PROBE_TIMEOUT, &reason);
+
+    sh_puts("  lookup path ready: ");
+    if (err == KERN_OK) {
+        sh_puts("yes\r\n");
+    } else {
+        sh_puts("no (");
+        sh_puts(reason ? reason : fs_error_name(err));
+        sh_puts(": ");
+        sh_puts(fs_error_name(err));
+        sh_puts(")\r\n");
+    }
+}
+
+static void cmd_fs_status(void) {
+    sh_puts("User FS status\r\n");
+    sh_puts("  service name: ");
+    sh_puts(FS_SHELL_SERVICE_NAME);
+    sh_puts("\r\n");
+    sh_puts("  name-server cap: ");
+    if (shell_fs_ns_cap < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_fs_ns_cap);
+        int err = nameserver_ping(shell_fs_ns_cap, FS_SHELL_PROBE_TIMEOUT);
+        sh_puts(" (");
+        sh_puts(fs_error_name(err));
+        sh_puts(")\r\n");
+    }
+    sh_puts("  inbox cap: ");
+    if (shell_fs_inbox_cap < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_fs_inbox_cap);
+        sh_puts(" (owned)\r\n");
+    }
+    sh_puts("  service cap: ");
+    if (shell_fs_cap < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_fs_cap);
+        sh_puts("\r\n");
+    }
+    sh_puts("  service task: ");
+    if (shell_fs_task < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_fs_task);
+        sh_puts(" (");
+        sh_puts(state_str(task_get_state(shell_fs_task)));
+        sh_puts(")\r\n");
+    }
+    sh_puts("  name-server task: ");
+    if (shell_fs_ns_task < 0) {
+        sh_puts("none\r\n");
+    } else {
+        sh_putdec((uint32_t)shell_fs_ns_task);
+        sh_puts(" (");
+        sh_puts(state_str(task_get_state(shell_fs_ns_task)));
+        sh_puts(")\r\n");
+    }
+    cmd_fs_print_lookup_ready();
+    sh_puts("  restart count: ");
+    supervisor_service_t *svc = shell_fs_supervisor_get();
+    sh_putdec(supervisor_restart_count(svc));
+    sh_puts("\r\n");
+    sh_puts("  recover count: ");
+    sh_putdec(supervisor_recover_count(svc));
+    sh_puts("\r\n");
+    sh_puts("  pending clients: ");
+    sh_putdec(supervisor_pending_clients(svc));
+    sh_puts("\r\n");
+    sh_puts("  last health: ");
+    sh_puts(fs_error_name(supervisor_last_health(svc)));
+    sh_puts("\r\n");
+    sh_puts("  ops: ping|open|close|read|write|lseek|readdir|unlink|mkdir|stat\r\n");
+    sh_puts("  backend: compatibility VFS syscalls\r\n");
+}
+
+static int cmd_fs_lookup_service(cap_id_t *out_cap) {
+    return fs_runtime_lookup_service(FS_SHELL_SERVICE_NAME, out_cap,
+                                     FS_SHELL_PROBE_TIMEOUT);
+}
+
+static int cmd_fs_acquire_service(cap_id_t *out_cap, int *out_live_lookup) {
+    if (out_cap == NULL || out_live_lookup == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+    *out_cap = KERN_INVALID_ID;
+    *out_live_lookup = 0;
+
+    if (fs_runtime_name_server_bound() && fs_runtime_inbox_bound()) {
+        int err = cmd_fs_lookup_service(out_cap);
+        if (err == KERN_OK) {
+            *out_live_lookup = 1;
+        }
+        return err;
+    }
+
+    if (shell_fs_cap <= 0) {
+        return KERN_ERR_STATE;
+    }
+    *out_cap = shell_fs_cap;
+    return KERN_OK;
+}
+
+static void cmd_fs_release_service(int live_lookup, cap_id_t service_cap) {
+    if (live_lookup) {
+        (void)fs_runtime_release_service(service_cap);
+    }
+}
+
+static void cmd_fs_start(void) {
+    if (shell_fs_task >= 0 || shell_fs_ep >= 0 || shell_fs_cap >= 0) {
+        sh_puts("fs start: busy\r\n");
+        cmd_fs_status();
+        return;
+    }
+
+    ep_id_t ep_id = endpoint_create("fs_shell", KERN_EP_MSG_SIZE, 4);
+    if (ep_id < 0) {
+        sh_puts("fs start: resource\r\n");
+        return;
+    }
+
+    task_id_t tid = task_create_user("fs_shell", shell_fs_task_entry,
+                                     NULL, 13, 1536);
+    if (tid < 0) {
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs start: resource\r\n");
+        return;
+    }
+
+    tcb_t *fs_tcb = task_get_tcb(tid);
+    cap_id_t service_cap = cap_create_for(fs_tcb,
+                                          (void *)(uintptr_t)(ep_id + 1),
+                                          CAP_OBJ_ENDPOINT,
+                                          CAP_READ | CAP_WRITE);
+    if (service_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs start: resource\r\n");
+        return;
+    }
+
+    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
+                                   CAP_OBJ_ENDPOINT,
+                                   CAP_READ | CAP_WRITE | CAP_TRANSFER,
+                                   0);
+    if (root_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs start: resource\r\n");
+        return;
+    }
+
+    tcb_t *task = task_get_tcb(tid);
+    if (task == NULL || task->sp == NULL) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs start: state\r\n");
+        return;
+    }
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)task->sp + 32U);
+    *stacked_r0 = (uint32_t)service_cap;
+
+    kern_err_t err = task_start(tid);
+    if (err != KERN_OK) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs start: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    shell_fs_task = tid;
+    shell_fs_ep = ep_id;
+    shell_fs_cap = root_cap;
+    if (shell_fs_ns_cap > 0) {
+        err = nameserver_register(shell_fs_ns_cap, FS_SHELL_SERVICE_NAME,
+                                  root_cap, FS_SHELL_OWNER_BADGE,
+                                  FS_SHELL_PROBE_TIMEOUT);
+        if (err != KERN_OK) {
+            (void)task_delete(tid);
+            (void)endpoint_delete(ep_id);
+            shell_fs_task = KERN_INVALID_ID;
+            shell_fs_ep = KERN_INVALID_ID;
+            shell_fs_cap = KERN_INVALID_ID;
+            sh_puts("fs start register: ");
+            sh_puts(fs_error_name(err));
+            sh_puts("\r\n");
+            return;
+        }
+    }
+    sh_puts("User FS service started\r\n");
+    (void)task_yield();
+    cmd_fs_status();
+}
+
+static void cmd_fs_stop(void) {
+    int unregister_err = KERN_ERR_STATE;
+
+    if (shell_fs_ns_cap > 0 && shell_fs_cap > 0) {
+        unregister_err = nameserver_unregister(shell_fs_ns_cap,
+                                               FS_SHELL_SERVICE_NAME,
+                                               FS_SHELL_OWNER_BADGE,
+                                               FS_SHELL_PROBE_TIMEOUT);
+    }
+    if (shell_fs_task >= 0) {
+        (void)task_delete(shell_fs_task);
+        shell_fs_task = KERN_INVALID_ID;
+    }
+    if (shell_fs_ep >= 0) {
+        (void)endpoint_delete(shell_fs_ep);
+        shell_fs_ep = KERN_INVALID_ID;
+    }
+    shell_fs_cap = KERN_INVALID_ID;
+    sh_puts("User FS service stopped\r\n");
+    sh_puts("  unregister: ");
+    sh_puts(fs_error_name(unregister_err));
+    sh_puts("\r\n");
+    cmd_fs_status();
+}
+
+static void cmd_fs_probe_cap(cap_id_t service_cap) {
+    if (service_cap <= 0) {
+        sh_puts("fs probe: service\r\n");
+        return;
+    }
+
+    sh_puts("User FS probe\r\n");
+    int err = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  ping: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    int fd = fs_open(service_cap, "/tmp", O_RDONLY, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  open /tmp: ");
+    if (fd <= 0) {
+        sh_puts(fs_error_name(fd));
+        sh_puts("\r\n");
+        return;
+    }
+    sh_puts("ok fd=");
+    sh_putdec((uint32_t)fd);
+    sh_puts("\r\n");
+
+    dirent_t entry;
+    err = fs_readdir(service_cap, fd, &entry, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  readdir: ");
+    sh_puts(fs_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ");
+        sh_putdec(entry.ino);
+        sh_puts(" ");
+        switch (entry.type) {
+        case INODE_TYPE_DIR: sh_putc('d'); break;
+        case INODE_TYPE_FILE: sh_putc('-'); break;
+        case INODE_TYPE_CHRDEV: sh_putc('c'); break;
+        default: sh_putc('?'); break;
+        }
+        sh_puts(" ");
+        sh_puts(entry.name);
+    }
+    sh_puts("\r\n");
+
+    err = fs_close(service_cap, fd, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  close: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+
+    (void)fs_unlink(service_cap, "/tmp/fsp", FS_SHELL_PROBE_TIMEOUT);
+    fd = fs_open(service_cap, "/tmp/fsp", O_WRONLY | O_CREAT | O_TRUNC,
+                 FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  create /tmp/fsp: ");
+    if (fd <= 0) {
+        sh_puts(fs_error_name(fd));
+        sh_puts("\r\n");
+        return;
+    }
+    sh_puts("ok fd=");
+    sh_putdec((uint32_t)fd);
+    sh_puts("\r\n");
+
+    const char payload[] = "probe";
+    err = fs_write(service_cap, fd, payload,
+                   (uint32_t)(sizeof(payload) - 1U),
+                   FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  write: ");
+    if (err == (int)(sizeof(payload) - 1U)) {
+        sh_puts("ok bytes=");
+        sh_putdec((uint32_t)err);
+    } else {
+        sh_puts(fs_error_name(err));
+    }
+    sh_puts("\r\n");
+
+    int close_err = fs_close(service_cap, fd, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  close file: ");
+    sh_puts(fs_error_name(close_err));
+    sh_puts("\r\n");
+
+    vfs_stat_t st;
+    err = fs_stat(service_cap, "/tmp/fsp", &st, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  stat file: ");
+    sh_puts(fs_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ino=");
+        sh_putdec(st.ino);
+        sh_puts(" size=");
+        sh_putdec(st.size);
+        sh_puts(" type=");
+        sh_puts(st.type == INODE_TYPE_FILE ? "file" : "?");
+    }
+    sh_puts("\r\n");
+
+    err = fs_unlink(service_cap, "/tmp/fsp", FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  unlink file: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+
+    (void)fs_unlink(service_cap, "/tmp/fspd", FS_SHELL_PROBE_TIMEOUT);
+    err = fs_mkdir(service_cap, "/tmp/fspd", FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  mkdir /tmp/fspd: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    if (err != KERN_OK) {
+        return;
+    }
+
+    err = fs_stat(service_cap, "/tmp/fspd", &st, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  stat dir: ");
+    sh_puts(fs_error_name(err));
+    if (err == KERN_OK) {
+        sh_puts(" ino=");
+        sh_putdec(st.ino);
+        sh_puts(" type=");
+        sh_puts(st.type == INODE_TYPE_DIR ? "dir" : "?");
+    }
+    sh_puts("\r\n");
+
+    err = fs_unlink(service_cap, "/tmp/fspd", FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  unlink dir: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+}
+
+static void cmd_fs_probe(void) {
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (live_lookup) {
+        sh_puts("User FS lookup\r\n");
+        sh_puts("  service cap: ");
+        sh_putdec((uint32_t)service_cap);
+        sh_puts("\r\n");
+    }
+    if (err != KERN_OK) {
+        sh_puts("fs probe: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    cmd_fs_probe_cap(service_cap);
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static void cmd_fs_lookup(void) {
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int err = cmd_fs_lookup_service(&service_cap);
+
+    sh_puts("User FS lookup\r\n");
+    sh_puts("  service: ");
+    sh_puts(FS_SHELL_SERVICE_NAME);
+    sh_puts("\r\n");
+    sh_puts("  service cap: ");
+    if (err != KERN_OK) {
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+    sh_putdec((uint32_t)service_cap);
+    sh_puts("\r\n");
+    err = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  ping: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    (void)fs_runtime_release_service(service_cap);
+}
+
+static void cmd_fs_registered(void) {
+    const char *reason = NULL;
+    cap_id_t service_cap = KERN_INVALID_ID;
+
+    sh_puts("User FS registration\r\n");
+    int err = fs_runtime_lookup_ready(FS_SHELL_PROBE_TIMEOUT, &reason);
+    sh_puts("  lookup path: ");
+    if (err == KERN_OK) {
+        sh_puts("ready\r\n");
+    } else {
+        sh_puts(reason ? reason : fs_error_name(err));
+        sh_puts(": ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = cmd_fs_lookup_service(&service_cap);
+    sh_puts("  service registered: ");
+    if (err != KERN_OK) {
+        sh_puts("no (");
+        sh_puts(fs_error_name(err));
+        sh_puts(")\r\n");
+        return;
+    }
+    sh_puts("yes\r\n");
+
+    err = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("  ping: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    (void)fs_runtime_release_service(service_cap);
+}
+
+static void cmd_fs_ls(const char *path) {
+    if (path == NULL) {
+        path = "/";
+    }
+
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (err != KERN_OK) {
+        sh_puts("fs ls: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    int fd = fs_open(service_cap, path, O_RDONLY, FS_SHELL_PROBE_TIMEOUT);
+    if (fd <= 0) {
+        sh_puts("fs ls: ");
+        sh_puts(path);
+        sh_puts(": ");
+        sh_puts(fs_error_name(fd));
+        sh_puts("\r\n");
+        cmd_fs_release_service(live_lookup, service_cap);
+        return;
+    }
+
+    dirent_t entry;
+    while (fs_readdir(service_cap, fd, &entry, FS_SHELL_PROBE_TIMEOUT) == KERN_OK) {
+        sh_putdec_width(entry.ino, 6);
+        sh_puts("  ");
+        switch (entry.type) {
+        case INODE_TYPE_DIR:    sh_putc('d'); break;
+        case INODE_TYPE_FILE:   sh_putc('-'); break;
+        case INODE_TYPE_CHRDEV: sh_putc('c'); break;
+        default:                sh_putc('?'); break;
+        }
+        sh_puts("  ");
+        sh_puts(entry.name);
+        sh_puts("\r\n");
+    }
+
+    err = fs_close(service_cap, fd, FS_SHELL_PROBE_TIMEOUT);
+    if (err != KERN_OK) {
+        sh_puts("fs ls close: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+    }
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static void cmd_fs_cat(const char *path) {
+    if (path == NULL) {
+        sh_puts("Usage: fs cat <file>\r\n");
+        return;
+    }
+
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (err != KERN_OK) {
+        sh_puts("fs cat: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    int fd = fs_open(service_cap, path, O_RDONLY, FS_SHELL_PROBE_TIMEOUT);
+    if (fd <= 0) {
+        sh_puts("fs cat: ");
+        sh_puts(path);
+        sh_puts(": ");
+        sh_puts(fs_error_name(fd));
+        sh_puts("\r\n");
+        cmd_fs_release_service(live_lookup, service_cap);
+        return;
+    }
+
+    char buf[FS_PAYLOAD_MAX + 1U];
+    int32_t n;
+    while ((n = fs_read(service_cap, fd, buf, FS_PAYLOAD_MAX,
+                        FS_SHELL_PROBE_TIMEOUT)) > 0) {
+        buf[n] = '\0';
+        sh_puts(buf);
+    }
+    sh_puts("\r\n");
+
+    err = fs_close(service_cap, fd, FS_SHELL_PROBE_TIMEOUT);
+    if (err != KERN_OK) {
+        sh_puts("fs cat close: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+    }
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static int cmd_fs_write_chunk(cap_id_t service_cap, int fd,
+                              const char *data, uint32_t len) {
+    uint32_t off = 0;
+
+    while (off < len) {
+        uint32_t chunk = len - off;
+        if (chunk > FS_PAYLOAD_MAX) {
+            chunk = FS_PAYLOAD_MAX;
+        }
+        int n = fs_write(service_cap, fd, data + off, chunk,
+                         FS_SHELL_PROBE_TIMEOUT);
+        if (n != (int)chunk) {
+            return n < 0 ? n : KERN_ERR_STATE;
+        }
+        off += chunk;
+    }
+    return KERN_OK;
+}
+
+static void cmd_fs_write_file(int argc, char **argv) {
+    if (argc < 4) {
+        sh_puts("Usage: fs write <file> <text>\r\n");
+        return;
+    }
+
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (err != KERN_OK) {
+        sh_puts("fs write: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    int fd = fs_open(service_cap, argv[2], O_WRONLY | O_CREAT | O_TRUNC,
+                     FS_SHELL_PROBE_TIMEOUT);
+    if (fd <= 0) {
+        sh_puts("fs write: ");
+        sh_puts(argv[2]);
+        sh_puts(": ");
+        sh_puts(fs_error_name(fd));
+        sh_puts("\r\n");
+        cmd_fs_release_service(live_lookup, service_cap);
+        return;
+    }
+
+    uint32_t total = 0;
+    for (int i = 3; i < argc; i++) {
+        if (i > 3) {
+            err = cmd_fs_write_chunk(service_cap, fd, " ", 1U);
+            if (err != KERN_OK) {
+                break;
+            }
+            total++;
+        }
+        uint32_t len = (uint32_t)strlen(argv[i]);
+        err = cmd_fs_write_chunk(service_cap, fd, argv[i], len);
+        if (err != KERN_OK) {
+            break;
+        }
+        total += len;
+    }
+
+    int close_err = fs_close(service_cap, fd, FS_SHELL_PROBE_TIMEOUT);
+    if (err == KERN_OK && close_err != KERN_OK) {
+        err = close_err;
+    }
+    if (err == KERN_OK) {
+        sh_puts("fs write: ok bytes=");
+        sh_putdec(total);
+        sh_puts("\r\n");
+    } else {
+        sh_puts("fs write: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+    }
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static void cmd_fs_rm(const char *path) {
+    if (path == NULL) {
+        sh_puts("Usage: fs rm <file>\r\n");
+        return;
+    }
+
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (err != KERN_OK) {
+        sh_puts("fs rm: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = fs_unlink(service_cap, path, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("fs rm: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static void cmd_fs_mkdir(const char *path) {
+    if (path == NULL) {
+        sh_puts("Usage: fs mkdir <dir>\r\n");
+        return;
+    }
+
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (err != KERN_OK) {
+        sh_puts("fs mkdir: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    err = fs_mkdir(service_cap, path, FS_SHELL_PROBE_TIMEOUT);
+    sh_puts("fs mkdir: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static void cmd_fs_stat(const char *path) {
+    if (path == NULL) {
+        sh_puts("Usage: fs stat <path>\r\n");
+        return;
+    }
+
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    if (err != KERN_OK) {
+        sh_puts("fs stat: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    vfs_stat_t st;
+    err = fs_stat(service_cap, path, &st, FS_SHELL_PROBE_TIMEOUT);
+    if (err != KERN_OK) {
+        sh_puts("fs stat: ");
+        sh_puts(path);
+        sh_puts(": ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        cmd_fs_release_service(live_lookup, service_cap);
+        return;
+    }
+
+    sh_puts("User FS stat\r\n");
+    sh_puts("  path: ");
+    sh_puts(path);
+    sh_puts("\r\n");
+    sh_puts("  ino: ");
+    sh_putdec(st.ino);
+    sh_puts("\r\n");
+    sh_puts("  type: ");
+    switch (st.type) {
+    case INODE_TYPE_DIR: sh_puts("dir"); break;
+    case INODE_TYPE_FILE: sh_puts("file"); break;
+    case INODE_TYPE_CHRDEV: sh_puts("chrdev"); break;
+    default: sh_puts("?"); break;
+    }
+    sh_puts("\r\n");
+    sh_puts("  size: ");
+    sh_putdec(st.size);
+    sh_puts("\r\n");
+    cmd_fs_release_service(live_lookup, service_cap);
+}
+
+static void cmd_fs_bind_inbox(const char *arg) {
+    if (arg == NULL) {
+        sh_puts("Usage: fs bind-inbox <auto|clear>\r\n");
+        return;
+    }
+    if (strcmp(arg, "clear") == 0 || strcmp(arg, "none") == 0) {
+        if (shell_fs_inbox_ep >= 0) {
+            (void)endpoint_delete(shell_fs_inbox_ep);
+        } else if (shell_fs_inbox_cap >= 0) {
+            cap_delete(shell_fs_inbox_cap);
+        }
+        shell_fs_inbox_ep = KERN_INVALID_ID;
+        shell_fs_inbox_cap = KERN_INVALID_ID;
+        fs_runtime_clear_inbox();
+        sh_puts("User FS inbox cleared\r\n");
+        cmd_fs_status();
+        return;
+    }
+    if (strcmp(arg, "auto") != 0) {
+        sh_puts("fs bind-inbox: param\r\n");
+        return;
+    }
+    if (shell_fs_inbox_cap >= 0 || shell_fs_inbox_ep >= 0) {
+        sh_puts("fs bind-inbox: busy\r\n");
+        cmd_fs_status();
+        return;
+    }
+    ep_id_t ep_id = endpoint_create("fs_inbox", KERN_EP_MSG_SIZE, 2);
+    if (ep_id < 0) {
+        sh_puts("fs bind-inbox: resource\r\n");
+        return;
+    }
+    cap_id_t cap = cap_create((void *)(uintptr_t)(ep_id + 1),
+                              CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    if (cap < 0) {
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs bind-inbox: resource\r\n");
+        return;
+    }
+    shell_fs_inbox_ep = ep_id;
+    shell_fs_inbox_cap = cap;
+    (void)fs_runtime_bind_owned_inbox(cap);
+    sh_puts("User FS inbox created\r\n");
+    cmd_fs_status();
+}
+
+static void cmd_fs_ns_start(void) {
+    if (shell_fs_ns_task >= 0 || shell_fs_ns_ep >= 0 ||
+        shell_fs_ns_cap >= 0) {
+        sh_puts("fs ns-start: busy\r\n");
+        cmd_fs_status();
+        return;
+    }
+
+    ep_id_t ep_id = endpoint_create("fs_ns", KERN_EP_MSG_SIZE, 4);
+    if (ep_id < 0) {
+        sh_puts("fs ns-start: endpoint\r\n");
+        return;
+    }
+    task_id_t tid = task_create_user("fs_ns", shell_fs_nameserver_task,
+                                     NULL, 13, 1536);
+    if (tid < 0) {
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs ns-start: task\r\n");
+        return;
+    }
+    tcb_t *ns_tcb = task_get_tcb(tid);
+    cap_id_t service_cap = cap_create_for(ns_tcb,
+                                          (void *)(uintptr_t)(ep_id + 1),
+                                          CAP_OBJ_ENDPOINT,
+                                          CAP_READ | CAP_WRITE);
+    if (service_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs ns-start: service cap\r\n");
+        return;
+    }
+    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
+                                   CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    if (root_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs ns-start: root cap\r\n");
+        return;
+    }
+    tcb_t *task = task_get_tcb(tid);
+    if (task == NULL || task->sp == NULL) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs ns-start: state\r\n");
+        return;
+    }
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)task->sp + 32U);
+    *stacked_r0 = (uint32_t)service_cap;
+
+    kern_err_t err = task_start(tid);
+    if (err != KERN_OK) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep_id);
+        sh_puts("fs ns-start: ");
+        sh_puts(fs_error_name(err));
+        sh_puts("\r\n");
+        return;
+    }
+
+    shell_fs_ns_task = tid;
+    shell_fs_ns_ep = ep_id;
+    shell_fs_ns_cap = root_cap;
+    (void)fs_runtime_bind_name_server(root_cap);
+    sh_puts("User FS name-server started\r\n");
+    (void)task_yield();
+    cmd_fs_status();
+}
+
+static void cmd_fs_ns_stop(void) {
+    if (shell_fs_task >= 0 || shell_fs_ep >= 0) {
+        sh_puts("fs ns-stop: fs service active\r\n");
+        return;
+    }
+    if (shell_fs_ns_task >= 0) {
+        (void)task_delete(shell_fs_ns_task);
+        shell_fs_ns_task = KERN_INVALID_ID;
+    }
+    if (shell_fs_ns_ep >= 0) {
+        (void)endpoint_delete(shell_fs_ns_ep);
+        shell_fs_ns_ep = KERN_INVALID_ID;
+    }
+    shell_fs_ns_cap = KERN_INVALID_ID;
+    fs_runtime_clear_name_server();
+    sh_puts("User FS name-server stopped\r\n");
+    cmd_fs_status();
+}
+
+static void cmd_fs_up(void) {
+    sh_puts("User FS stack up\r\n");
+    int created_inbox = 0;
+    int created_ns = 0;
+
+    if (shell_fs_inbox_cap < 0 && shell_fs_inbox_ep < 0) {
+        cmd_fs_bind_inbox("auto");
+        if (shell_fs_inbox_cap < 0) {
+            sh_puts("fs up: inbox failed\r\n");
+            return;
+        }
+        created_inbox = 1;
+    } else {
+        sh_puts("  inbox: already ready\r\n");
+    }
+
+    if (shell_fs_ns_cap < 0 && shell_fs_ns_task < 0 &&
+        shell_fs_ns_ep < 0) {
+        cmd_fs_ns_start();
+        if (shell_fs_ns_cap < 0) {
+            sh_puts("fs up: name-server failed\r\n");
+            if (created_inbox) {
+                cmd_fs_bind_inbox("clear");
+            }
+            return;
+        }
+        created_ns = 1;
+    } else {
+        sh_puts("  name-server: already ready\r\n");
+    }
+
+    if (shell_fs_cap < 0 && shell_fs_task < 0 && shell_fs_ep < 0) {
+        cmd_fs_start();
+        if (shell_fs_cap < 0) {
+            sh_puts("fs up: service failed\r\n");
+            if (created_ns) {
+                cmd_fs_ns_stop();
+            }
+            if (created_inbox) {
+                cmd_fs_bind_inbox("clear");
+            }
+            return;
+        }
+    } else {
+        sh_puts("  service: already ready\r\n");
+    }
+
+    sh_puts("User FS stack ready\r\n");
+    supervisor_set_health(shell_fs_supervisor_get(), KERN_OK);
+    {
+        cap_id_t service_cap = KERN_INVALID_ID;
+        int live_lookup = 0;
+        int health = cmd_fs_acquire_service(&service_cap, &live_lookup);
+        if (health == KERN_OK) {
+            health = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+            cmd_fs_release_service(live_lookup, service_cap);
+        }
+        supervisor_set_health(shell_fs_supervisor_get(), health);
+    }
+    cmd_fs_status();
+}
+
+static void cmd_fs_down(void) {
+    sh_puts("User FS stack down\r\n");
+    supervisor_set_health(shell_fs_supervisor_get(), KERN_ERR_STATE);
+
+    if (shell_fs_task >= 0 || shell_fs_ep >= 0 || shell_fs_cap >= 0) {
+        cmd_fs_stop();
+    } else {
+        sh_puts("  service: already stopped\r\n");
+    }
+
+    if (shell_fs_ns_task >= 0 || shell_fs_ns_ep >= 0 ||
+        shell_fs_ns_cap >= 0) {
+        cmd_fs_ns_stop();
+    } else {
+        sh_puts("  name-server: already stopped\r\n");
+    }
+
+    if (shell_fs_inbox_ep >= 0 || shell_fs_inbox_cap >= 0) {
+        cmd_fs_bind_inbox("clear");
+    } else {
+        sh_puts("  inbox: already cleared\r\n");
+    }
+
+    sh_puts("User FS stack stopped\r\n");
+    cmd_fs_status();
+}
+
+static void cmd_fs_restart(void) {
+    sh_puts("User FS stack restart\r\n");
+    supervisor_record_restart(shell_fs_supervisor_get());
+    cmd_fs_down();
+    cmd_fs_up();
+}
+
+static void cmd_fs_health(void) {
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+
+    sh_puts("User FS health\r\n");
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    supervisor_set_health(shell_fs_supervisor_get(), err);
+    if (err != KERN_OK) {
+        sh_puts("  state: ");
+        sh_puts(err == KERN_ERR_STATE ? "stopped" : fs_error_name(err));
+        sh_puts("\r\n");
+        cmd_fs_status();
+        return;
+    }
+
+    err = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+    cmd_fs_release_service(live_lookup, service_cap);
+    supervisor_set_health(shell_fs_supervisor_get(), err);
+    sh_puts("  ping: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    cmd_fs_status();
+}
+
+static void cmd_fs_recover(void) {
+    cap_id_t service_cap = KERN_INVALID_ID;
+    int live_lookup = 0;
+
+    sh_puts("User FS stack recover\r\n");
+    supervisor_record_recover(shell_fs_supervisor_get());
+    int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+    supervisor_set_health(shell_fs_supervisor_get(), err);
+    if (err != KERN_OK) {
+        sh_puts("  health: ");
+        sh_puts(err == KERN_ERR_STATE ? "stopped" : fs_error_name(err));
+        sh_puts("\r\n");
+        cmd_fs_up();
+        return;
+    }
+
+    err = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+    cmd_fs_release_service(live_lookup, service_cap);
+    supervisor_set_health(shell_fs_supervisor_get(), err);
+    sh_puts("  ping: ");
+    sh_puts(fs_error_name(err));
+    sh_puts("\r\n");
+    if (err == KERN_OK) {
+        supervisor_set_health(shell_fs_supervisor_get(), KERN_OK);
+        sh_puts("User FS stack healthy\r\n");
+        cmd_fs_status();
+        return;
+    }
+
+    cmd_fs_restart();
+}
+
+static void cmd_fs(int argc, char **argv) {
+    if (argc <= 1 || strcmp(argv[1], "abi") == 0) {
+        cmd_fs_abi();
+        return;
+    }
+    if (strcmp(argv[1], "status") == 0) {
+        cmd_fs_status();
+        return;
+    }
+    if (strcmp(argv[1], "up") == 0) {
+        cmd_fs_up();
+        return;
+    }
+    if (strcmp(argv[1], "down") == 0) {
+        cmd_fs_down();
+        return;
+    }
+    if (strcmp(argv[1], "restart") == 0) {
+        cmd_fs_restart();
+        return;
+    }
+    if (strcmp(argv[1], "health") == 0) {
+        cmd_fs_health();
+        return;
+    }
+    if (strcmp(argv[1], "recover") == 0) {
+        cmd_fs_recover();
+        return;
+    }
+    if (strcmp(argv[1], "start") == 0) {
+        cmd_fs_start();
+        return;
+    }
+    if (strcmp(argv[1], "stop") == 0) {
+        cmd_fs_stop();
+        return;
+    }
+    if (strcmp(argv[1], "probe") == 0) {
+        cmd_fs_probe();
+        return;
+    }
+    if (strcmp(argv[1], "lookup") == 0) {
+        cmd_fs_lookup();
+        return;
+    }
+    if (strcmp(argv[1], "registered") == 0) {
+        cmd_fs_registered();
+        return;
+    }
+    if (strcmp(argv[1], "ls") == 0) {
+        cmd_fs_ls((argc > 2) ? argv[2] : "/");
+        return;
+    }
+    if (strcmp(argv[1], "cat") == 0) {
+        cmd_fs_cat((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "write") == 0) {
+        cmd_fs_write_file(argc, argv);
+        return;
+    }
+    if (strcmp(argv[1], "rm") == 0) {
+        cmd_fs_rm((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "mkdir") == 0) {
+        cmd_fs_mkdir((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "stat") == 0) {
+        cmd_fs_stat((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "bind-inbox") == 0) {
+        cmd_fs_bind_inbox((argc > 2) ? argv[2] : NULL);
+        return;
+    }
+    if (strcmp(argv[1], "ns-start") == 0) {
+        cmd_fs_ns_start();
+        return;
+    }
+    if (strcmp(argv[1], "ns-stop") == 0) {
+        cmd_fs_ns_stop();
+        return;
+    }
+
+    sh_puts("Usage: fs [abi|status|up|down|restart|health|recover|start|stop|probe|lookup|registered|ls [path]|cat <file>|write <file> <text>|rm <file>|mkdir <dir>|stat <path>|bind-inbox <auto|clear>|ns-start|ns-stop]\r\n");
+}
+
+#endif /* VFS_ENABLE && CAP_ENABLE */
+
+/*============================================================================
+ * 内置命令: svc
+ *============================================================================*/
+
+#if DRIVER_ENABLE || (VFS_ENABLE && CAP_ENABLE)
+
+static void cmd_svc_print_row(const supervisor_service_t *svc,
+                              const char *kind,
+                              task_id_t task,
+                              int lookup_ready,
+                              const char *(*err_name)(int)) {
+    sh_puts("  ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+
+    sh_puts("    type: ");
+    sh_puts(kind);
+    sh_puts("\r\n");
+
+    sh_puts("    task: ");
+    if (task < 0) {
+        sh_puts("none");
+    } else {
+        sh_putdec((uint32_t)task);
+        sh_puts(" (");
+        sh_puts(state_str(task_get_state(task)));
+        sh_puts(")");
+    }
+    sh_puts("\r\n");
+
+    sh_puts("    lookup: ");
+    sh_puts(lookup_ready == KERN_OK ? "ready" : err_name(lookup_ready));
+    sh_puts("\r\n");
+
+    sh_puts("    restarts: ");
+    sh_putdec(supervisor_restart_count(svc));
+    sh_puts("  recovers: ");
+    sh_putdec(supervisor_recover_count(svc));
+    sh_puts("\r\n");
+
+    sh_puts("    pending: ");
+    sh_putdec(supervisor_pending_clients(svc));
+    sh_puts("  health: ");
+    sh_puts(err_name(supervisor_last_health(svc)));
+    sh_puts("\r\n");
+
+    sh_puts("    policy: ");
+    sh_puts(supervisor_restart_policy_name(supervisor_restart_policy(svc)));
+    sh_puts("  max restarts: ");
+    sh_putdec(supervisor_max_restarts(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_print_generic(const supervisor_service_t *svc) {
+    sh_puts("  ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+    sh_puts("    type: service\r\n");
+    sh_puts("    task: unknown\r\n");
+    sh_puts("    lookup: unknown\r\n");
+    sh_puts("    restarts: ");
+    sh_putdec(supervisor_restart_count(svc));
+    sh_puts("  recovers: ");
+    sh_putdec(supervisor_recover_count(svc));
+    sh_puts("\r\n");
+    sh_puts("    pending: ");
+    sh_putdec(supervisor_pending_clients(svc));
+    sh_puts("  health: ");
+    sh_putdec((uint32_t)supervisor_last_health(svc));
+    sh_puts("\r\n");
+    sh_puts("    policy: ");
+    sh_puts(supervisor_restart_policy_name(supervisor_restart_policy(svc)));
+    sh_puts("  max restarts: ");
+    sh_putdec(supervisor_max_restarts(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_register_defaults(void) {
+#if DRIVER_ENABLE
+    (void)shell_driver_supervisor_get();
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    (void)shell_fs_supervisor_get();
+#endif
+}
+
+static void cmd_svc_policy(int argc, char **argv) {
+    if (argc < 4 || argc > 5) {
+        sh_puts("Usage: svc policy <service> <manual|auto> [max]\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc policy: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    supervisor_restart_policy_t policy;
+    int err = supervisor_parse_restart_policy(argv[3], &policy);
+    if (err != KERN_OK) {
+        sh_puts("svc policy: invalid policy\r\n");
+        return;
+    }
+
+    uint32_t max_restarts = 0;
+    if (policy == SUPERVISOR_RESTART_AUTO && argc >= 5) {
+        max_restarts = parse_dec(argv[4]);
+    }
+
+    supervisor_set_restart_policy(svc, policy, max_restarts);
+    sh_puts("User service policy updated\r\n");
+    sh_puts("  service: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+    sh_puts("  policy: ");
+    sh_puts(supervisor_restart_policy_name(supervisor_restart_policy(svc)));
+    sh_puts("\r\n");
+    sh_puts("  max restarts: ");
+    sh_putdec(supervisor_max_restarts(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "policy") == 0) {
+        cmd_svc_policy(argc, argv);
+        return;
+    }
+
+    if (argc > 1 && strcmp(argv[1], "status") != 0) {
+        sh_puts("Usage: svc [status|policy <service> <manual|auto> [max]]\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    sh_puts("User services\r\n");
+    uint32_t count = supervisor_service_count();
+    for (uint32_t i = 0; i < count; i++) {
+        supervisor_service_t *svc = supervisor_service_at(i);
+        if (svc == NULL) {
+            continue;
+        }
+#if DRIVER_ENABLE
+        if (strcmp(supervisor_service_name(svc),
+                   DRIVER_SHELL_SERVICE_NAME) == 0) {
+            cmd_svc_print_row(svc, "driver",
+                              shell_driver_uart_task,
+                              driver_runtime_lookup_ready(
+                                  DRIVER_SHELL_PROBE_TIMEOUT, NULL),
+                              driver_error_name);
+            continue;
+        }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+        if (strcmp(supervisor_service_name(svc),
+                   FS_SHELL_SERVICE_NAME) == 0) {
+            cmd_svc_print_row(svc, "fs",
+                              shell_fs_task,
+                              fs_runtime_lookup_ready(FS_SHELL_PROBE_TIMEOUT,
+                                                      NULL),
+                              fs_error_name);
+            continue;
+        }
+#endif
+        cmd_svc_print_generic(svc);
+    }
+}
+
+#endif /* DRIVER_ENABLE || (VFS_ENABLE && CAP_ENABLE) */
+
+/*============================================================================
  * 命令表
  *============================================================================*/
 
@@ -901,6 +3420,13 @@ const shell_cmd_t cmd_table[] = {
 #endif
 #if DRIVER_ENABLE
     { "dev",      "List devices",               cmd_dev      },
+    { "driver",   "[abi|status [svc]] Driver",  cmd_driver   },
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    { "fs",       "[up|down|probe|ls] FS",      cmd_fs       },
+#endif
+#if DRIVER_ENABLE || (VFS_ENABLE && CAP_ENABLE)
+    { "svc",      "Service supervisor",         cmd_svc      },
 #endif
     { "free",     "Memory usage",               cmd_free     },
     { "hexdump",  "<addr> <len> Hex dump",      cmd_hexdump  },

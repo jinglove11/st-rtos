@@ -1111,6 +1111,22 @@ static int sys_irq_register(uint32_t a1, uint32_t a2, uint32_t a3,
     return irq_register((int16_t)a1, (isr_func_t)a2, (uint8_t)a3);
 }
 
+static int sys_irq_bind(uint32_t a1, uint32_t a2, uint32_t a3,
+                                uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+#if CAP_ENABLE && IPC_ENDPOINT
+    void *ep_obj = cap_resolve((cap_id_t)a2, CAP_OBJ_ENDPOINT, CAP_WRITE);
+    if (ep_obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+    ep_id_t ep_id = (ep_id_t)((uintptr_t)ep_obj - 1);
+    return kirq_bind_endpoint((cap_id_t)a1, ep_id, a3);
+#else
+    U(a1);U(a2);U(a3);
+    return KERN_ERR_CAP;
+#endif
+}
+
 static int sys_bh_create(uint32_t a1, uint32_t a2, uint32_t a3,
                                  uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a3);U(a4);U(a5);U(a6);
@@ -1156,6 +1172,22 @@ static int sys_cap_revoke(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
     return cap_revoke((cap_id_t)a1);
+}
+
+static int sys_cap_type(uint32_t a1, uint32_t a2, uint32_t a3,
+                                uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+    uint8_t obj_type = 0;
+    kern_err_t err = cap_get_type((cap_id_t)a1, &obj_type);
+    return (err == KERN_OK) ? (int)obj_type : (int)err;
+}
+
+static int sys_cap_rights(uint32_t a1, uint32_t a2, uint32_t a3,
+                                  uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+    uint8_t rights = 0;
+    kern_err_t err = cap_get_rights((cap_id_t)a1, &rights);
+    return (err == KERN_OK) ? (int)rights : (int)err;
 }
 
 #endif /* CAP_ENABLE */
@@ -1270,6 +1302,74 @@ static int sys_lseek(uint32_t a1, uint32_t a2, uint32_t a3,
     return vfs_lseek((int)a1, (int32_t)a2, (int)a3);
 }
 
+static int sys_readdir(uint32_t a1, uint32_t a2, uint32_t a3,
+                               uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+    dirent_t entry;
+    void *user_entry = (void *)(uintptr_t)a2;
+
+    if (!user_access_ok(user_entry, sizeof(entry), USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+
+    kern_err_t err = vfs_readdir((int)a1, &entry);
+    if (err != KERN_OK) {
+        return err;
+    }
+    return copy_to_user(user_entry, &entry, sizeof(entry));
+}
+
+static int sys_unlink(uint32_t a1, uint32_t a2, uint32_t a3,
+                              uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+    char path[SYSCALL_PATH_MAX];
+    kern_err_t copy_err = strncpy_from_user(path,
+                                            (const char *)(uintptr_t)a1,
+                                            sizeof(path));
+    if (copy_err != KERN_OK) {
+        return copy_err;
+    }
+    return vfs_unlink(path);
+}
+
+static int sys_mkdir(uint32_t a1, uint32_t a2, uint32_t a3,
+                             uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+    char path[SYSCALL_PATH_MAX];
+    kern_err_t copy_err = strncpy_from_user(path,
+                                            (const char *)(uintptr_t)a1,
+                                            sizeof(path));
+    if (copy_err != KERN_OK) {
+        return copy_err;
+    }
+    return vfs_mkdir(path);
+}
+
+static int sys_stat(uint32_t a1, uint32_t a2, uint32_t a3,
+                            uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+    char path[SYSCALL_PATH_MAX];
+    vfs_stat_t st;
+    void *user_st = (void *)(uintptr_t)a2;
+
+    if (!user_access_ok(user_st, sizeof(st), USER_ACCESS_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+
+    kern_err_t copy_err = strncpy_from_user(path,
+                                            (const char *)(uintptr_t)a1,
+                                            sizeof(path));
+    if (copy_err != KERN_OK) {
+        return copy_err;
+    }
+
+    kern_err_t err = vfs_stat(path, &st);
+    if (err != KERN_OK) {
+        return err;
+    }
+    return copy_to_user(user_st, &st, sizeof(st));
+}
+
 #endif /* VFS_ENABLE */
 
 #undef U
@@ -1332,6 +1432,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_TIMER_START,   sys_timer_start,   2),
     SYSDEF(SYSCALL_TIMER_BIND,    sys_timer_bind,    3),
     SYSDEF(SYSCALL_IRQ_REGISTER,  sys_irq_register,  3),
+    SYSDEF(SYSCALL_IRQ_BIND,      sys_irq_bind,      3),
     SYSDEF(SYSCALL_BH_CREATE,     sys_bh_create,     2),
     SYSDEF(SYSCALL_BH_SCHEDULE,   sys_bh_schedule,   1),
     SYSDEF(SYSCALL_MEM_ALLOC,     sys_mem_alloc,     1),
@@ -1344,6 +1445,8 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_DERIVE,    sys_cap_derive,    2),
     SYSDEF(SYSCALL_CAP_TRANSFER,  sys_cap_transfer,  2),
     SYSDEF(SYSCALL_CAP_REVOKE,    sys_cap_revoke,    1),
+    SYSDEF(SYSCALL_CAP_TYPE,      sys_cap_type,      1),
+    SYSDEF(SYSCALL_CAP_RIGHTS,    sys_cap_rights,    1),
 #endif
 #if VFS_ENABLE
     SYSDEF(SYSCALL_OPEN,          sys_open,          2),
@@ -1352,6 +1455,10 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_WRITE,         sys_write,         3),
     SYSDEF(SYSCALL_IOCTL,         sys_ioctl,         3),
     SYSDEF(SYSCALL_LSEEK,         sys_lseek,         3),
+    SYSDEF(SYSCALL_READDIR,       sys_readdir,       2),
+    SYSDEF(SYSCALL_UNLINK,        sys_unlink,        1),
+    SYSDEF(SYSCALL_MKDIR,         sys_mkdir,         1),
+    SYSDEF(SYSCALL_STAT,          sys_stat,          2),
 #endif
 };
 

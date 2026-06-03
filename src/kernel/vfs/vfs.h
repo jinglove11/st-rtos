@@ -32,6 +32,9 @@ kern_err_t vfs_ioctl(int fd, uint32_t cmd, void *arg);
 int32_t  vfs_lseek(int fd, int32_t offset, int whence);
 kern_err_t vfs_readdir(int fd, dirent_t *entry);
 kern_err_t vfs_rewinddir(int fd);
+kern_err_t vfs_unlink(const char *path);
+kern_err_t vfs_mkdir(const char *path);
+kern_err_t vfs_stat(const char *path, vfs_stat_t *st);
 
 /* 挂载 */
 kern_err_t vfs_mount(const char *path, inode_t *root_inode);

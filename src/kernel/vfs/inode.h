@@ -98,6 +98,12 @@ struct dirent {
     uint8_t     type;          /* inode_type_t */
 };
 
+typedef struct {
+    uint32_t ino;
+    uint32_t size;
+    uint8_t  type;             /* inode_type_t */
+} vfs_stat_t;
+
 /*============================================================================
  * inode 结构
  *============================================================================*/

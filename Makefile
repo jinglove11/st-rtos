@@ -136,6 +136,8 @@ CFLAGS      += -I$(SRC_DIR)/board/$(TARGET_MCU)
 CFLAGS      += -I$(SRC_DIR)/kernel
 CFLAGS      += -I$(SRC_DIR)/user/nameserver
 CFLAGS      += -I$(SRC_DIR)/user/drivers
+CFLAGS      += -I$(SRC_DIR)/user/fs
+CFLAGS      += -I$(SRC_DIR)/user/supervisor
 CFLAGS      += -I$(SRC_DIR)/arch/arm/cortex-m7
 CFLAGS      += -I$(SRC_DIR)/tests
 CFLAGS      += -I$(SRC_DIR)/app
@@ -220,6 +222,12 @@ APP_SOURCES  = src/app/main.c
 APP_SOURCES  += src/app/shell.c
 APP_SOURCES  += src/user/nameserver/nameserver.c
 APP_SOURCES  += src/user/drivers/uart_server.c
+APP_SOURCES  += src/user/drivers/driver_registry.c
+APP_SOURCES  += src/user/drivers/driver_client.c
+APP_SOURCES  += src/user/drivers/driver_runtime.c
+APP_SOURCES  += src/user/fs/fs_server.c
+APP_SOURCES  += src/user/fs/fs_runtime.c
+APP_SOURCES  += src/user/supervisor/supervisor.c
 APP_SOURCES  += $(UART_SRC)
 APP_SOURCES  += $(GPIO_SRC)
 APP_SOURCES  += src/drivers/uart_dev.c
@@ -250,8 +258,12 @@ all: $(TARGET)
 
 # 检查配置文件
 $(CONFIG_FILE):
-	@echo "No configuration found, running defconfig..."
-	@python3 scripts/menuconfig.py defconfig
+	@echo "No configuration found, loading $(BOARD) defconfig..."
+	@if [ -f configs/$(BOARD)_defconfig ]; then \
+		cp configs/$(BOARD)_defconfig $(CONFIG_FILE); \
+	else \
+		python3 scripts/menuconfig.py defconfig; \
+	fi
 
 # 生成配置头文件
 $(CONFIG_HEADER): $(CONFIG_FILE)

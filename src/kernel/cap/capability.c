@@ -354,6 +354,41 @@ void *cap_resolve(cap_id_t cap, uint8_t obj_type, uint8_t required_rights) {
     return cap_lookup_for(sched_get_current(), cap, obj_type, required_rights);
 }
 
+kern_err_t cap_get_type_for(tcb_t *owner, cap_id_t cap, uint8_t *out_type) {
+    cap_entry_t *entry = cap_get_entry(cap);
+    if (out_type == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    if (entry == NULL || !cap_owner_allowed(owner, cap, entry)) {
+        return KERN_ERR_CAP;
+    }
+
+    *out_type = entry->obj_type;
+    return KERN_OK;
+}
+
+kern_err_t cap_get_type(cap_id_t cap, uint8_t *out_type) {
+    return cap_get_type_for(sched_get_current(), cap, out_type);
+}
+
+kern_err_t cap_get_rights_for(tcb_t *owner, cap_id_t cap,
+                              uint8_t *out_rights) {
+    cap_entry_t *entry = cap_get_entry(cap);
+    if (out_rights == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    if (entry == NULL || !cap_owner_allowed(owner, cap, entry)) {
+        return KERN_ERR_CAP;
+    }
+
+    *out_rights = entry->rights;
+    return KERN_OK;
+}
+
+kern_err_t cap_get_rights(cap_id_t cap, uint8_t *out_rights) {
+    return cap_get_rights_for(sched_get_current(), cap, out_rights);
+}
+
 void cap_delete(cap_id_t cap) {
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL) {

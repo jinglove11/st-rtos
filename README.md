@@ -117,20 +117,16 @@ FreeRTOS 这类传统 RTOS 通常提供小而稳定的调度、队列、信号�
 - P2: timer/IRQ/BH、device、memory、shell、trace/stats 工程化
 - P3: usercopy、fault cleanup、request/reply IPC、最小用户态服务路径、
   sleepable endpoint syscall
+- P4: name server、service registry、IRQ notification、MMIO/SHM capability、
+  用户态 driver server、用户态 FS server、shell-managed 服务生命周期与恢复原型
 
 仍待完成的微内核方向：
 
 - root/init 用户态任务
-- name server / service registry
-- 用户态 FS server
-- 用户态 driver server
-- IRQ capability 和 IRQ-to-endpoint notification
-- MMIO capability
-- shared memory object
 - 完整 CSpace/CNode
 - reply cap 一等对象
 - 全 syscall sleepable continuation
-- 完整服务崩溃恢复和 supervisor
+- root/init 统一 supervisor 和服务崩溃恢复策略
 
 ## 支持平台
 
@@ -278,6 +274,16 @@ my-rtos>
 | `mem` | 查看内存/任务布局 |
 | `ls [path]` | 查看 VFS 目录 |
 | `cat <path>` | 读取文件 |
+| `driver up/down/restart/health/recover` | 一键启动、停止、重启、健康检查或恢复用户态 driver 栈，并在 status 中显示健康统计 |
+| `driver abi/status/lookup/registered/probe/probe-mmio` | 用户态 driver ABI、注册表、服务发现、注册状态和探测 |
+| `fs up/down/restart/health/recover` | 一键启动、停止、重启、健康检查或恢复用户态 FS 栈，并在 status 中显示健康统计 |
+| `fs abi/status/start/stop/probe/registered` | 用户态 FS 服务管理、注册状态和探测 |
+| `fs ls [path]` | 通过用户态 FS 服务遍历目录 |
+| `fs cat <path>` | 通过用户态 FS 服务读取文件 |
+| `fs write <path> <text>` | 通过用户态 FS 服务创建/覆盖文件 |
+| `fs rm <path>` | 通过用户态 FS 服务删除文件 |
+| `fs mkdir <path>` | 通过用户态 FS 服务创建目录 |
+| `fs stat <path>` | 通过用户态 FS 服务查询 inode 元信息 |
 | `echo ...` | 输出文本 |
 | `trace` | 查看 trace buffer |
 | `stats` | 查看内核统计 |
@@ -365,14 +371,14 @@ make genconfig
 
 需要明确的是，My-RTOS 目前还不是完整意义上的用户态服务微内核：
 
-- VFS、devfs、driver、timer、BH 仍主要运行在内核侧
-- 没有 root/init 和 name server
+- 内核 VFS/devfs、debug UART、timer、BH 仍保留兼容路径
+- 已有 shell-managed FS/driver 服务生命周期原型，但还没有 root/init 统一 supervisor
 - capability 还不是完整 CSpace/CNode 模型
 - cap-bearing blocking IPC 还没有完整 continuation
 - channel blocking syscall 仍有保守限制
 - 不是所有阻塞 syscall 都已经 sleepable continuation 化
-- 用户态服务崩溃后的 supervisor/restart 机制还未完成
-- MMIO capability、IRQ notification、shared memory manager 仍待建设
+- 用户态服务已有手动 restart/recover 原型，崩溃后的统一 supervisor/revoke/restart 策略还未完成
+- MMIO capability、IRQ notification、shared memory manager 已有基础路径，仍需产品化收口
 
 这些限制是后续服务化阶段的主要工作。
 
@@ -389,12 +395,11 @@ make genconfig
 中期重点：
 
 - root/init task
-- name server
-- IRQ-to-endpoint notification
-- MMIO capability
-- shared memory object
-- 用户态 driver server
-- 用户态 FS server
+- service supervisor
+- 完整 CSpace/CNode
+- 完整 sleepable syscall continuation
+- 用户态 driver server 产品化
+- 用户态 FS server 产品化，并把 shell-managed lifecycle 下沉到 root/init supervisor
 
 长期目标：
 

@@ -84,6 +84,10 @@ kern_err_t cap_revoke(cap_id_t cap);
 
 cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t rights);
 void    *cap_lookup_for(tcb_t *owner, cap_id_t cap, uint8_t obj_type, uint8_t required_rights);
+kern_err_t cap_get_type_for(tcb_t *owner, cap_id_t cap, uint8_t *out_type);
+kern_err_t cap_get_type(cap_id_t cap, uint8_t *out_type);
+kern_err_t cap_get_rights_for(tcb_t *owner, cap_id_t cap, uint8_t *out_rights);
+kern_err_t cap_get_rights(cap_id_t cap, uint8_t *out_rights);
 cap_id_t cap_derive_for(tcb_t *owner, cap_id_t cap, uint8_t subset_rights);
 cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights);
 kern_err_t cap_move_to(tcb_t *src, cap_id_t cap, tcb_t *dst, cap_id_t *out_dst);

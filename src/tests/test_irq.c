@@ -20,8 +20,52 @@
 #include "kernel.h"
 #include "trace.h"
 #include "stats.h"
+#include "capability.h"
+#include "user_api.h"
 
 static void test_handler_stub(void);
+
+static void irq_user_bind_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    cap_id_t ep_cap = (cap_id_t)(packed & 0xffffU);
+    cap_id_t irq_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    uint32_t msg[2] = {0, 0};
+    int err;
+
+    if (ep_cap <= 0 || irq_cap <= 0) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
+    }
+
+    err = sys_irq_bind((int)irq_cap, (int)ep_cap, 0x55514952);
+    if (err == KERN_OK) {
+        err = sys_ep_recv((int)ep_cap, msg, 1000);
+    }
+    if (err == KERN_OK && msg[0] != 0x55514952U) {
+        err = KERN_ERR_STATE;
+    }
+    if (err == KERN_OK && msg[1] != 53U) {
+        err = KERN_ERR_STATE;
+    }
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void irq_user_bind_once_task(void *arg) {
+    uint32_t packed = (uint32_t)(uintptr_t)arg;
+    cap_id_t ep_cap = (cap_id_t)(packed & 0xffffU);
+    cap_id_t irq_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int err;
+
+    err = sys_irq_bind((int)irq_cap, (int)ep_cap, 0x42495251);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+static void irq_test_set_arg(task_id_t task_id, uint32_t arg) {
+    tcb_t *tcb = task_get_tcb(task_id);
+    if (tcb != NULL && tcb->sp != NULL) {
+        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
+        *stacked_r0 = arg;
+    }
+}
 
 /*============================================================================
  * 测试 1: ISR 池管理
@@ -426,6 +470,339 @@ static void test_irq_endpoint_notification(void) {
 }
 
 /*============================================================================
+ * 测试 8: IRQ capability lifecycle
+ *============================================================================*/
+
+static void test_irq_cap_lifecycle(void) {
+    test_section("Test 8: IRQ capability lifecycle");
+
+#if CAP_ENABLE
+    uint16_t cap_free_before = cap_free_count();
+    cap_id_t cap = KERN_INVALID_ID;
+    int16_t irq = KERN_INVALID_ID;
+
+    kern_err_t err = kirq_create_cap(50,
+                                     CAP_READ | CAP_WRITE | CAP_MANAGE |
+                                         CAP_TRANSFER,
+                                     &cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq_create_cap OK");
+    TEST_ASSERT(cap >= 0, "kirq_create_cap returns cap");
+
+    err = kirq_get_number(cap, &irq);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq_get_number OK");
+    TEST_ASSERT_EQ(50, (int)irq, "kirq number recorded");
+
+    cap_id_t bad_cap = KERN_INVALID_ID;
+    err = kirq_create_cap(-1, CAP_FULL, &bad_cap);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kirq_create_cap rejects negative irq");
+    err = kirq_create_cap(98, CAP_FULL, &bad_cap);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kirq_create_cap rejects out of range irq");
+    err = kirq_get_number(KERN_INVALID_ID, &irq);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kirq_get_number rejects invalid cap");
+    err = kirq_get_number(cap, NULL);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kirq_get_number rejects NULL output");
+
+    err = kirq_delete_cap(cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq_delete_cap OK");
+    err = kirq_get_number(cap, &irq);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "deleted kirq cap no longer resolves");
+
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "kirq cap cleanup restored cap count");
+#else
+    test_skip("capability disabled");
+#endif
+}
+
+/*============================================================================
+ * 测试 9: IRQ capability endpoint bind
+ *============================================================================*/
+
+static void test_irq_cap_endpoint_bind(void) {
+    test_section("Test 9: IRQ capability endpoint bind");
+
+#if CAP_ENABLE && IPC_ENDPOINT
+    uint16_t cap_free_before = cap_free_count();
+    ep_id_t ep = endpoint_create("irq_cap_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "IRQ cap endpoint created");
+    if (ep < 0) {
+        return;
+    }
+
+    cap_id_t cap = KERN_INVALID_ID;
+    kern_err_t err = kirq_create_cap(51,
+                                     CAP_READ | CAP_WRITE | CAP_MANAGE |
+                                         CAP_TRANSFER,
+                                     &cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq bind cap created");
+    TEST_ASSERT(cap >= 0, "kirq bind cap valid");
+
+    err = kirq_bind_endpoint(cap, ep, 0x4b495251U);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq_bind_endpoint OK");
+    err = kirq_bind_endpoint(KERN_INVALID_ID, ep, 0);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err, "kirq_bind_endpoint rejects invalid cap");
+    err = kirq_bind_endpoint(cap, (ep_id_t)KERN_INVALID_ID, 0);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "kirq_bind_endpoint rejects invalid endpoint");
+
+    err = irq_notify(51);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq-bound IRQ notification sent");
+
+    uint32_t msg[2] = {0, 0};
+    err = endpoint_recv(ep, msg, 0);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq-bound notification received");
+    TEST_ASSERT_EQ((int)0x4b495251U, (int)msg[0],
+                   "kirq-bound badge copied");
+    TEST_ASSERT_EQ(51, (int)msg[1], "kirq-bound IRQ number copied");
+
+    err = kirq_delete_cap(cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq bound cap deleted");
+    err = irq_notify(51);
+    TEST_ASSERT_EQ(KERN_ERR_NOEXIST, err,
+                   "kirq delete clears endpoint binding");
+
+    endpoint_delete(ep);
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "kirq bind cleanup restored cap count");
+#else
+    test_skip("capability or endpoint disabled");
+#endif
+}
+
+/*============================================================================
+ * 测试 10: IRQ bind follows bound cap revoke
+ *============================================================================*/
+
+static void test_irq_cap_bind_revoke_hook(void) {
+    test_section("Test 10: IRQ capability bind revoke hook");
+
+#if CAP_ENABLE && IPC_ENDPOINT
+    uint16_t cap_free_before = cap_free_count();
+    ep_id_t ep = endpoint_create("irq_revoke_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "IRQ revoke endpoint created");
+    if (ep < 0) {
+        return;
+    }
+
+    cap_id_t parent = KERN_INVALID_ID;
+    kern_err_t err = kirq_create_cap(52,
+                                     CAP_READ | CAP_WRITE | CAP_MANAGE |
+                                         CAP_TRANSFER | CAP_GRANT,
+                                     &parent);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq revoke parent created");
+    TEST_ASSERT(parent >= 0, "kirq revoke parent valid");
+
+    cap_id_t child = cap_derive(parent, CAP_READ | CAP_WRITE | CAP_MANAGE);
+    TEST_ASSERT(child >= 0, "kirq revoke child derived");
+
+    err = kirq_bind_endpoint(parent, ep, 0x52495251U);
+    TEST_ASSERT_EQ(KERN_OK, err, "kirq revoke parent bound");
+
+    cap_delete(parent);
+    err = irq_notify(52);
+    TEST_ASSERT_EQ(KERN_ERR_NOEXIST, err,
+                   "bound parent cap delete clears IRQ binding");
+
+    err = kirq_get_number(child, &(int16_t){0});
+    TEST_ASSERT_EQ(KERN_OK, err, "derived IRQ cap still resolves");
+    err = kirq_delete_cap(child);
+    TEST_ASSERT_EQ(KERN_OK, err, "derived IRQ cap deleted");
+
+    endpoint_delete(ep);
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "kirq revoke-hook cleanup restored cap count");
+#else
+    test_skip("capability or endpoint disabled");
+#endif
+}
+
+/*============================================================================
+ * 测试 11: user task binds IRQ cap to endpoint
+ *============================================================================*/
+
+static void test_irq_user_cap_endpoint_bind(void) {
+    test_section("Test 11: user IRQ cap endpoint bind syscall");
+
+#if CAP_ENABLE && IPC_ENDPOINT && SYSCALL_ENABLE
+    uint16_t cap_free_before = cap_free_count();
+    ep_id_t ep = endpoint_create("irq_user_bind_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "user IRQ bind endpoint created");
+    if (ep < 0) {
+        return;
+    }
+
+    cap_id_t irq_cap = KERN_INVALID_ID;
+    kern_err_t err = kirq_create_cap(53,
+                                     CAP_READ | CAP_WRITE | CAP_MANAGE |
+                                         CAP_TRANSFER,
+                                     &irq_cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "user IRQ bind cap created");
+    TEST_ASSERT(irq_cap >= 0, "user IRQ bind cap valid");
+
+    task_id_t user_id = task_create_user("irq_user_bind",
+                                         irq_user_bind_task,
+                                         NULL, 13, 768);
+    TEST_ASSERT(user_id >= 0, "user IRQ bind task created");
+
+    cap_id_t user_ep_cap = KERN_INVALID_ID;
+    cap_id_t user_irq_cap = KERN_INVALID_ID;
+    tcb_t *user = task_get_tcb(user_id);
+    if (user != NULL) {
+        user_ep_cap = cap_create_for(user, (void *)(uintptr_t)(ep + 1),
+                                     CAP_OBJ_ENDPOINT,
+                                     CAP_READ | CAP_WRITE);
+        user_irq_cap = cap_copy_to(NULL, irq_cap, user,
+                                   CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    TEST_ASSERT(user_ep_cap >= 0, "user receives endpoint cap");
+    TEST_ASSERT(user_irq_cap >= 0, "user receives IRQ cap");
+
+    if (user_id >= 0 && user_ep_cap >= 0 && user_irq_cap >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)user_irq_cap << 16) |
+                          (uint32_t)(uint16_t)user_ep_cap;
+        irq_test_set_arg(user_id, packed);
+        err = task_start(user_id);
+        TEST_ASSERT_EQ(KERN_OK, err, "user IRQ bind task started");
+    }
+
+    err = KERN_ERR_NOEXIST;
+    if (user_id >= 0) {
+        for (int i = 0; i < 16 && err != KERN_OK; i++) {
+            (void)task_delay(1);
+            err = irq_notify(53);
+        }
+    }
+    TEST_ASSERT_EQ(KERN_OK, err, "user-bound IRQ notification sent");
+
+    void *retval = NULL;
+    if (user_id >= 0) {
+        err = task_join(user_id, &retval, 1000);
+        TEST_ASSERT_EQ(KERN_OK, err, "user IRQ bind task joined");
+        TEST_ASSERT_EQ(KERN_OK, (kern_err_t)(intptr_t)retval,
+                       "user IRQ bind recv returned OK");
+    }
+
+    if (user_id >= 0 &&
+        task_get_state(user_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(user_id);
+    }
+    if (irq_cap > 0) {
+        TEST_ASSERT_EQ(KERN_OK, kirq_delete_cap(irq_cap),
+                       "user IRQ bind cap deleted");
+    }
+    endpoint_delete(ep);
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "user IRQ bind cleanup restored cap count");
+#else
+    test_skip("capability, endpoint, or syscall disabled");
+#endif
+}
+
+/*============================================================================
+ * 测试 12: user IRQ bind syscall rejects missing rights
+ *============================================================================*/
+
+static void test_irq_user_cap_endpoint_bind_rights(void) {
+    test_section("Test 12: user IRQ bind syscall rights");
+
+#if CAP_ENABLE && IPC_ENDPOINT && SYSCALL_ENABLE
+    uint16_t cap_free_before = cap_free_count();
+    ep_id_t ep = endpoint_create("irq_bind_rights_ep",
+                                 sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "IRQ bind-rights endpoint created");
+    if (ep < 0) {
+        return;
+    }
+
+    cap_id_t irq_cap = KERN_INVALID_ID;
+    kern_err_t err = kirq_create_cap(54,
+                                     CAP_READ | CAP_WRITE | CAP_MANAGE |
+                                         CAP_TRANSFER,
+                                     &irq_cap);
+    TEST_ASSERT_EQ(KERN_OK, err, "IRQ bind-rights cap created");
+
+    task_id_t no_irq_write = task_create_user("irq_bind_ro_irq",
+                                              irq_user_bind_once_task,
+                                              NULL, 13, 768);
+    TEST_ASSERT(no_irq_write >= 0, "read-only IRQ bind task created");
+    cap_id_t ep_rw = KERN_INVALID_ID;
+    cap_id_t irq_ro = KERN_INVALID_ID;
+    tcb_t *task = task_get_tcb(no_irq_write);
+    if (task != NULL) {
+        ep_rw = cap_create_for(task, (void *)(uintptr_t)(ep + 1),
+                               CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        irq_ro = cap_copy_to(NULL, irq_cap, task,
+                             CAP_READ | CAP_TRANSFER);
+    }
+    TEST_ASSERT(ep_rw >= 0, "read-only IRQ bind task receives endpoint cap");
+    TEST_ASSERT(irq_ro >= 0, "read-only IRQ bind task receives IRQ cap");
+    if (no_irq_write >= 0 && ep_rw >= 0 && irq_ro >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)irq_ro << 16) |
+                          (uint32_t)(uint16_t)ep_rw;
+        irq_test_set_arg(no_irq_write, packed);
+        err = task_start(no_irq_write);
+        TEST_ASSERT_EQ(KERN_OK, err, "read-only IRQ bind task started");
+    }
+
+    void *retval = NULL;
+    if (no_irq_write >= 0) {
+        err = task_join(no_irq_write, &retval, 1000);
+        TEST_ASSERT_EQ(KERN_OK, err, "read-only IRQ bind task joined");
+        TEST_ASSERT_EQ(KERN_ERR_CAP, (kern_err_t)(intptr_t)retval,
+                       "read-only IRQ cap bind rejected");
+    }
+
+    task_id_t no_ep_write = task_create_user("irq_bind_ro_ep",
+                                             irq_user_bind_once_task,
+                                             NULL, 13, 768);
+    TEST_ASSERT(no_ep_write >= 0, "read-only endpoint bind task created");
+    cap_id_t ep_ro = KERN_INVALID_ID;
+    cap_id_t irq_rw = KERN_INVALID_ID;
+    task = task_get_tcb(no_ep_write);
+    if (task != NULL) {
+        ep_ro = cap_create_for(task, (void *)(uintptr_t)(ep + 1),
+                               CAP_OBJ_ENDPOINT, CAP_READ);
+        irq_rw = cap_copy_to(NULL, irq_cap, task,
+                             CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    }
+    TEST_ASSERT(ep_ro >= 0, "read-only endpoint bind task receives endpoint cap");
+    TEST_ASSERT(irq_rw >= 0, "read-only endpoint bind task receives IRQ cap");
+    if (no_ep_write >= 0 && ep_ro >= 0 && irq_rw >= 0) {
+        uint32_t packed = ((uint32_t)(uint16_t)irq_rw << 16) |
+                          (uint32_t)(uint16_t)ep_ro;
+        irq_test_set_arg(no_ep_write, packed);
+        err = task_start(no_ep_write);
+        TEST_ASSERT_EQ(KERN_OK, err, "read-only endpoint bind task started");
+    }
+
+    retval = NULL;
+    if (no_ep_write >= 0) {
+        err = task_join(no_ep_write, &retval, 1000);
+        TEST_ASSERT_EQ(KERN_OK, err, "read-only endpoint bind task joined");
+        TEST_ASSERT_EQ(KERN_ERR_CAP, (kern_err_t)(intptr_t)retval,
+                       "read-only endpoint cap bind rejected");
+    }
+
+    if (no_irq_write >= 0 &&
+        task_get_state(no_irq_write) != TASK_STATE_TERMINATED) {
+        (void)task_delete(no_irq_write);
+    }
+    if (no_ep_write >= 0 &&
+        task_get_state(no_ep_write) != TASK_STATE_TERMINATED) {
+        (void)task_delete(no_ep_write);
+    }
+    if (irq_cap > 0) {
+        TEST_ASSERT_EQ(KERN_OK, kirq_delete_cap(irq_cap),
+                       "IRQ bind-rights cap deleted");
+    }
+    endpoint_delete(ep);
+    TEST_ASSERT_EQ((int)cap_free_before, (int)cap_free_count(),
+                   "IRQ bind-rights cleanup restored cap count");
+#else
+    test_skip("capability, endpoint, or syscall disabled");
+#endif
+}
+
+/*============================================================================
  * 中断管理测试模块入口
  *============================================================================*/
 
@@ -442,6 +819,11 @@ static void test_irq_module(void) {
     test_register_vector();
     test_isr_guards();
     test_irq_endpoint_notification();
+    test_irq_cap_lifecycle();
+    test_irq_cap_endpoint_bind();
+    test_irq_cap_bind_revoke_hook();
+    test_irq_user_cap_endpoint_bind();
+    test_irq_user_cap_endpoint_bind_rights();
 }
 
 /*============================================================================

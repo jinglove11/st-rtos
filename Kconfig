@@ -595,7 +595,7 @@ config SYSCALL_ENABLE
 config SYSCALL_TABLE_SIZE
     int "Syscall table size"
     depends on SYSCALL_ENABLE
-    default 64
+    default 71
     range 16 96
     help
       系统调用分发表大小。
@@ -696,6 +696,15 @@ config CAP_MAX_COUNT
     help
       全局能力池大小。每个 IPC 对象和内存
       分配占用一个能力槽位。
+
+config KERN_TASK_CAP_SLOTS
+    int "Capability slots per task"
+    depends on CAP_ENABLE
+    default 32
+    range 8 64
+    help
+      每个任务 TCB 内的 capability slot 数量。
+      必须与 tcb_t.cap_set[] 的静态大小保持一致。
 
 endmenu
 

@@ -23,6 +23,7 @@ kern_err_t endpoint_send_syscall(ep_id_t ep_id,
                                  const void *msg,
                                  void *user_reply_msg,
                                  uint32_t timeout);
+#if CAP_ENABLE
 kern_err_t endpoint_send_caps_syscall(ep_id_t ep_id,
                                       const void *msg,
                                       void *user_reply_msg,
@@ -34,8 +35,10 @@ kern_err_t endpoint_send_caps(ep_id_t ep_id,
                               const ipc_cap_xfer_t *caps,
                               uint8_t cap_count,
                               uint32_t timeout);
+#endif
 kern_err_t endpoint_recv(ep_id_t ep_id, void *msg, uint32_t timeout);
 kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout);
+#if CAP_ENABLE
 kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
                                       void *user_msg,
                                       cap_id_t *out_caps,
@@ -46,6 +49,7 @@ kern_err_t endpoint_recv_caps(ep_id_t ep_id,
                               cap_id_t *out_caps,
                               uint8_t *out_cap_count,
                               uint32_t timeout);
+#endif
 kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg);
 #if CAP_ENABLE
 cap_id_t   endpoint_take_reply_cap(ep_id_t ep_id);

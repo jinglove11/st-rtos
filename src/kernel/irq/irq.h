@@ -68,6 +68,13 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge);
  */
 kern_err_t irq_notify(int16_t irq);
 
+#if CAP_ENABLE
+kern_err_t kirq_create_cap(int16_t irq, uint8_t rights, cap_id_t *out_cap);
+kern_err_t kirq_delete_cap(cap_id_t cap);
+kern_err_t kirq_get_number(cap_id_t cap, int16_t *irq);
+kern_err_t kirq_bind_endpoint(cap_id_t cap, ep_id_t ep_id, uint32_t badge);
+#endif
+
 /*============================================================================
  * 中断上下文检测
  *============================================================================*/

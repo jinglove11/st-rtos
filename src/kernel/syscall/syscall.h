@@ -110,6 +110,13 @@
 #define SYSCALL_SHM_MAP          61
 #define SYSCALL_SHM_UNMAP        62
 #define SYSCALL_SHM_CREATE       63
+#define SYSCALL_CAP_TYPE         64
+#define SYSCALL_CAP_RIGHTS       65
+#define SYSCALL_IRQ_BIND         66
+#define SYSCALL_READDIR          67
+#define SYSCALL_UNLINK           68
+#define SYSCALL_MKDIR            69
+#define SYSCALL_STAT             70
 
 /*============================================================================
  * Syscall 分发

@@ -42,12 +42,15 @@ void wait_queue_add(wait_queue_t *wq, tcb_t *tcb) {
     wait_queue_check(wq, "add");
 }
 
-void wait_queue_remove(wait_queue_t *wq, tcb_t *tcb) {
+static int wait_queue_remove_impl(wait_queue_t *wq, tcb_t *tcb,
+                                  int warn_missing) {
     if (!wait_queue_contains(wq, tcb)) {
 #if KERN_DEBUG_ENABLE
-        hal_debug_puts("\r\n[WAITQ] remove ignored: task not in queue\r\n");
+        if (warn_missing) {
+            hal_debug_puts("\r\n[WAITQ] remove ignored: task not in queue\r\n");
+        }
 #endif
-        return;
+        return 0;
     }
 
     if (tcb->wait_prev) {
@@ -66,6 +69,11 @@ void wait_queue_remove(wait_queue_t *wq, tcb_t *tcb) {
     tcb->wait_prev = NULL;
     wq->count--;
     wait_queue_check(wq, "remove");
+    return 1;
+}
+
+void wait_queue_remove(wait_queue_t *wq, tcb_t *tcb) {
+    (void)wait_queue_remove_impl(wq, tcb, 1);
 }
 
 int wait_queue_contains(const wait_queue_t *wq, const tcb_t *tcb) {
@@ -82,14 +90,10 @@ int wait_queue_contains(const wait_queue_t *wq, const tcb_t *tcb) {
 }
 
 int wait_queue_remove_safe(wait_queue_t *wq, tcb_t *tcb) {
-    uint16_t before = wq ? wq->count : 0;
-
-    wait_queue_remove(wq, tcb);
-    if (wq == NULL || before == wq->count) {
+    if (wq == NULL) {
         return 0;
     }
-
-    return 1;
+    return wait_queue_remove_impl(wq, tcb, 0);
 }
 
 int wait_queue_validate(const wait_queue_t *wq) {

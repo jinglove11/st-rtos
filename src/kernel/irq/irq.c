@@ -10,6 +10,7 @@
 #include "task.h"
 #include "trace.h"
 #include "stats.h"
+#include "capability.h"
 #include <string.h>
 
 #ifndef TRACE_IRQ_REGISTER
@@ -50,9 +51,15 @@ typedef struct {
 typedef struct {
     int16_t  irq_num;
     ep_id_t  ep_id;
+    cap_id_t bound_cap;
     uint32_t badge;
     uint8_t  bound;
 } irq_notify_binding_t;
+
+typedef struct {
+    int16_t irq_num;
+    uint8_t in_use;
+} irq_cap_object_t;
 
 /*============================================================================
  * 静态池
@@ -60,6 +67,9 @@ typedef struct {
 
 static irq_desc_t irq_descriptors[IRQ_MAX_USER];
 static irq_notify_binding_t irq_notify_bindings[IRQ_MAX_USER];
+#if CAP_ENABLE
+static irq_cap_object_t irq_cap_objects[IRQ_MAX_USER];
+#endif
 
 #if IRQ_THREADED_ENABLE
 static irq_thread_t irq_threads[IRQ_THREADED_MAX];
@@ -124,6 +134,87 @@ static void irq_record_event(int16_t irq, uint8_t action,
     (void)err;
 }
 
+#if CAP_ENABLE
+static irq_cap_object_t *irq_cap_alloc_object(void) {
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (!irq_cap_objects[i].in_use) {
+            memset(&irq_cap_objects[i], 0, sizeof(irq_cap_objects[i]));
+            irq_cap_objects[i].in_use = 1U;
+            return &irq_cap_objects[i];
+        }
+    }
+    return NULL;
+}
+
+static void irq_cap_free_object(irq_cap_object_t *obj) {
+    if (obj != NULL) {
+        memset(obj, 0, sizeof(*obj));
+    }
+}
+
+static void irq_clear_endpoint_binding(int16_t irq) {
+    uint32_t crit = hal_enter_critical();
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_notify_bindings[i].bound &&
+            irq_notify_bindings[i].irq_num == irq) {
+            irq_notify_bindings[i].irq_num = KERN_INVALID_ID;
+            irq_notify_bindings[i].ep_id = KERN_INVALID_ID;
+            irq_notify_bindings[i].bound_cap = KERN_INVALID_ID;
+            irq_notify_bindings[i].badge = 0;
+            irq_notify_bindings[i].bound = 0;
+        }
+    }
+    hal_exit_critical(crit);
+}
+
+static void irq_clear_endpoint_binding_for_cap(cap_id_t cap) {
+    uint32_t crit = hal_enter_critical();
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_notify_bindings[i].bound &&
+            irq_notify_bindings[i].bound_cap == cap) {
+            irq_notify_bindings[i].irq_num = KERN_INVALID_ID;
+            irq_notify_bindings[i].ep_id = KERN_INVALID_ID;
+            irq_notify_bindings[i].bound_cap = KERN_INVALID_ID;
+            irq_notify_bindings[i].badge = 0;
+            irq_notify_bindings[i].bound = 0;
+        }
+    }
+    hal_exit_critical(crit);
+}
+
+static void irq_set_endpoint_binding_cap(int16_t irq, cap_id_t cap) {
+    uint32_t crit = hal_enter_critical();
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_notify_bindings[i].bound &&
+            irq_notify_bindings[i].irq_num == irq) {
+            irq_notify_bindings[i].bound_cap = cap;
+            break;
+        }
+    }
+    hal_exit_critical(crit);
+}
+
+static void irq_cap_cleanup(void *object, uint8_t obj_type) {
+    if (obj_type == CAP_OBJ_IRQ && object != NULL) {
+        irq_cap_object_t *obj = (irq_cap_object_t *)object;
+        irq_clear_endpoint_binding(obj->irq_num);
+        irq_cap_free_object(obj);
+    }
+}
+
+static void irq_cap_revoke_hook(cap_id_t cap, void *object, uint8_t obj_type) {
+    (void)object;
+    if (obj_type == CAP_OBJ_IRQ) {
+        irq_clear_endpoint_binding_for_cap(cap);
+    }
+}
+
+static void irq_cap_register_hooks(void) {
+    (void)cap_register_cleanup(CAP_OBJ_IRQ, irq_cap_cleanup);
+    (void)cap_register_revoke_hook(CAP_OBJ_IRQ, irq_cap_revoke_hook);
+}
+#endif
+
 /*============================================================================
  * 初始化
  *============================================================================*/
@@ -131,9 +222,14 @@ static void irq_record_event(int16_t irq, uint8_t action,
 void irq_init(void) {
     memset(irq_descriptors, 0, sizeof(irq_descriptors));
     memset(irq_notify_bindings, 0, sizeof(irq_notify_bindings));
+#if CAP_ENABLE
+    memset(irq_cap_objects, 0, sizeof(irq_cap_objects));
+    irq_cap_register_hooks();
+#endif
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         irq_notify_bindings[i].irq_num = KERN_INVALID_ID;
         irq_notify_bindings[i].ep_id = KERN_INVALID_ID;
+        irq_notify_bindings[i].bound_cap = KERN_INVALID_ID;
     }
 #if IRQ_THREADED_ENABLE
     memset(irq_threads, 0, sizeof(irq_threads));
@@ -293,6 +389,7 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
 
     irq_notify_bindings[slot].irq_num = irq;
     irq_notify_bindings[slot].ep_id = ep_id;
+    irq_notify_bindings[slot].bound_cap = KERN_INVALID_ID;
     irq_notify_bindings[slot].badge = badge;
     irq_notify_bindings[slot].bound = 1;
 
@@ -341,6 +438,91 @@ kern_err_t irq_notify(int16_t irq) {
                      err == KERN_OK ? STATS_COUNTER_OK : STATS_COUNTER_ERROR);
     return err;
 }
+
+#if CAP_ENABLE
+kern_err_t kirq_create_cap(int16_t irq, uint8_t rights, cap_id_t *out_cap) {
+    if (out_cap == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    *out_cap = KERN_INVALID_ID;
+
+    if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
+                         STATS_COUNTER_ERROR);
+        return KERN_ERR_PARAM;
+    }
+
+    if (rights == 0U) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE | CAP_TRANSFER;
+    }
+
+    irq_cap_object_t *obj = irq_cap_alloc_object();
+    if (obj == NULL) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
+        return KERN_ERR_RESOURCE;
+    }
+    obj->irq_num = irq;
+
+    irq_cap_register_hooks();
+    cap_id_t cap = cap_create_for(NULL, obj, CAP_OBJ_IRQ, rights);
+    if (cap == KERN_INVALID_ID) {
+        irq_cap_free_object(obj);
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
+                         STATS_COUNTER_QUEUE_FULL);
+        return KERN_ERR_RESOURCE;
+    }
+
+    *out_cap = cap;
+    irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
+    return KERN_OK;
+}
+
+kern_err_t kirq_delete_cap(cap_id_t cap) {
+    irq_cap_object_t *obj = cap_resolve(cap, CAP_OBJ_IRQ, CAP_MANAGE);
+    if (obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+
+    int16_t irq = obj->irq_num;
+    irq_cap_register_hooks();
+    kern_err_t err = cap_revoke(cap);
+    irq_record_event(irq, TRACE_IRQ_RELEASE, err,
+                     err == KERN_OK ? STATS_COUNTER_DELETE :
+                                      STATS_COUNTER_ERROR);
+    return err;
+}
+
+kern_err_t kirq_get_number(cap_id_t cap, int16_t *irq) {
+    if (irq == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    *irq = KERN_INVALID_ID;
+
+    irq_cap_object_t *obj = cap_resolve(cap, CAP_OBJ_IRQ, CAP_READ);
+    if (obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+
+    *irq = obj->irq_num;
+    return KERN_OK;
+}
+
+kern_err_t kirq_bind_endpoint(cap_id_t cap, ep_id_t ep_id, uint32_t badge) {
+    irq_cap_register_hooks();
+
+    irq_cap_object_t *obj = cap_resolve(cap, CAP_OBJ_IRQ, CAP_WRITE);
+    if (obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+
+    kern_err_t err = irq_bind_endpoint(obj->irq_num, ep_id, badge);
+    if (err == KERN_OK) {
+        irq_set_endpoint_binding_cap(obj->irq_num, cap);
+    }
+    return err;
+}
+#endif
 
 /*============================================================================
  * 中断上下文检测

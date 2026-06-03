@@ -23,6 +23,7 @@
 
 #include "syscall.h"
 #include "ipc_transfer.h"
+#include "inode.h"
 
 #if SYSCALL_ENABLE
 
@@ -292,6 +293,10 @@ static inline int sys_timer_bind(int timer_id, int ep_id, int badge) {
     return sys_call3(SYSCALL_TIMER_BIND, timer_id, ep_id, badge);
 }
 
+static inline int sys_irq_bind(int irq_cap, int ep_cap, int badge) {
+    return sys_call3(SYSCALL_IRQ_BIND, irq_cap, ep_cap, badge);
+}
+
 /*============================================================================
  * Endpoint (C/S) — 用户态内联封装
  *============================================================================*/
@@ -339,6 +344,14 @@ static inline int sys_ep_take_reply(int ep_id) {
 
 static inline int sys_cap_revoke(int cap) {
     return sys_call1(SYSCALL_CAP_REVOKE, cap);
+}
+
+static inline int sys_cap_type(int cap) {
+    return sys_call1(SYSCALL_CAP_TYPE, cap);
+}
+
+static inline int sys_cap_rights(int cap) {
+    return sys_call1(SYSCALL_CAP_RIGHTS, cap);
 }
 
 /*============================================================================
@@ -439,6 +452,23 @@ static inline int ioctl(int fd, int cmd, void *arg) {
 
 static inline int lseek(int fd, int offset, int whence) {
     return sys_call3(SYSCALL_LSEEK, fd, offset, whence);
+}
+
+static inline int readdir(int fd, dirent_t *entry) {
+    return sys_call2(SYSCALL_READDIR, fd, (int)(uintptr_t)entry);
+}
+
+static inline int unlink(const char *path) {
+    return sys_call1(SYSCALL_UNLINK, (int)(uintptr_t)path);
+}
+
+static inline int mkdir(const char *path) {
+    return sys_call1(SYSCALL_MKDIR, (int)(uintptr_t)path);
+}
+
+static inline int stat(const char *path, vfs_stat_t *st) {
+    return sys_call2(SYSCALL_STAT, (int)(uintptr_t)path,
+                     (int)(uintptr_t)st);
 }
 
 #endif /* SYSCALL_ENABLE */

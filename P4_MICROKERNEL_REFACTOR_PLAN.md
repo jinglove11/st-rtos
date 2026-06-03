@@ -1,8 +1,9 @@
 # My-RTOS P4 Microkernel Refactor Plan
 
-Status: Phase 8 name-server core complete and board-validated. Phases 0-7 core
-slices have board test coverage; Phase 7 root/init bootstrap remains on the
-compatibility boot path until init/service migration is enabled by default.
+Status: Phase 10 FS server foundation and shell-managed service lifecycle are
+board-validated. Phases 0-10 core slices have board test coverage; Phase 11
+supervisor work has started as a shell-managed health/restart/recover path and
+still needs a reusable root/init-owned supervisor service.
 
 Scope: STM32F767 mainline first. Keep the current `make BOARD=stm32f767`
 workflow, board test harness, and UART shell as the validation loop. P4 is a
@@ -1158,3 +1159,378 @@ This slice closes real security holes without requiring service migration yet.
   model. `irq_notify()` can now wake the UART server through a driver-specific
   badge, and the server reports the interrupt as `DRV_EVENT_READABLE` through
   the normal event query path.
+- Done: added IRQ-readable consumption semantics to the UART driver server.
+  A read after an IRQ notification now consumes one pending readable event and
+  subsequent event queries clear `DRV_EVENT_READABLE`.
+- Done: added user-client coverage for IRQ readable consumption. A user task
+  now observes the IRQ-driven readable event through `driver_get_events()`,
+  consumes it with `driver_read()`, and verifies the event bit clears through
+  sleepable driver helpers.
+- Done: added the first real IRQ capability object. `kirq_create_cap()`,
+  `kirq_get_number()`, and `kirq_delete_cap()` now back `CAP_OBJ_IRQ` with a
+  static descriptor pool, and UART driver IRQ-resource tests now transfer real
+  IRQ caps instead of MMIO stand-ins.
+- Done: connected IRQ caps to endpoint notification binding. `kirq_bind_endpoint()`
+  now binds an IRQ cap to an endpoint using `CAP_WRITE`, and final IRQ cap
+  cleanup clears the corresponding notification binding.
+- Done: switched UART driver IRQ-notification tests to the cap-binding path.
+  Driver IRQ events now flow through `kirq_create_cap()` and
+  `kirq_bind_endpoint()` before `irq_notify()` wakes the UART server.
+- Done: tightened IRQ cap revoke semantics. Endpoint notification bindings now
+  remember the cap used to bind them, and the IRQ cap revoke hook clears the
+  binding even if other derived caps still reference the same IRQ object.
+- Done: tightened driver resource attach validation. User-space UART server now
+  uses `sys_cap_type()` to verify that `DRV_RESOURCE_MMIO` carries a real
+  `CAP_OBJ_MMIO` and `DRV_RESOURCE_IRQ` carries a real `CAP_OBJ_IRQ`; mismatched
+  resource messages are rejected with `KERN_ERR_CAP`.
+- Done: changed UART driver resource attach from symbolic state to real service
+  ownership. Successful attach now keeps the copied resource cap in the driver
+  server until the service exits, then revokes it; regression coverage checks
+  MMIO and IRQ object refcounts while the server is alive and after cleanup.
+- Done: tightened driver resource rights. `driver_attach_resource()` now copies
+  `CAP_READ | CAP_WRITE` resource caps, and the UART server rejects attached
+  MMIO/IRQ caps that do not carry the required rights even if their object type
+  is correct.
+- Done: added user-facing IRQ endpoint binding through `sys_irq_bind()`.
+  User tasks can bind an IRQ cap to an endpoint cap without raw IRQ IDs, and
+  UART driver-server IRQ tests now pass an IRQ resource cap to the server and
+  let the user-space server bind its own notification endpoint. Negative
+  coverage verifies read-only IRQ caps and read-only endpoint caps are rejected.
+- Done: added a driver status ioctl. `DRV_IOCTL_GET_STATUS` reports open,
+  MMIO-ready, IRQ-bound, pending-IRQ, and sticky-error bits separately from the
+  resource inventory bitmask, giving shell/diagnostic code a stable view of
+  user-space driver state.
+- Done: added recoverable driver diagnostics. `DRV_IOCTL_CLEAR_STATUS` clears
+  sticky-error and pending-IRQ diagnostic state without dropping open/resource
+  ownership, so supervisor code can acknowledge transient faults explicitly.
+- Done: added explicit driver resource detach. `DRV_OP_DETACH` lets a
+  user-space driver release an attached MMIO or IRQ resource cap while closed,
+  updates the resource inventory, and relies on cap revoke hooks to tear down
+  IRQ endpoint bindings.
+- Done: pinned active-session detach policy. Driver tests now verify resource
+  detach is rejected while the UART server is open and that the existing
+  attached resource remains usable for subsequent I/O.
+- Done: covered IRQ resource detach end-to-end. Driver tests now verify IRQ
+  detach releases the server-held IRQ cap, clears the resource bit, and removes
+  the endpoint notification binding through the IRQ cap revoke hook.
+- Done: covered MMIO reattach after detach. Driver tests now verify a long-lived
+  UART server can release a resource, accept a fresh transferred MMIO cap, report
+  the resource bit again, and release the reattached cap on service exit.
+- Done: covered IRQ reattach after detach. Driver tests now verify a detached
+  IRQ resource can be transferred back into the same running UART server,
+  re-establish endpoint notification binding, and still clean up its cap on
+  service exit.
+- Done: covered user-client resource detach. The user resource-session test now
+  drives `driver_detach_resource()` through the normal helper/SVC/IPC path,
+  verifies the MMIO resource bit clears, and checks the server-held MMIO cap is
+  released before the service exits.
+- Done: covered user-client IRQ detach. The IRQ-only user-client test now
+  detaches the IRQ resource through the helper path, verifies the resource bit
+  clears, and checks the IRQ endpoint binding is gone before service exit.
+- Done: covered user-client active detach rejection. The user resource-session
+  test now attempts `driver_detach_resource()` while the UART server is open,
+  verifies `KERN_ERR_BUSY`, and then proves the session can still perform I/O.
+- Done: covered duplicate detach rejection. The MMIO detach regression now
+  verifies a second detach after the resource is already gone returns
+  `KERN_ERR_STATE`, while later reattach still succeeds.
+- Done: covered duplicate IRQ detach rejection. The IRQ detach regression now
+  verifies a second detach after binding cleanup returns `KERN_ERR_STATE`, while
+  later reattach still restores notification delivery.
+- Done: added a shell-visible user-driver ABI entry point. The `driver` command
+  reports the user-space driver protocol, ioctl/resource/status bit names, and
+  explicitly notes that the debug UART compatibility path remains active.
+- Done: split the shell driver command into stable subcommands. `driver abi`
+  keeps the protocol view, while `driver status` reports the runtime
+  name-server/inbox binding state instead of implying a hidden static service
+  session.
+- Done: added a static user-driver registry foundation. `driver_registry`
+  records the `dev.uart0` service descriptor, supported protocol operations,
+  required MMIO/IRQ resources, and status bits; shell `driver status` now shows
+  registered user-driver services independently from the live lookup state.
+- Done: expanded shell driver registry diagnostics. `driver status` now prints
+  per-service operation, resource, and status-bit descriptors from the registry,
+  making the shell view useful even before a live name-server binding exists.
+- Done: added service-filtered shell driver diagnostics. `driver status
+  <service>` now looks up a single registry descriptor, while unknown services
+  return an explicit not-found line.
+- Done: added registry descriptor validation. Driver registry code now validates
+  descriptor names, known operation/resource/status bit masks, and duplicate
+  service names; tests cover both the valid `dev.uart0` entry and malformed
+  descriptor rejection.
+- Done: exposed registry validation in shell diagnostics. `driver status` now
+  reports whether the full registry validates, and filtered service status
+  reports whether the selected descriptor is valid.
+- Done: split driver registry resource descriptors into required and optional
+  sets. `dev.uart0` now records MMIO as required and IRQ as optional, shell
+  diagnostics print both sets, and validation rejects out-of-set or overlapping
+  resource declarations.
+- Done: added ioctl capability descriptors to the driver registry. `dev.uart0`
+  now records supported event/resource/status/clear-status ioctls, shell
+  diagnostics print them, and validation rejects unknown ioctl bits or ioctl
+  declarations without the ioctl operation.
+- Done: linked registry ioctl descriptors to protocol command IDs. Registry
+  helpers now convert supported ioctl bits to `DRV_IOCTL_*` commands and back,
+  with tests covering valid mappings and invalid/null arguments.
+- Done: linked registry operation descriptors to protocol opcodes. Registry
+  helpers now convert supported operation bits to `DRV_OP_*` opcodes and back,
+  with tests covering ping/write/attach/detach mappings plus invalid/null
+  arguments.
+- Done: linked registry resource descriptors to protocol resource types.
+  Registry helpers now convert MMIO/IRQ resource bits to `DRV_RESOURCE_*` wire
+  values and back, with tests covering valid mappings and invalid/null
+  arguments.
+- Done: centralized user-driver status-bit names in the registry. Shell driver
+  diagnostics now use registry-provided names for open/MMIO/IRQ/pending/error
+  state instead of carrying a separate status-name table.
+- Done: centralized user-driver operation, ioctl, and resource names in the
+  registry. Shell driver diagnostics now use registry-provided names for
+  operation/ioctl/resource bitsets, keeping the user-driver metadata in one
+  module as the framework grows beyond UART.
+- Done: added capability-based driver registry lookup. Callers can now find a
+  driver descriptor by required operation, ioctl, and resource bitsets instead
+  of open-coding descriptor iteration, which prepares the next live service
+  lookup/client selection step.
+- Done: split driver capability matching from registry iteration.
+  `driver_descriptor_supports()` now owns the operation/ioctl/resource subset
+  check used by capability-based lookup, so future driver clients and shell
+  paths can reuse the same matching semantics.
+- Done: added diagnostic driver registry capability queries.
+  `driver_registry_query_by_caps()` now returns `KERN_OK`, `KERN_ERR_NOEXIST`,
+  or `KERN_ERR_PARAM` while clearing output on misses, giving future live lookup
+  paths a reasoned API instead of a nullable pointer only.
+- Done: added diagnostic driver registry name queries. `driver_registry_query()`
+  now returns explicit status for service-name lookup while preserving the
+  nullable `driver_registry_find()` compatibility helper.
+- Done: added a user-driver discovery helper. `driver_lookup_service()` now
+  validates the static driver descriptor, checks required operation/ioctl/resource
+  capabilities, and then performs name-server lookup; the UART name-server test
+  now exercises this driver-level lookup path instead of calling the name-server
+  helper directly.
+- Done: added a user-driver discovery release helper. `driver_release_service()`
+  now acknowledges the name-server lookup inbox through a driver-level API;
+  copied service endpoint caps remain owned by the client CSpace and are cleaned
+  up by normal task/cap lifecycle.
+- Done: added a UART-specific driver discovery helper. `driver_lookup_uart()`
+  wraps the `dev.uart0` service name and baseline UART operation/ioctl/resource
+  requirements so clients do not need to open-code the capability set.
+- Done: added driver client error names. `driver_error_name()` maps common
+  kernel/driver discovery return codes to stable strings so shell/live lookup
+  diagnostics can report readable failure reasons.
+- Done: wired driver error names into shell registry diagnostics. Filtered
+  `driver status <service>` now uses `driver_registry_query()` and prints a
+  readable failure reason when the requested service descriptor is missing.
+- Done: added explicit driver name-server status probing. `driver_name_server_status()`
+  reports unbound shell state as `KERN_ERR_STATE` and can ping a real name-server
+  cap later; shell `driver status` now prints `service lookup: unbound (state)`
+  instead of a hard-coded not-connected sentence.
+- Done: added a driver runtime binding layer. `driver_runtime` now owns the
+  shell-visible name-server endpoint cap slot, supports clear/bind/status
+  operations, and keeps `driver status` routed through one future live-lookup
+  entry point instead of hard-coding an invalid cap in the shell.
+- Done: added runtime driver lookup helpers. `driver_runtime_lookup_service()`
+  and `driver_runtime_lookup_uart()` hide the stored name-server cap from
+  clients, clear outputs on unbound lookup attempts, and delegate to the
+  existing driver client once a live name-server endpoint is bound.
+- Done: exposed the driver runtime binding slot in shell diagnostics. `driver
+  status` now reports the current name-server cap as `none` or an id, making
+  future live binding visible without triggering an IPC lookup from the shell.
+- Done: added a shell-side driver lookup diagnostic. `driver lookup <service>`
+  validates the static descriptor and reports whether the runtime name-server
+  binding is ready, giving the future live lookup path a stable user-visible
+  command without inventing a temporary shell IPC inbox.
+- Done: made driver runtime binding state explicit.
+  `driver_runtime_name_server_bound()` centralizes the "has a name-server cap"
+  check so shell diagnostics and runtime lookup helpers no longer open-code
+  `cap <= 0` as binding policy.
+- Done: added a controlled shell binding command for driver discovery.
+  `driver bind-ns <cap|clear>` updates the runtime name-server endpoint slot
+  without inventing a service or guessing bootstrap caps, making future
+  bootstrap-provided cap handoff testable from the shell.
+- Done: split driver runtime name-server state into unbound, bound, and live.
+  Shell diagnostics now report a saved but invalid cap as `bound (<err>)`
+  instead of conflating it with the no-cap `unbound` state.
+- Done: consolidated shell driver name-server diagnostics. `driver status`,
+  `driver lookup`, and `driver bind-ns` now share one status/cap rendering
+  helper so future live lookup changes do not fork the shell output semantics.
+- Done: added an explicit driver runtime inbox binding slot. Runtime lookup now
+  requires both a name-server endpoint cap and an inbox endpoint cap, while shell
+  diagnostics expose `driver bind-inbox <cap|clear>` without creating endpoint
+  resources implicitly.
+- Done: added a runtime lookup readiness check. `driver_runtime_lookup_ready()`
+  reports whether both live name-server and inbox prerequisites are satisfied,
+  and `driver lookup` now prints the concrete blocker before a real lookup is
+  attempted.
+- Done: tracked driver runtime inbox ownership. Manual shell bindings are now
+  reported as external, while future auto-created inbox caps can be marked owned
+  so cleanup code does not revoke user-supplied caps by mistake.
+- Done: added shell-owned driver inbox creation. `driver bind-inbox auto` now
+  creates a real endpoint cap for shell/runtime lookup use, marks it owned, and
+  `driver bind-inbox clear` deletes only owned inbox endpoints while leaving
+  external/manual caps untouched.
+- Done: added a shell-managed user name-server prototype. `driver ns-start`
+  creates a user-space name-server task plus endpoint caps and binds the shell
+  side cap into driver runtime; `driver ns-stop` tears it down and clears the
+  runtime binding. Infinite name-server mode now survives idle receive timeouts.
+- Done: made shell driver service probes schedulable. Driver status/lookup now
+  use a short bounded timeout instead of zero-timeout ping, allowing a freshly
+  started user name-server task to run to its receive point before diagnostics
+  classify it as unavailable.
+- Done: added name-server task state to shell driver diagnostics. `driver
+  status` now reports the managed name-server task id plus scheduler state, and
+  `driver ns-start` yields once before probing so the service can reach its
+  receive loop.
+- Done: added shell-managed UART service registration. `driver uart-start`
+  creates a user-space UART server endpoint/task and registers `dev.uart0` with
+  the live name-server; `driver uart-stop` unregisters the service and tears the
+  server down.
+- Done: upgraded shell driver lookup to a real UART service lookup path.
+  `driver lookup dev.uart0` now uses the runtime name-server/inbox bindings to
+  receive a copied UART service cap, probes it with `driver_ping()`, and
+  acknowledges the lookup inbox.
+- Done: fixed UART server persistent mode. `uart_server_run(max_requests=0)`
+  now treats idle receive timeouts as keepalive waits, matching the name-server
+  behavior instead of exiting before a later shell lookup can ping it.
+- Done: added live shell driver probing. `driver probe dev.uart0` performs a
+  runtime lookup, pings the copied service cap, reads resource/status/poll
+  state, and attempts open/close so the shell can validate the service protocol
+  path beyond name-server discovery.
+- Done: added a live MMIO delegation probe. `driver probe-mmio dev.uart0`
+  creates a kernel MMIO cap, transfers it to the user-space UART service,
+  validates resource/status/open/write/close behavior, reports byte-count
+  write results, detaches the resource, and deletes the local cap so the shell
+  can exercise driver resource handoff without leaving persistent state behind.
+- Done: tightened shell-managed UART service shutdown. `driver uart-stop` now
+  unregisters `dev.uart0` from the live name-server before deleting the service
+  task/endpoint and reports the unregister result, keeping registry teardown
+  ordered before endpoint cap revocation.
+- Done: started Phase 10 FS server foundation. Added `src/user/fs/fs_proto.h`
+  and `src/user/fs/fs_server.c` with a compact endpoint ABI for
+  `ping/open/close/read/write/lseek/readdir`, service-local fd tokens, and a
+  user-task service loop backed by existing VFS syscalls.
+- Done: added first FS server service-model coverage. A user FS service task
+  and a user client task now exercise `fs_ping()`, `fs_open()`, `fs_write()`,
+  `fs_lseek()`, `fs_read()`, `fs_readdir()`, and `fs_close()` over endpoint IPC
+  using `/tmp` through the compatibility VFS path.
+- Done: added shell-managed FS service diagnostics. The `fs` command now reports
+  the FS service ABI, starts/stops a user-space FS server task, and probes the
+  live endpoint with `ping/open("/tmp")/readdir/close` without replacing the
+  stable kernel `ls/cat` compatibility path.
+- Done: connected the shell-managed FS service to name-server discovery.
+  `fs ns-start`, `fs bind-inbox auto`, `fs start`, `fs lookup`, and `fs probe`
+  can now register and resolve `fs.ramfs` through a user-space name-server,
+  matching the driver service discovery pattern while preserving direct FS
+  probe fallback when no name-server is active.
+- Done: expanded the FS service ABI to cover `unlink`, `mkdir`, and `stat`.
+  Kernel VFS/syscall compatibility hooks now expose those operations to the
+  user-space FS server, and service-model plus shell probes validate file
+  create/write/stat/unlink and directory mkdir/stat/unlink paths.
+- Done: added shell FS data-plane commands through the user-space service:
+  `fs ls`, `fs cat`, `fs write`, `fs rm`, `fs mkdir`, and `fs stat`. Manual
+  board validation covers `/`, `/tmp`, `/dev/null`, file write/readback,
+  deletion, directory creation/removal, and stat output.
+- Done: added shell-managed FS lifecycle helpers. `fs up` creates an owned
+  inbox endpoint, starts a user-space name-server, starts/registers the FS
+  service, and reports status; `fs down` unregisters the service, deletes the
+  service task/endpoint, stops the name-server, clears the owned inbox, and
+  returns all shell-visible FS handles to `none`.
+- Done: added first supervisor-style FS recovery commands. `fs restart` performs
+  a full down/up cycle, `fs health` performs non-mutating lookup/ping/status
+  diagnostics, and `fs recover` cold-starts a missing stack or restarts an
+  unhealthy stack. Board validation covers cold recover, healthy recover,
+  restart followed by probe, and down followed by recover.
+- Done: started extracting FS service runtime state from shell-only code.
+  `src/user/fs/fs_runtime.c` now owns the bound name-server cap, inbox cap,
+  lookup, and lookup-ack helpers, matching the driver-runtime direction and
+  preparing FS lifecycle policy for a later root/init supervisor.
+- Done: tightened shell FS lookup diagnostics and temporary cap cleanup.
+  `fs status` now reports discovery-path readiness separately from service
+  registration, `fs registered` explicitly checks whether `fs.ramfs` is present
+  in the name-server, and FS shell commands delete copied lookup caps after
+  acknowledging the name-server inbox. The ack/delete sequence is centralized
+  in `fs_runtime_release_service()` so future supervisor code can reuse the same
+  temporary-cap cleanup path.
+- Done: tightened shell driver lookup temporary cap cleanup. Live shell driver
+  lookup/probe paths now acknowledge the lookup inbox and delete copied service
+  endpoint caps from the shell's CSpace after use, while the user-facing
+  `driver_release_service()` helper remains an ACK-only API suitable for user
+  tasks. Driver tests now cover repeated lookup/release/delete cycles and assert
+  that temporary capability slots are restored.
+- Done: added shell-managed driver lifecycle commands. `driver up` creates an
+  owned inbox, starts the user-space name-server, starts/registers the UART
+  service, and reports the resulting stack state; `driver down`, `restart`,
+  `health`, and `recover` mirror the FS supervisor-style commands so driver and
+  FS service stacks now share the same manual lifecycle vocabulary.
+- Board-validated: `driver health` reports stopped from a cold shell state;
+  `driver recover` creates an owned inbox, starts the name-server, starts the
+  UART service, and reaches a live lookup path; `driver probe dev.uart0` and
+  `driver probe-mmio dev.uart0` succeed; `driver down` unregisters/stops/clears
+  the stack; a second `driver recover` brings the stack back up cleanly.
+- Done: added `driver registered [service]` to mirror `fs registered`. It
+  reports whether the driver discovery path is ready, whether the named service
+  is present in the live name-server, and validates registered services with a
+  ping before releasing the copied lookup cap.
+- Board-validated: `driver registered` reports `name-server: state` before
+  recovery, reports `service registered: yes` plus `ping: ok` after `driver
+  recover`, reports `service registered: no (noexist)` after `driver uart-stop`,
+  and `driver down` clears the service, name-server, and owned inbox state.
+- Done: reduced expected wait-queue cleanup noise. `wait_queue_remove_safe()`
+  now performs a genuinely silent optional remove, while ordinary
+  `wait_queue_remove()` still reports unexpected missing-task removals in debug
+  builds. Board validation passed after the change.
+- Done: added first shell-managed service health stats for Phase 11. Driver and
+  FS status now report restart count, recover count, and last health result,
+  giving the manual supervisor path persistent diagnostics without changing the
+  kernel ABI.
+- Done: raised the STM32F767 service-concurrency headroom for Phase 11. The
+  task pool is now 24 tasks and the endpoint pool is now 8 endpoints, allowing
+  shell-managed driver and FS service stacks to be online together. `fs up`
+  also rolls back a just-created inbox/name-server on partial startup failure,
+  and FS/driver `up` refreshes last-health before printing final status.
+- Board-validated: `driver recover` followed by `fs recover` now leaves both
+  user-space service stacks online at the same time. Driver uses tasks 5/6,
+  FS uses tasks 7/8, both discovery paths are live, and both `driver status`
+  and `fs status` report `last health: ok`.
+- Board-validated: with both service stacks online, `driver probe dev.uart0`,
+  `fs probe`, `driver probe-mmio dev.uart0`, and `fs ls /` all succeed. This
+  validates concurrent name-server/inbox/service endpoint usage across the live
+  driver and FS paths.
+- Board-validated: independent teardown and recovery work. `fs down` tears down
+  the FS stack while `driver probe dev.uart0` still succeeds; `driver down`
+  tears down the driver stack; a later `fs recover`, `fs probe`, and `fs down`
+  all succeed without depending on the driver stack.
+- Done: `driver down` and `fs down` now reset last-health to `state` after full
+  teardown, so stopped stacks no longer report a stale `last health: ok`.
+- Board-validated: final `fs status` and `driver status` after teardown report
+  `last health: state`, while recover paths still report `last health: ok` once
+  the service stack is live.
+- Done: started extracting reusable supervisor code. Added
+  `src/user/supervisor/supervisor.c` and `.h` with shared restart/recover/health
+  bookkeeping, switched shell-managed driver and FS lifecycle diagnostics to use
+  it, and added service-model coverage for the reusable supervisor state API.
+- Done: extended reusable supervisor state with pending-client bookkeeping.
+  Driver and FS status now expose `pending clients`, currently zero for the
+  shell-managed path, and service-model tests cover increment/decrement,
+  explicit set, init reset, NULL safety, and underflow protection.
+- Done: added reusable supervisor service identity and a `svc [status]` shell
+  summary. Driver and FS supervisor instances are now named (`dev.uart0` and
+  `fs.ramfs`), `svc` reports task state, lookup readiness, restart/recover
+  counts, pending clients, and last health for both shell-managed services, and
+  service-model tests cover named/unnamed supervisor initialization.
+- Done: added a fixed-size supervisor service registry. Driver and FS now obtain
+  their supervisor records from registry slots instead of static per-command
+  state objects, `svc` iterates the registry, and service-model tests cover
+  register/find/iterate/duplicate/full-table behavior with cleanup before shell
+  startup.
+- Done: moved driver/FS down-path health reset to the start of teardown, so
+  intermediate status prints during `driver down` and `fs down` no longer show
+  stale `last health: ok` while resources are being stopped.
+- Done: added supervisor restart policy metadata. Service records now carry
+  `manual`/`auto` policy and `max_restarts`; `svc` prints the policy, defaults
+  remain manual with max 0 so behavior is unchanged, and service-model coverage
+  verifies defaults, updates, invalid-policy fallback, init reset, and NULL
+  safety.
+- Done: added `svc policy <service> <manual|auto> [max]` as the first
+  supervisor control-plane write path. The command updates registry metadata
+  only, does not enable automatic restart behavior yet, reports missing services
+  and invalid policies deterministically, and shares policy parsing with
+  service-model tests.
