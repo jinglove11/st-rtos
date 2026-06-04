@@ -1602,3 +1602,6 @@ This slice closes real security holes without requiring service migration yet.
   1..10 loops, then executes the existing service probe and prints aggregate
   service stats, reusing the same fault/probe/supervise dispatch paths as the
   manual commands.
+- Done: documented the board-validated supervisor command matrix in
+  `docs/phase4/SUPERVISOR_TEST_MATRIX.md`, including registry entries, command
+  semantics, validated serial sequences, error behavior, and current limits.
