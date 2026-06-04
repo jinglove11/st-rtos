@@ -3600,22 +3600,7 @@ static void cmd_svc_health(int argc, char **argv) {
     sh_puts("\r\n");
 }
 
-static void cmd_svc_probe(int argc, char **argv) {
-    if (argc != 3) {
-        sh_puts("Usage: svc probe <service>\r\n");
-        return;
-    }
-
-    cmd_svc_register_defaults();
-
-    supervisor_service_t *svc = supervisor_find_service(argv[2]);
-    if (svc == NULL) {
-        sh_puts("svc probe: service not found: ");
-        sh_puts(argv[2]);
-        sh_puts("\r\n");
-        return;
-    }
-
+static void cmd_svc_probe_service(supervisor_service_t *svc) {
 #if DRIVER_ENABLE
     if (strcmp(supervisor_service_name(svc),
                DRIVER_SHELL_SERVICE_NAME) == 0) {
@@ -3634,6 +3619,25 @@ static void cmd_svc_probe(int argc, char **argv) {
     sh_puts("svc probe: no probe handler: ");
     sh_puts(supervisor_service_name(svc));
     sh_puts("\r\n");
+}
+
+static void cmd_svc_probe(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc probe <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc probe: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    cmd_svc_probe_service(svc);
 }
 
 static int cmd_svc_check_health(supervisor_service_t *svc) {
@@ -3907,22 +3911,7 @@ static void cmd_svc_down(int argc, char **argv) {
     sh_puts("\r\n");
 }
 
-static void cmd_svc_fault(int argc, char **argv) {
-    if (argc != 3) {
-        sh_puts("Usage: svc fault <service>\r\n");
-        return;
-    }
-
-    cmd_svc_register_defaults();
-
-    supervisor_service_t *svc = supervisor_find_service(argv[2]);
-    if (svc == NULL) {
-        sh_puts("svc fault: service not found: ");
-        sh_puts(argv[2]);
-        sh_puts("\r\n");
-        return;
-    }
-
+static void cmd_svc_fault_service(supervisor_service_t *svc) {
 #if DRIVER_ENABLE
     if (strcmp(supervisor_service_name(svc),
                DRIVER_SHELL_SERVICE_NAME) == 0) {
@@ -3941,6 +3930,68 @@ static void cmd_svc_fault(int argc, char **argv) {
     sh_puts("svc fault: no fault handler: ");
     sh_puts(supervisor_service_name(svc));
     sh_puts("\r\n");
+}
+
+static void cmd_svc_fault(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc fault <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc fault: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    cmd_svc_fault_service(svc);
+}
+
+static void cmd_svc_stress(int argc, char **argv) {
+    if (argc != 4) {
+        sh_puts("Usage: svc stress <service> <loops>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc stress: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    uint32_t loops = parse_dec(argv[3]);
+    if (loops == 0U || loops > 10U) {
+        sh_puts("svc stress: loops must be 1..10\r\n");
+        return;
+    }
+
+    sh_puts("User service stress\r\n");
+    sh_puts("  service: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+    sh_puts("  loops: ");
+    sh_putdec(loops);
+    sh_puts("\r\n");
+
+    for (uint32_t i = 0; i < loops; i++) {
+        sh_puts("  loop: ");
+        sh_putdec(i + 1U);
+        sh_puts("\r\n");
+        cmd_svc_fault_service(svc);
+        cmd_svc_supervise_one(svc);
+    }
+
+    sh_puts("User service stress probe\r\n");
+    cmd_svc_probe_service(svc);
+    cmd_svc_stats(2, NULL);
 }
 
 static void cmd_svc(int argc, char **argv) {
@@ -3980,6 +4031,10 @@ static void cmd_svc(int argc, char **argv) {
         cmd_svc_stats(argc, argv);
         return;
     }
+    if (argc > 1 && strcmp(argv[1], "stress") == 0) {
+        cmd_svc_stress(argc, argv);
+        return;
+    }
     if (argc > 1 && strcmp(argv[1], "restart") == 0) {
         cmd_svc_restart(argc, argv);
         return;
@@ -3998,7 +4053,7 @@ static void cmd_svc(int argc, char **argv) {
     }
 
     if (argc > 1 && strcmp(argv[1], "status") != 0) {
-        sh_puts("Usage: svc [status|stats|supervise [service]|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|clear <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
+        sh_puts("Usage: svc [status|stats|stress <service> <loops>|supervise [service]|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|clear <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
         return;
     }
 

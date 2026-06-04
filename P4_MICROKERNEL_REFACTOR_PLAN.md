@@ -1597,3 +1597,8 @@ This slice closes real security holes without requiring service migration yet.
   Clear resets restart/recover/fault counters only, preserving restart policy,
   max restart limit, pending-client count, and current health so auto-restart
   stress tests can keep their policy while zeroing statistics.
+- Done: added `svc stress <service> <loops>` for bounded board-side supervisor
+  stress testing. It runs controlled fault injection plus targeted supervise for
+  1..10 loops, then executes the existing service probe and prints aggregate
+  service stats, reusing the same fault/probe/supervise dispatch paths as the
+  manual commands.
