@@ -20,6 +20,7 @@ typedef struct {
     const char *service_name;
     uint32_t restart_count;
     uint32_t recover_count;
+    uint32_t fault_count;
     uint32_t pending_client_count;
     supervisor_restart_policy_t restart_policy;
     uint32_t max_restarts;
@@ -27,9 +28,9 @@ typedef struct {
 } supervisor_service_t;
 
 #define SUPERVISOR_SERVICE_INIT(initial_health) \
-    { NULL, 0U, 0U, 0U, SUPERVISOR_RESTART_MANUAL, 0U, (initial_health) }
+    { NULL, 0U, 0U, 0U, 0U, SUPERVISOR_RESTART_MANUAL, 0U, (initial_health) }
 #define SUPERVISOR_SERVICE_NAMED_INIT(name, initial_health) \
-    { (name), 0U, 0U, 0U, SUPERVISOR_RESTART_MANUAL, 0U, (initial_health) }
+    { (name), 0U, 0U, 0U, 0U, SUPERVISOR_RESTART_MANUAL, 0U, (initial_health) }
 
 void supervisor_service_init(supervisor_service_t *svc, int initial_health);
 void supervisor_service_init_named(supervisor_service_t *svc,
@@ -39,6 +40,7 @@ void supervisor_set_service_name(supervisor_service_t *svc,
                                  const char *service_name);
 void supervisor_record_restart(supervisor_service_t *svc);
 void supervisor_record_recover(supervisor_service_t *svc);
+void supervisor_record_fault(supervisor_service_t *svc);
 void supervisor_set_health(supervisor_service_t *svc, int health);
 void supervisor_set_pending_clients(supervisor_service_t *svc, uint32_t count);
 void supervisor_set_restart_policy(supervisor_service_t *svc,
@@ -49,6 +51,7 @@ void supervisor_client_blocked(supervisor_service_t *svc);
 void supervisor_client_unblocked(supervisor_service_t *svc);
 uint32_t supervisor_restart_count(const supervisor_service_t *svc);
 uint32_t supervisor_recover_count(const supervisor_service_t *svc);
+uint32_t supervisor_fault_count(const supervisor_service_t *svc);
 uint32_t supervisor_pending_clients(const supervisor_service_t *svc);
 supervisor_restart_policy_t supervisor_restart_policy(
     const supervisor_service_t *svc);

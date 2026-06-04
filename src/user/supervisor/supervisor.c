@@ -22,6 +22,7 @@ void supervisor_service_init_named(supervisor_service_t *svc,
     svc->service_name = service_name;
     svc->restart_count = 0;
     svc->recover_count = 0;
+    svc->fault_count = 0;
     svc->pending_client_count = 0;
     svc->restart_policy = SUPERVISOR_RESTART_MANUAL;
     svc->max_restarts = 0;
@@ -48,6 +49,13 @@ void supervisor_record_recover(supervisor_service_t *svc) {
         return;
     }
     svc->recover_count++;
+}
+
+void supervisor_record_fault(supervisor_service_t *svc) {
+    if (svc == NULL) {
+        return;
+    }
+    svc->fault_count++;
 }
 
 void supervisor_set_health(supervisor_service_t *svc, int health) {
@@ -106,6 +114,10 @@ uint32_t supervisor_restart_count(const supervisor_service_t *svc) {
 
 uint32_t supervisor_recover_count(const supervisor_service_t *svc) {
     return svc ? svc->recover_count : 0U;
+}
+
+uint32_t supervisor_fault_count(const supervisor_service_t *svc) {
+    return svc ? svc->fault_count : 0U;
 }
 
 uint32_t supervisor_pending_clients(const supervisor_service_t *svc) {

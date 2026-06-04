@@ -1162,6 +1162,9 @@ static void cmd_driver_print_lookup_status(void) {
     sh_puts("  recover count: ");
     sh_putdec(supervisor_recover_count(svc));
     sh_puts("\r\n");
+    sh_puts("  fault count: ");
+    sh_putdec(supervisor_fault_count(svc));
+    sh_puts("\r\n");
     sh_puts("  pending clients: ");
     sh_putdec(supervisor_pending_clients(svc));
     sh_puts("\r\n");
@@ -1713,6 +1716,33 @@ static void cmd_driver_uart_stop(void) {
     cmd_driver_print_lookup_status();
 }
 
+static void cmd_driver_uart_fault(void) {
+    int unregister_err = KERN_ERR_STATE;
+
+    if (driver_runtime_name_server_bound()) {
+        unregister_err = nameserver_unregister(driver_runtime_name_server_cap(),
+                                               "dev.uart0", 0x55415254U,
+                                               DRIVER_SHELL_PROBE_TIMEOUT);
+    }
+    if (shell_driver_uart_task >= 0) {
+        (void)task_delete(shell_driver_uart_task);
+        shell_driver_uart_task = KERN_INVALID_ID;
+    }
+    if (shell_driver_uart_ep >= 0) {
+        (void)endpoint_delete(shell_driver_uart_ep);
+        shell_driver_uart_ep = KERN_INVALID_ID;
+    }
+    shell_driver_uart_cap = KERN_INVALID_ID;
+    supervisor_service_t *svc = shell_driver_supervisor_get();
+    supervisor_record_fault(svc);
+    supervisor_set_health(svc, KERN_ERR_FAULT);
+    sh_puts("User driver UART service fault injected\r\n");
+    sh_puts("  unregister: ");
+    sh_puts(driver_error_name(unregister_err));
+    sh_puts("\r\n");
+    cmd_driver_print_lookup_status();
+}
+
 static void cmd_driver_uart_start(void) {
     if (!driver_runtime_name_server_bound()) {
         sh_puts("driver uart-start: name-server\r\n");
@@ -2213,6 +2243,9 @@ static void cmd_fs_status(void) {
     sh_puts("  recover count: ");
     sh_putdec(supervisor_recover_count(svc));
     sh_puts("\r\n");
+    sh_puts("  fault count: ");
+    sh_putdec(supervisor_fault_count(svc));
+    sh_puts("\r\n");
     sh_puts("  pending clients: ");
     sh_putdec(supervisor_pending_clients(svc));
     sh_puts("\r\n");
@@ -2364,6 +2397,34 @@ static void cmd_fs_stop(void) {
     }
     shell_fs_cap = KERN_INVALID_ID;
     sh_puts("User FS service stopped\r\n");
+    sh_puts("  unregister: ");
+    sh_puts(fs_error_name(unregister_err));
+    sh_puts("\r\n");
+    cmd_fs_status();
+}
+
+static void cmd_fs_fault(void) {
+    int unregister_err = KERN_ERR_STATE;
+
+    if (shell_fs_ns_cap > 0 && shell_fs_cap > 0) {
+        unregister_err = nameserver_unregister(shell_fs_ns_cap,
+                                               FS_SHELL_SERVICE_NAME,
+                                               FS_SHELL_OWNER_BADGE,
+                                               FS_SHELL_PROBE_TIMEOUT);
+    }
+    if (shell_fs_task >= 0) {
+        (void)task_delete(shell_fs_task);
+        shell_fs_task = KERN_INVALID_ID;
+    }
+    if (shell_fs_ep >= 0) {
+        (void)endpoint_delete(shell_fs_ep);
+        shell_fs_ep = KERN_INVALID_ID;
+    }
+    shell_fs_cap = KERN_INVALID_ID;
+    supervisor_service_t *svc = shell_fs_supervisor_get();
+    supervisor_record_fault(svc);
+    supervisor_set_health(svc, KERN_ERR_FAULT);
+    sh_puts("User FS service fault injected\r\n");
     sh_puts("  unregister: ");
     sh_puts(fs_error_name(unregister_err));
     sh_puts("\r\n");
@@ -3259,6 +3320,8 @@ static void cmd_svc_print_row(const supervisor_service_t *svc,
     sh_putdec(supervisor_restart_count(svc));
     sh_puts("  recovers: ");
     sh_putdec(supervisor_recover_count(svc));
+    sh_puts("  faults: ");
+    sh_putdec(supervisor_fault_count(svc));
     sh_puts("\r\n");
 
     sh_puts("    pending: ");
@@ -3285,6 +3348,8 @@ static void cmd_svc_print_generic(const supervisor_service_t *svc) {
     sh_putdec(supervisor_restart_count(svc));
     sh_puts("  recovers: ");
     sh_putdec(supervisor_recover_count(svc));
+    sh_puts("  faults: ");
+    sh_putdec(supervisor_fault_count(svc));
     sh_puts("\r\n");
     sh_puts("    pending: ");
     sh_putdec(supervisor_pending_clients(svc));
@@ -3381,6 +3446,8 @@ static void cmd_svc_reset(int argc, char **argv) {
     sh_putdec(supervisor_restart_count(svc));
     sh_puts("  recovers: ");
     sh_putdec(supervisor_recover_count(svc));
+    sh_puts("  faults: ");
+    sh_putdec(supervisor_fault_count(svc));
     sh_puts("\r\n");
     sh_puts("  health: ");
     sh_puts(cmd_svc_health_name(svc, supervisor_last_health(svc)));
@@ -3647,6 +3714,75 @@ static void cmd_svc_supervise(int argc, char **argv) {
     }
 }
 
+static int cmd_svc_service_has_task(const supervisor_service_t *svc) {
+    if (svc == NULL) {
+        return 0;
+    }
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        return shell_driver_uart_task >= 0;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        return shell_fs_task >= 0;
+    }
+#endif
+    return 0;
+}
+
+static void cmd_svc_stats(int argc, char **argv) {
+    if (argc != 2) {
+        sh_puts("Usage: svc stats\r\n");
+        return;
+    }
+
+    (void)argv;
+    cmd_svc_register_defaults();
+
+    uint32_t total = supervisor_service_count();
+    uint32_t running = 0;
+    uint32_t unhealthy = 0;
+    uint32_t restarts = 0;
+    uint32_t recovers = 0;
+    uint32_t faults = 0;
+
+    for (uint32_t i = 0; i < total; i++) {
+        supervisor_service_t *svc = supervisor_service_at(i);
+        if (svc == NULL) {
+            continue;
+        }
+        if (cmd_svc_service_has_task(svc)) {
+            running++;
+        }
+        if (supervisor_last_health(svc) != KERN_OK) {
+            unhealthy++;
+        }
+        restarts += supervisor_restart_count(svc);
+        recovers += supervisor_recover_count(svc);
+        faults += supervisor_fault_count(svc);
+    }
+
+    sh_puts("User service stats\r\n");
+    sh_puts("  services: ");
+    sh_putdec(total);
+    sh_puts("\r\n");
+    sh_puts("  running: ");
+    sh_putdec(running);
+    sh_puts("  unhealthy: ");
+    sh_putdec(unhealthy);
+    sh_puts("\r\n");
+    sh_puts("  restarts: ");
+    sh_putdec(restarts);
+    sh_puts("  recovers: ");
+    sh_putdec(recovers);
+    sh_puts("  faults: ");
+    sh_putdec(faults);
+    sh_puts("\r\n");
+}
+
 static void cmd_svc_restart(int argc, char **argv) {
     if (argc != 3) {
         sh_puts("Usage: svc restart <service>\r\n");
@@ -3735,7 +3871,22 @@ static void cmd_svc_fault(int argc, char **argv) {
         return;
     }
 
-    sh_puts("svc fault: unsupported: ");
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_uart_fault();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_fault();
+        return;
+    }
+#endif
+
+    sh_puts("svc fault: no fault handler: ");
     sh_puts(supervisor_service_name(svc));
     sh_puts("\r\n");
 }
@@ -3769,6 +3920,10 @@ static void cmd_svc(int argc, char **argv) {
         cmd_svc_supervise(argc, argv);
         return;
     }
+    if (argc > 1 && strcmp(argv[1], "stats") == 0) {
+        cmd_svc_stats(argc, argv);
+        return;
+    }
     if (argc > 1 && strcmp(argv[1], "restart") == 0) {
         cmd_svc_restart(argc, argv);
         return;
@@ -3787,7 +3942,7 @@ static void cmd_svc(int argc, char **argv) {
     }
 
     if (argc > 1 && strcmp(argv[1], "status") != 0) {
-        sh_puts("Usage: svc [status|supervise|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
+        sh_puts("Usage: svc [status|stats|supervise|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
         return;
     }
 

@@ -69,6 +69,8 @@ static void test_supervisor_service_stats(void) {
                    "supervisor restart count starts at zero");
     TEST_ASSERT_EQ(0, (int)supervisor_recover_count(&svc),
                    "supervisor recover count starts at zero");
+    TEST_ASSERT_EQ(0, (int)supervisor_fault_count(&svc),
+                   "supervisor fault count starts at zero");
     TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(&svc),
                    "supervisor pending clients start at zero");
     TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
@@ -82,6 +84,7 @@ static void test_supervisor_service_stats(void) {
 
     supervisor_record_restart(&svc);
     supervisor_record_recover(&svc);
+    supervisor_record_fault(&svc);
     supervisor_set_restart_policy(&svc, SUPERVISOR_RESTART_AUTO, 3);
     supervisor_client_blocked(&svc);
     supervisor_client_blocked(&svc);
@@ -91,6 +94,8 @@ static void test_supervisor_service_stats(void) {
                    "supervisor restart count increments");
     TEST_ASSERT_EQ(1, (int)supervisor_recover_count(&svc),
                    "supervisor recover count increments");
+    TEST_ASSERT_EQ(1, (int)supervisor_fault_count(&svc),
+                   "supervisor fault count increments");
     TEST_ASSERT_EQ(1, (int)supervisor_pending_clients(&svc),
                    "supervisor pending clients track blocked clients");
     TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_AUTO,
@@ -131,6 +136,8 @@ static void test_supervisor_service_stats(void) {
                    "supervisor reset clears restart count");
     TEST_ASSERT_EQ(0, (int)supervisor_recover_count(&svc),
                    "supervisor reset clears recover count");
+    TEST_ASSERT_EQ(0, (int)supervisor_fault_count(&svc),
+                   "supervisor reset clears fault count");
     TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(&svc),
                    "supervisor reset clears pending clients");
     TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
@@ -154,6 +161,8 @@ static void test_supervisor_service_stats(void) {
                    "supervisor init clears restart count");
     TEST_ASSERT_EQ(0, (int)supervisor_recover_count(&svc),
                    "supervisor init clears recover count");
+    TEST_ASSERT_EQ(0, (int)supervisor_fault_count(&svc),
+                   "supervisor init clears fault count");
     TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(&svc),
                    "supervisor init clears pending clients");
     TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,
@@ -167,6 +176,7 @@ static void test_supervisor_service_stats(void) {
 
     supervisor_record_restart(NULL);
     supervisor_record_recover(NULL);
+    supervisor_record_fault(NULL);
     supervisor_set_pending_clients(NULL, 1);
     supervisor_client_blocked(NULL);
     supervisor_client_unblocked(NULL);
@@ -176,6 +186,8 @@ static void test_supervisor_service_stats(void) {
                    "supervisor NULL restart count safe");
     TEST_ASSERT_EQ(0, (int)supervisor_recover_count(NULL),
                    "supervisor NULL recover count safe");
+    TEST_ASSERT_EQ(0, (int)supervisor_fault_count(NULL),
+                   "supervisor NULL fault count safe");
     TEST_ASSERT_EQ(0, (int)supervisor_pending_clients(NULL),
                    "supervisor NULL pending clients safe");
     TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_MANUAL,

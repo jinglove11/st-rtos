@@ -1576,3 +1576,16 @@ This slice closes real security holes without requiring service migration yet.
   pending clients, policy, and max restart limit. The shell command now refreshes
   health from the actual service path during reset, so running services remain
   reported as healthy while stopped services remain `state`.
+- Done: upgraded `svc fault <service>` from placeholder to controlled service
+  fault injection. Driver and FS fault paths unregister only the target service,
+  delete its service task/endpoint, preserve name-server and inbox state, mark
+  supervisor health as `fault`, and leave recovery to `svc supervise` or manual
+  restart.
+- Done: added supervisor fault accounting. Fault injection now increments a
+  per-service fault counter, driver/FS status and `svc` status expose it next to
+  restart/recover counts, and `svc reset` clears it with the rest of the
+  supervisor metadata.
+- Done: added `svc stats` as a read-only supervisor snapshot. It summarizes
+  registered service count, currently running service tasks, unhealthy services,
+  and aggregate restart/recover/fault counters without probing or mutating
+  service state.
