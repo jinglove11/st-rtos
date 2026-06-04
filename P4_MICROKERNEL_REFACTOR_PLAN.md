@@ -1589,3 +1589,11 @@ This slice closes real security holes without requiring service migration yet.
   registered service count, currently running service tasks, unhealthy services,
   and aggregate restart/recover/fault counters without probing or mutating
   service state.
+- Done: extended `svc supervise` to accept an optional service name. The command
+  can now run the same health/policy/restart decision for either all registered
+  services or one selected service, making targeted recovery tests possible
+  after injecting faults into multiple services.
+- Done: added reusable supervisor counter clearing plus `svc clear <service>`.
+  Clear resets restart/recover/fault counters only, preserving restart policy,
+  max restart limit, pending-client count, and current health so auto-restart
+  stress tests can keep their policy while zeroing statistics.

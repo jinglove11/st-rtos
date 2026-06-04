@@ -3454,6 +3454,44 @@ static void cmd_svc_reset(int argc, char **argv) {
     sh_puts("\r\n");
 }
 
+static void cmd_svc_clear(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc clear <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc clear: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    supervisor_clear_counts(svc);
+    sh_puts("User service counters cleared\r\n");
+    sh_puts("  service: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+    sh_puts("  policy: ");
+    sh_puts(supervisor_restart_policy_name(supervisor_restart_policy(svc)));
+    sh_puts("  max restarts: ");
+    sh_putdec(supervisor_max_restarts(svc));
+    sh_puts("\r\n");
+    sh_puts("  restarts: ");
+    sh_putdec(supervisor_restart_count(svc));
+    sh_puts("  recovers: ");
+    sh_putdec(supervisor_recover_count(svc));
+    sh_puts("  faults: ");
+    sh_putdec(supervisor_fault_count(svc));
+    sh_puts("\r\n");
+    sh_puts("  health: ");
+    sh_puts(cmd_svc_health_name(svc, supervisor_last_health(svc)));
+    sh_puts("\r\n");
+}
+
 static void cmd_svc_recover(int argc, char **argv) {
     if (argc != 3) {
         sh_puts("Usage: svc recover <service>\r\n");
@@ -3671,46 +3709,60 @@ static void cmd_svc_restart_service(supervisor_service_t *svc) {
     sh_puts("\r\n");
 }
 
-static void cmd_svc_supervise(int argc, char **argv) {
-    if (argc != 2) {
-        sh_puts("Usage: svc supervise\r\n");
+static void cmd_svc_supervise_one(supervisor_service_t *svc) {
+    if (svc == NULL) {
         return;
     }
 
-    (void)argv;
+    int err = cmd_svc_check_health(svc);
+    sh_puts("  ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts(": ");
+    sh_puts(cmd_svc_health_name(svc, err));
+
+    if (err == KERN_OK) {
+        sh_puts("\r\n");
+        return;
+    }
+
+    if (supervisor_restart_policy(svc) != SUPERVISOR_RESTART_AUTO) {
+        sh_puts(" manual\r\n");
+        return;
+    }
+
+    if (!supervisor_should_auto_restart(svc)) {
+        sh_puts(" restart limit\r\n");
+        return;
+    }
+
+    sh_puts(" restarting\r\n");
+    cmd_svc_restart_service(svc);
+}
+
+static void cmd_svc_supervise(int argc, char **argv) {
+    if (argc < 2 || argc > 3) {
+        sh_puts("Usage: svc supervise [service]\r\n");
+        return;
+    }
+
     cmd_svc_register_defaults();
 
     sh_puts("User service supervise\r\n");
+    if (argc == 3) {
+        supervisor_service_t *svc = supervisor_find_service(argv[2]);
+        if (svc == NULL) {
+            sh_puts("svc supervise: service not found: ");
+            sh_puts(argv[2]);
+            sh_puts("\r\n");
+            return;
+        }
+        cmd_svc_supervise_one(svc);
+        return;
+    }
+
     uint32_t count = supervisor_service_count();
     for (uint32_t i = 0; i < count; i++) {
-        supervisor_service_t *svc = supervisor_service_at(i);
-        if (svc == NULL) {
-            continue;
-        }
-
-        int err = cmd_svc_check_health(svc);
-        sh_puts("  ");
-        sh_puts(supervisor_service_name(svc));
-        sh_puts(": ");
-        sh_puts(cmd_svc_health_name(svc, err));
-
-        if (err == KERN_OK) {
-            sh_puts("\r\n");
-            continue;
-        }
-
-        if (supervisor_restart_policy(svc) != SUPERVISOR_RESTART_AUTO) {
-            sh_puts(" manual\r\n");
-            continue;
-        }
-
-        if (!supervisor_should_auto_restart(svc)) {
-            sh_puts(" restart limit\r\n");
-            continue;
-        }
-
-        sh_puts(" restarting\r\n");
-        cmd_svc_restart_service(svc);
+        cmd_svc_supervise_one(supervisor_service_at(i));
     }
 }
 
@@ -3900,6 +3952,10 @@ static void cmd_svc(int argc, char **argv) {
         cmd_svc_reset(argc, argv);
         return;
     }
+    if (argc > 1 && strcmp(argv[1], "clear") == 0) {
+        cmd_svc_clear(argc, argv);
+        return;
+    }
     if (argc > 1 && strcmp(argv[1], "recover") == 0) {
         cmd_svc_recover(argc, argv);
         return;
@@ -3942,7 +3998,7 @@ static void cmd_svc(int argc, char **argv) {
     }
 
     if (argc > 1 && strcmp(argv[1], "status") != 0) {
-        sh_puts("Usage: svc [status|stats|supervise|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
+        sh_puts("Usage: svc [status|stats|supervise [service]|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|clear <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
         return;
     }
 

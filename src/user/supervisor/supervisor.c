@@ -94,6 +94,15 @@ void supervisor_reset_service(supervisor_service_t *svc, int initial_health) {
     supervisor_service_init_named(svc, service_name, initial_health);
 }
 
+void supervisor_clear_counts(supervisor_service_t *svc) {
+    if (svc == NULL) {
+        return;
+    }
+    svc->restart_count = 0;
+    svc->recover_count = 0;
+    svc->fault_count = 0;
+}
+
 void supervisor_client_blocked(supervisor_service_t *svc) {
     if (svc == NULL) {
         return;

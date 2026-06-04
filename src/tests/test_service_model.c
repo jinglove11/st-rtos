@@ -129,6 +129,24 @@ static void test_supervisor_service_stats(void) {
     TEST_ASSERT(!supervisor_should_auto_restart(&svc),
                 "supervisor auto restart stops at max");
 
+    supervisor_record_recover(&svc);
+    supervisor_record_fault(&svc);
+    supervisor_clear_counts(&svc);
+    TEST_ASSERT_EQ(0, (int)supervisor_restart_count(&svc),
+                   "supervisor clear counts clears restart count");
+    TEST_ASSERT_EQ(0, (int)supervisor_recover_count(&svc),
+                   "supervisor clear counts clears recover count");
+    TEST_ASSERT_EQ(0, (int)supervisor_fault_count(&svc),
+                   "supervisor clear counts clears fault count");
+    TEST_ASSERT_EQ((int)SUPERVISOR_RESTART_AUTO,
+                   (int)supervisor_restart_policy(&svc),
+                   "supervisor clear counts preserves policy");
+    TEST_ASSERT_EQ(1, (int)supervisor_max_restarts(&svc),
+                   "supervisor clear counts preserves max restarts");
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   supervisor_last_health(&svc),
+                   "supervisor clear counts preserves health");
+
     supervisor_reset_service(&svc, KERN_ERR_STATE);
     TEST_ASSERT(strcmp(supervisor_service_name(&svc), "svc.test") == 0,
                 "supervisor reset preserves service name");
@@ -181,6 +199,7 @@ static void test_supervisor_service_stats(void) {
     supervisor_client_blocked(NULL);
     supervisor_client_unblocked(NULL);
     supervisor_set_health(NULL, KERN_OK);
+    supervisor_clear_counts(NULL);
     supervisor_reset_service(NULL, KERN_ERR_STATE);
     TEST_ASSERT_EQ(0, (int)supervisor_restart_count(NULL),
                    "supervisor NULL restart count safe");
