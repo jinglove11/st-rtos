@@ -1605,3 +1605,6 @@ This slice closes real security holes without requiring service migration yet.
 - Done: documented the board-validated supervisor command matrix in
   `docs/phase4/SUPERVISOR_TEST_MATRIX.md`, including registry entries, command
   semantics, validated serial sequences, error behavior, and current limits.
+- Done: added `docs/phase4/COMPLETION_REPORT.md` summarizing the implemented
+  service stacks, supervisor control plane, board-validated behaviors, build
+  baseline, current limits, and Phase 5 candidates.
