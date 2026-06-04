@@ -1534,3 +1534,45 @@ This slice closes real security holes without requiring service migration yet.
   only, does not enable automatic restart behavior yet, reports missing services
   and invalid policies deterministically, and shares policy parsing with
   service-model tests.
+- Done: added `svc recover <service>` as the first unified supervisor recovery
+  command. It resolves the service through the supervisor registry and dispatches
+  to the existing driver or FS recovery path, preserving current manual recovery
+  semantics while moving the control entry point under `svc`.
+- Done: added `svc restart <service>` to complete the manual supervisor control
+  pair. The command resolves services through the same registry path and
+  dispatches to the existing driver/FS restart routines, keeping restart counters
+  and teardown/startup behavior unchanged.
+- Done: added `svc health <service>` so health probing also flows through the
+  supervisor registry. It dispatches to existing driver/FS health commands and
+  preserves the same health-result bookkeeping while completing the manual
+  `svc` control surface: status, health, recover, restart, and policy.
+- Done: added `svc fault <service>` as a safe placeholder for later fault
+  injection. It resolves services through the supervisor registry and returns
+  deterministic `unsupported` for known services and `service not found` for
+  missing ones, without killing or restarting service tasks yet.
+- Done: added `svc down <service>` so supervisor service teardown is available
+  through the unified control path. The command resolves services via the
+  registry, dispatches to the existing driver/FS down routines, and preserves the
+  original unregister, name-server stop, inbox cleanup, and health-state
+  behavior.
+- Done: added `svc start <service>` for explicit cold/manual startup through the
+  supervisor control surface. It reuses the existing driver/FS `up` paths and
+  intentionally does not increment restart or recover counters, keeping
+  lifecycle counters reserved for actual recovery/restart operations.
+- Done: added `svc stop <service>` as a supervisor-friendly alias for
+  `svc down <service>`. Both commands share the same registry dispatch and
+  teardown handlers, so stop/down behavior stays identical.
+- Done: added `svc probe <service>` as a unified service validation command. It
+  resolves the target through the supervisor registry and dispatches to the
+  existing driver or FS probe routines, so functional IPC/file-operation checks
+  can be run from the same `svc` control surface as health and lifecycle
+  commands.
+- Done: added `svc supervise` as a manual supervisor tick. It health-checks all
+  registered services, honors `manual` versus `auto` restart policy, applies the
+  configured restart limit through the reusable supervisor helper, and dispatches
+  to the existing restart paths only when a service is unhealthy and eligible.
+- Done: added reusable supervisor metadata reset plus `svc reset <service>`.
+  Reset preserves the registered service name but clears restart/recover counts,
+  pending clients, policy, and max restart limit. The shell command now refreshes
+  health from the actual service path during reset, so running services remain
+  reported as healthy while stopped services remain `state`.

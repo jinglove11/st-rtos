@@ -44,6 +44,7 @@ void supervisor_set_pending_clients(supervisor_service_t *svc, uint32_t count);
 void supervisor_set_restart_policy(supervisor_service_t *svc,
                                    supervisor_restart_policy_t policy,
                                    uint32_t max_restarts);
+void supervisor_reset_service(supervisor_service_t *svc, int initial_health);
 void supervisor_client_blocked(supervisor_service_t *svc);
 void supervisor_client_unblocked(supervisor_service_t *svc);
 uint32_t supervisor_restart_count(const supervisor_service_t *svc);
@@ -52,6 +53,7 @@ uint32_t supervisor_pending_clients(const supervisor_service_t *svc);
 supervisor_restart_policy_t supervisor_restart_policy(
     const supervisor_service_t *svc);
 uint32_t supervisor_max_restarts(const supervisor_service_t *svc);
+int supervisor_should_auto_restart(const supervisor_service_t *svc);
 const char *supervisor_restart_policy_name(
     supervisor_restart_policy_t policy);
 int supervisor_parse_restart_policy(const char *name,

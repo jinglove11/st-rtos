@@ -78,6 +78,14 @@ void supervisor_set_restart_policy(supervisor_service_t *svc,
     svc->max_restarts = max_restarts;
 }
 
+void supervisor_reset_service(supervisor_service_t *svc, int initial_health) {
+    if (svc == NULL) {
+        return;
+    }
+    const char *service_name = svc->service_name;
+    supervisor_service_init_named(svc, service_name, initial_health);
+}
+
 void supervisor_client_blocked(supervisor_service_t *svc) {
     if (svc == NULL) {
         return;
@@ -111,6 +119,16 @@ supervisor_restart_policy_t supervisor_restart_policy(
 
 uint32_t supervisor_max_restarts(const supervisor_service_t *svc) {
     return svc ? svc->max_restarts : 0U;
+}
+
+int supervisor_should_auto_restart(const supervisor_service_t *svc) {
+    if (svc == NULL) {
+        return 0;
+    }
+    if (svc->restart_policy != SUPERVISOR_RESTART_AUTO) {
+        return 0;
+    }
+    return svc->restart_count < svc->max_restarts;
 }
 
 const char *supervisor_restart_policy_name(

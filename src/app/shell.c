@@ -3307,6 +3307,10 @@ static void cmd_svc_register_defaults(void) {
 #endif
 }
 
+static int cmd_svc_check_health(supervisor_service_t *svc);
+static const char *cmd_svc_health_name(const supervisor_service_t *svc,
+                                       int err);
+
 static void cmd_svc_policy(int argc, char **argv) {
     if (argc < 4 || argc > 5) {
         sh_puts("Usage: svc policy <service> <manual|auto> [max]\r\n");
@@ -3348,14 +3352,442 @@ static void cmd_svc_policy(int argc, char **argv) {
     sh_puts("\r\n");
 }
 
+static void cmd_svc_reset(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc reset <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc reset: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    int err = cmd_svc_check_health(svc);
+    supervisor_reset_service(svc, err);
+    sh_puts("User service supervisor reset\r\n");
+    sh_puts("  service: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+    sh_puts("  policy: ");
+    sh_puts(supervisor_restart_policy_name(supervisor_restart_policy(svc)));
+    sh_puts("\r\n");
+    sh_puts("  restarts: ");
+    sh_putdec(supervisor_restart_count(svc));
+    sh_puts("  recovers: ");
+    sh_putdec(supervisor_recover_count(svc));
+    sh_puts("\r\n");
+    sh_puts("  health: ");
+    sh_puts(cmd_svc_health_name(svc, supervisor_last_health(svc)));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_recover(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc recover <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc recover: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_recover();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_recover();
+        return;
+    }
+#endif
+
+    sh_puts("svc recover: no recover handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_start(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc start <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc start: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_up();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_up();
+        return;
+    }
+#endif
+
+    sh_puts("svc start: no start handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_health(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc health <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc health: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_health();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_health();
+        return;
+    }
+#endif
+
+    sh_puts("svc health: no health handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_probe(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc probe <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc probe: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_probe(supervisor_service_name(svc));
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_probe();
+        return;
+    }
+#endif
+
+    sh_puts("svc probe: no probe handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static int cmd_svc_check_health(supervisor_service_t *svc) {
+    if (svc == NULL) {
+        return KERN_ERR_PARAM;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        int err = cmd_driver_health_probe();
+        supervisor_set_health(svc, err);
+        return err;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cap_id_t service_cap = KERN_INVALID_ID;
+        int live_lookup = 0;
+        int err = cmd_fs_acquire_service(&service_cap, &live_lookup);
+        if (err == KERN_OK) {
+            err = fs_ping(service_cap, FS_SHELL_PROBE_TIMEOUT);
+            cmd_fs_release_service(live_lookup, service_cap);
+        }
+        supervisor_set_health(svc, err);
+        return err;
+    }
+#endif
+
+    supervisor_set_health(svc, KERN_ERR_NOEXIST);
+    return KERN_ERR_NOEXIST;
+}
+
+static const char *cmd_svc_health_name(const supervisor_service_t *svc,
+                                       int err) {
+#if DRIVER_ENABLE
+    if (svc != NULL &&
+        strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        return err == KERN_ERR_STATE ? "stopped" : driver_error_name(err);
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (svc != NULL &&
+        strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        return err == KERN_ERR_STATE ? "stopped" : fs_error_name(err);
+    }
+#endif
+
+    return err == KERN_OK ? "ok" : "error";
+}
+
+static void cmd_svc_restart_service(supervisor_service_t *svc) {
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_restart();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_restart();
+        return;
+    }
+#endif
+
+    sh_puts("svc supervise: no restart handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_supervise(int argc, char **argv) {
+    if (argc != 2) {
+        sh_puts("Usage: svc supervise\r\n");
+        return;
+    }
+
+    (void)argv;
+    cmd_svc_register_defaults();
+
+    sh_puts("User service supervise\r\n");
+    uint32_t count = supervisor_service_count();
+    for (uint32_t i = 0; i < count; i++) {
+        supervisor_service_t *svc = supervisor_service_at(i);
+        if (svc == NULL) {
+            continue;
+        }
+
+        int err = cmd_svc_check_health(svc);
+        sh_puts("  ");
+        sh_puts(supervisor_service_name(svc));
+        sh_puts(": ");
+        sh_puts(cmd_svc_health_name(svc, err));
+
+        if (err == KERN_OK) {
+            sh_puts("\r\n");
+            continue;
+        }
+
+        if (supervisor_restart_policy(svc) != SUPERVISOR_RESTART_AUTO) {
+            sh_puts(" manual\r\n");
+            continue;
+        }
+
+        if (!supervisor_should_auto_restart(svc)) {
+            sh_puts(" restart limit\r\n");
+            continue;
+        }
+
+        sh_puts(" restarting\r\n");
+        cmd_svc_restart_service(svc);
+    }
+}
+
+static void cmd_svc_restart(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc restart <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc restart: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_restart();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_restart();
+        return;
+    }
+#endif
+
+    sh_puts("svc restart: no restart handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_down(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc down <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc down: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+#if DRIVER_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               DRIVER_SHELL_SERVICE_NAME) == 0) {
+        cmd_driver_down();
+        return;
+    }
+#endif
+#if VFS_ENABLE && CAP_ENABLE
+    if (strcmp(supervisor_service_name(svc),
+               FS_SHELL_SERVICE_NAME) == 0) {
+        cmd_fs_down();
+        return;
+    }
+#endif
+
+    sh_puts("svc down: no down handler: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
+static void cmd_svc_fault(int argc, char **argv) {
+    if (argc != 3) {
+        sh_puts("Usage: svc fault <service>\r\n");
+        return;
+    }
+
+    cmd_svc_register_defaults();
+
+    supervisor_service_t *svc = supervisor_find_service(argv[2]);
+    if (svc == NULL) {
+        sh_puts("svc fault: service not found: ");
+        sh_puts(argv[2]);
+        sh_puts("\r\n");
+        return;
+    }
+
+    sh_puts("svc fault: unsupported: ");
+    sh_puts(supervisor_service_name(svc));
+    sh_puts("\r\n");
+}
+
 static void cmd_svc(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "policy") == 0) {
         cmd_svc_policy(argc, argv);
         return;
     }
+    if (argc > 1 && strcmp(argv[1], "reset") == 0) {
+        cmd_svc_reset(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "recover") == 0) {
+        cmd_svc_recover(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "start") == 0) {
+        cmd_svc_start(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "health") == 0) {
+        cmd_svc_health(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "probe") == 0) {
+        cmd_svc_probe(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "supervise") == 0) {
+        cmd_svc_supervise(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "restart") == 0) {
+        cmd_svc_restart(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "down") == 0) {
+        cmd_svc_down(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "stop") == 0) {
+        cmd_svc_down(argc, argv);
+        return;
+    }
+    if (argc > 1 && strcmp(argv[1], "fault") == 0) {
+        cmd_svc_fault(argc, argv);
+        return;
+    }
 
     if (argc > 1 && strcmp(argv[1], "status") != 0) {
-        sh_puts("Usage: svc [status|policy <service> <manual|auto> [max]]\r\n");
+        sh_puts("Usage: svc [status|supervise|health <service>|probe <service>|policy <service> <manual|auto> [max]|reset <service>|start <service>|recover <service>|restart <service>|down|stop <service>|fault <service>]\r\n");
         return;
     }
 
