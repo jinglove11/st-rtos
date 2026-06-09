@@ -1,173 +1,143 @@
-# Phase 4: 设备驱动框架 — 功能完成表
+# Phase 4: User-Service Supervisor Checklist
 
-> 状态说明: ⬜ 未开始 | ✅ 已完成并测试通过
-> 前置: Phase 3 已完成 (329 tests, 0 failures, 含 shell)
-> 编译: **make BOARD=stm32f767 -j8 → 0 warnings**
-> 硬件: **待验证**
+> Board: STM32F767ZI Nucleo
+> Status: complete for the Phase 4 boundary
+> Validation: serial command tests plus `make BOARD=stm32f767`
+> Current baseline: FLASH 331168 B, SRAM 74880 B
 
----
+## Completion Criteria
 
-## 一、设备抽象 (device_t)
+Phase 4 is considered complete when the system can run shell-managed user-space
+driver and FS services, register them in a common supervisor registry, validate
+them through IPC/name-server paths, inject controlled service faults, recover
+them through policy-aware supervisor commands, and document the test matrix.
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 1.1 | `device.h` — device_t 结构定义 (name, type, ops, priv, irq_num, in_use) | `device.h` | ✅ |
-| 1.2 | `device_type_t` 枚举 — DEVICE_TYPE_CHAR(0), DEVICE_TYPE_BLOCK(1) | `device.h` | ✅ |
-| 1.3 | DEVICE_NAME_LEN=16, DEVICE_MAX=8 常量 | `device.h` | ✅ |
-| 1.4 | `device.c` — 静态池 `device_pool[DEVICE_MAX]` | `device.c` | ✅ |
-| 1.5 | `device_init()` — 池清零 | `device.c` | ✅ |
-| 1.6 | `device_alloc(name, type)` → device_t* — 扫描池找空闲槽 | `device.c` | ✅ |
-| 1.7 | `device_free(dev)` — 释放槽位 (in_use=0) | `device.c` | ✅ |
-| 1.8 | `device_find(name)` → device_t* — 按名查找 | `device.c` | ✅ |
+## Service Registry
 
----
+| # | Item | Status |
+|---|---|:---:|
+| 1.1 | Register `dev.uart0` as a supervisor service | done |
+| 1.2 | Register `fs.ramfs` as a supervisor service | done |
+| 1.3 | Preserve restart/recover/fault counters per service | done |
+| 1.4 | Track pending client count placeholder per service | done |
+| 1.5 | Track last health per service | done |
+| 1.6 | Track restart policy and max restart limit per service | done |
 
-## 二、devfs 层修改
+## User Driver Service
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 2.1 | `cdev_open` — private_data 改为 device_t*, 通过 dev->ops->open 分发 | `devfs.c` | ✅ |
-| 2.2 | `cdev_close` — private_data 改为 device_t*, 通过 dev->ops->close 分发 | `devfs.c` | ✅ |
-| 2.3 | `cdev_read` — private_data 改为 device_t*, 通过 dev->ops->read(dev->priv, ...) 分发 | `devfs.c` | ✅ |
-| 2.4 | `cdev_write` — private_data 改为 device_t*, 通过 dev->ops->write(dev->priv, ...) 分发 | `devfs.c` | ✅ |
-| 2.5 | `cdev_ioctl` — private_data 改为 device_t*, 通过 dev->ops->ioctl(dev->priv, ...) 分发 | `devfs.c` | ✅ |
-| 2.6 | `devfs_register_device(name, device_t*)` — 签名从 dev_ops_t* 改为 device_t* | `devfs.c` | ✅ |
-| 2.7 | devfs_register_device — inode->private_data = device_t* (不再设为 dev_ops_t*) | `devfs.c` | ✅ |
-| 2.8 | `devfs.h` — devfs_register_device 签名更新 | `devfs.h` | ✅ |
-| 2.9 | `/dev/null` 适配 — 使用独立 device_t + null_ops | `devfs.c` | ✅ |
+| # | Item | Status |
+|---|---|:---:|
+| 2.1 | Start user driver inbox | done |
+| 2.2 | Start driver name-server | done |
+| 2.3 | Start UART user service task | done |
+| 2.4 | Register `dev.uart0` in the name-server | done |
+| 2.5 | Validate descriptor lookup | done |
+| 2.6 | Validate ping/open/close/status/resources/poll | done |
+| 2.7 | Validate MMIO attach/write/detach probe path | done |
+| 2.8 | Validate controlled UART service fault injection | done |
+| 2.9 | Validate restart after fault through supervisor policy | done |
 
----
+## User FS Service
 
-## 三、UART 设备驱动
+| # | Item | Status |
+|---|---|:---:|
+| 3.1 | Start FS inbox | done |
+| 3.2 | Start FS name-server | done |
+| 3.3 | Start RAMFS user service task | done |
+| 3.4 | Register `fs.ramfs` in the name-server | done |
+| 3.5 | Validate ping/open/readdir/close | done |
+| 3.6 | Validate create/write/stat/unlink | done |
+| 3.7 | Validate mkdir/stat/unlink directory path | done |
+| 3.8 | Validate controlled FS service fault injection | done |
+| 3.9 | Validate restart after fault through supervisor policy | done |
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 3.1 | `uart_dev.c` — uart_dev_ops (open/close/read/write) | `uart_dev.c` | ✅ |
-| 3.2 | `uart_dev_open` — 返回 KERN_OK (硬件已在 system_init 中初始化) | `uart_dev.c` | ✅ |
-| 3.3 | `uart_dev_close` — 返回 KERN_OK | `uart_dev.c` | ✅ |
-| 3.4 | `uart_dev_read` — 逐字节 uart_getc, 返回 count | `uart_dev.c` | ✅ |
-| 3.5 | `uart_dev_write` — 逐字节 uart_putc, 返回 size | `uart_dev.c` | ✅ |
-| 3.6 | `uart_dev_register` — device_alloc + 设置 ops/priv | `uart_dev.c` | ✅ |
+## Supervisor Shell Commands
 
----
+| # | Command | Status |
+|---|---|:---:|
+| 4.1 | `svc` / `svc status` | done |
+| 4.2 | `svc stats` | done |
+| 4.3 | `svc start <service>` | done |
+| 4.4 | `svc stop <service>` | done |
+| 4.5 | `svc down <service>` | done |
+| 4.6 | `svc recover <service>` | done |
+| 4.7 | `svc restart <service>` | done |
+| 4.8 | `svc health <service>` | done |
+| 4.9 | `svc probe <service>` | done |
+| 4.10 | `svc policy <service> manual` | done |
+| 4.11 | `svc policy <service> auto <max>` | done |
+| 4.12 | `svc supervise` | done |
+| 4.13 | `svc supervise <service>` | done |
+| 4.14 | `svc fault <service>` | done |
+| 4.15 | `svc clear <service>` | done |
+| 4.16 | `svc reset <service>` | done |
+| 4.17 | `svc stress <service> <loops>` | done |
 
-## 四、GPIO 设备驱动
+## Validated Control Loops
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 4.1 | GPIO ioctl 命令定义 — GPIO_CMD_SET_PIN/GET_PIN/TOGGLE | `board_drivers.c` | ✅ |
-| 4.2 | `gpio_priv_t` 结构 — port, pin | `board_drivers.c` | ✅ |
-| 4.3 | `gpio_dev_ioctl` — SET_PIN→gpio_set, GET_PIN→gpio_get, TOGGLE→gpio_toggle | `board_drivers.c` | ✅ |
+| # | Scenario | Status |
+|---|---|:---:|
+| 5.1 | Cold `svc` shows both services stopped/manual | done |
+| 5.2 | Manual `svc start` starts driver and FS without incrementing counters | done |
+| 5.3 | `svc probe` validates both services after start | done |
+| 5.4 | `svc stop` returns services to stopped/state | done |
+| 5.5 | `svc policy auto <max>` updates policy and limit | done |
+| 5.6 | Manual policy prevents restart during `svc supervise` | done |
+| 5.7 | Auto policy restarts unhealthy services under limit | done |
+| 5.8 | Restart limit prevents further restarts | done |
+| 5.9 | Targeted supervise recovers only the selected service | done |
+| 5.10 | Fault counters increment on `svc fault` | done |
+| 5.11 | `svc clear` clears counters while preserving policy and health | done |
+| 5.12 | `svc reset` clears metadata and refreshes health | done |
+| 5.13 | `svc stress dev.uart0 3` completes fault/supervise/probe loop | done |
 
----
+## Error Semantics
 
-## 五、板级驱动注册
+| # | Case | Status |
+|---|---|:---:|
+| 6.1 | Unknown service for `svc policy` reports not found | done |
+| 6.2 | Invalid policy reports invalid policy | done |
+| 6.3 | Unknown service for `svc recover` reports not found | done |
+| 6.4 | Unknown service for `svc restart` reports not found | done |
+| 6.5 | Unknown service for `svc health` reports not found | done |
+| 6.6 | Unknown service for `svc probe` reports not found | done |
+| 6.7 | Unknown service for `svc fault` reports not found | done |
+| 6.8 | Unknown service for `svc clear` reports not found | done |
+| 6.9 | Unknown service for `svc stress` reports not found | done |
+| 6.10 | `svc stress` rejects loop counts outside `1..10` | done |
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 5.1 | `board_drivers.c` — board_init_drivers() 函数 | `board_drivers.c` | ✅ |
-| 5.2 | 注册 uart0 设备 — device_t + uart_dev_ops + priv=NUCLEO_DEFAULT_UART | `board_drivers.c` | ✅ |
-| 5.3 | 注册 led1/led2/led3 设备 — device_t + gpio_dev_ops | `board_drivers.c` | ✅ |
-| 5.4 | system_init.c 阶段 4 — 调用 board_init_drivers() | `system_init.c` | ✅ |
-| 5.5 | system_init.c — guarded by DRIVER_ENABLE | `system_init.c` | ✅ |
+## Documentation
 
----
+| # | Document | Status |
+|---|---|:---:|
+| 7.1 | `P4_MICROKERNEL_REFACTOR_PLAN.md` updated with completed work | done |
+| 7.2 | `docs/phase4/SUPERVISOR_TEST_MATRIX.md` added | done |
+| 7.3 | `docs/phase4/COMPLETION_REPORT.md` added | done |
+| 7.4 | `docs/phase4/CHECKLIST.md` updated to current P4 scope | done |
 
-## 六、内核集成
+## Deferred To Phase 5
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 6.1 | kernel.c — kern_init() 调用 device_init() | `kernel.c` | ✅ |
-| 6.2 | kernel.c — #include "device.h" | `kernel.c` | ✅ |
-| 6.3 | Makefile — KERN_SOURCES += src/kernel/dev/device.c | `Makefile` | ✅ |
-| 6.4 | Makefile — APP_SOURCES += src/drivers/uart_dev.c | `Makefile` | ✅ |
-| 6.5 | Makefile — APP_SOURCES += src/board/stm32f767/board_drivers.c | `Makefile` | ✅ |
-| 6.6 | Makefile — CFLAGS += -I$(SRC_DIR)/kernel/dev | `Makefile` | ✅ |
+| # | Item | Reason |
+|---|---|---|
+| 8.1 | Background supervisor task | P4 keeps supervision as deterministic manual tick |
+| 8.2 | Boot service manifest | Needs service dependency model and startup policy |
+| 8.3 | Real CPU-fault injection inside user services | Current P4 validates controlled service-loss fault injection |
+| 8.4 | Dependency-aware recovery ordering | Requires dependency metadata |
+| 8.5 | Generic resource manager for MMIO/IRQ | Current P4 validates UART MMIO attach path only |
 
----
+## Summary
 
-## 七、配置
+| Area | Total | Done | Completion |
+|---|---:|---:|---:|
+| Service registry | 6 | 6 | 100% |
+| User driver service | 9 | 9 | 100% |
+| User FS service | 9 | 9 | 100% |
+| Supervisor shell commands | 17 | 17 | 100% |
+| Validated control loops | 13 | 13 | 100% |
+| Error semantics | 10 | 10 | 100% |
+| Documentation | 4 | 4 | 100% |
+| **Phase 4 boundary** | **68** | **68** | **100%** |
 
-| # | 功能 | 文件 | 状态 |
-|---|------|------|:----:|
-| 7.1 | Kconfig "Driver Configuration" menu | `Kconfig` | ✅ |
-| 7.2 | DRIVER_ENABLE (bool, default y, depends VFS_ENABLE) | `Kconfig` | ✅ |
-| 7.3 | DRIVER_MAX_DEVICES (int, default 8, range 4-16) | `Kconfig` | ✅ |
-| 7.4 | `.config` — DRIVER_ENABLE=y, DRIVER_MAX_DEVICES=8 | `.config` | ✅ |
-| 7.5 | `kernel_config.h` — DRIVER_ENABLE=1, DRIVER_MAX_DEVICES=8 | `kernel_config.h` | ✅ |
-
----
-
-## 八、测试 — 设备框架
-
-| # | 测试 | 状态 |
-|:---:|------|:----:|
-| 8.1 | device_alloc → 返回有效 device_t*, in_use=1 | ✅ |
-| 8.2 | device_alloc 重复名称 → 返回不同槽位 | ✅ |
-| 8.3 | device_free → 槽位回收, device_find 返回 NULL | ✅ |
-| 8.4 | device_find 按名查找 → 返回正确 device_t* | ✅ |
-| 8.5 | device_alloc(NULL) → 返回 NULL | ✅ |
-
----
-
-## 九、测试 — UART 设备驱动
-
-| # | 测试 | 状态 |
-|:---:|------|:----:|
-| 9.1 | device_find("uart0") → 非 NULL, type=CHAR | ✅ |
-| 9.2 | vfs_lookup("/dev/uart0") → CHRDEV inode 存在 | ✅ |
-| 9.3 | ops->read/write 非 NULL | ✅ |
-
----
-
-## 十、测试 — GPIO 设备驱动
-
-| # | 测试 | 状态 |
-|:---:|------|:----:|
-| 10.1 | device_find("led1/led2/led3") → 非 NULL | ✅ |
-
----
-
-## 十一、测试 — devfs 回归
-
-| # | 测试 | 状态 |
-|:---:|------|:----:|
-| 11.1 | /dev/null read → 0 (EOF) | ✅ |
-| 11.2 | /dev/null write → 成功吃掉数据 | ✅ |
-| 11.3 | /dev/null close → KERN_OK | ✅ |
-
----
-
-## 十二、回归测试 — 硬件验证
-
-| # | 测试集 | 状态 |
-|:---:|--------|:----:|
-| 12.1 | Phase 1-3 + shell 全部回归测试通过 | ⬜ (待硬件验证) |
-| 12.2 | 设备框架测试模块全部通过 (test_driver) | ⬜ (待硬件验证) |
-| 12.3 | 编译零警告 (-Wall -Wextra -Werror) | ✅ |
-
----
-
-## 完成统计
-
-| 类别 | 总数 | 已完成 | 完成率 |
-|------|------|--------|--------|
-| 设备抽象 (device_t) | 8 | 8 | 100% |
-| devfs 层修改 | 9 | 9 | 100% |
-| UART 设备驱动 | 6 | 6 | 100% |
-| GPIO 设备驱动 | 3 | 3 | 100% |
-| 板级驱动注册 | 5 | 5 | 100% |
-| 内核集成 | 6 | 6 | 100% |
-| 配置 | 5 | 5 | 100% |
-| 测试 — 设备框架 | 5 | 5 | 100% |
-| 测试 — UART | 3 | 3 | 100% |
-| 测试 — GPIO | 1 | 1 | 100% |
-| 测试 — devfs 回归 | 3 | 3 | 100% |
-| 测试 — 回归 | 3 | 1 | 33% |
-| **总计** | **57** | **55** | **96%** |
-
----
-
-> 创建日期: 2026-05-08
-> 最后更新: 2026-05-08
-> 状态: **代码完成 — 待硬件验证**
+Phase 4 is complete at the current boundary. The remaining work belongs to
+Phase 5: turning the manual supervisor control plane into background service
+management and boot-time service orchestration.

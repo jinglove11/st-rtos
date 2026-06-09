@@ -1608,3 +1608,8 @@ This slice closes real security holes without requiring service migration yet.
 - Done: added `docs/phase4/COMPLETION_REPORT.md` summarizing the implemented
   service stacks, supervisor control plane, board-validated behaviors, build
   baseline, current limits, and Phase 5 candidates.
+- Done: updated `docs/phase4/CHECKLIST.md` from the earlier device-framework
+  checklist to the final Phase 4 user-service/supervisor checklist, marking the
+  current Phase 4 boundary complete and moving background supervision, boot
+  manifests, CPU-fault injection, dependency ordering, and generic resource
+  management to Phase 5.
