@@ -6,6 +6,8 @@
 #ifndef MUTEX_H
 #define MUTEX_H
 
+#define mutex_init kern_mutex_init
+
 #include "kernel_types.h"
 
 /*============================================================================
@@ -37,6 +39,16 @@ kern_err_t mutex_delete(mutex_id_t mutex_id);
  */
 kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout);
 
+#if SYSCALL_ENABLE
+/**
+ * @brief syscall-safe mutex lock.
+ *
+ * This may return KERN_SYSCALL_BLOCKED after saving continuation state in the
+ * current task. The SVC handler must switch away instead of returning directly.
+ */
+kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout);
+#endif
+
 /**
  * @brief 尝试获取互斥锁 (非阻塞)
  * @param mutex_id 互斥锁 ID
@@ -59,5 +71,20 @@ kern_err_t mutex_unlock(mutex_id_t mutex_id);
  * @brief 初始化互斥锁子系统
  */
 void mutex_init(void);
+
+/*============================================================================
+ * 死锁检测
+ *============================================================================*/
+
+/**
+ * @brief 扫描所有互斥锁和任务，检测死锁循环
+ *
+ * 遍历所有任务，检查阻塞在互斥锁上的任务是否构成等待图环。
+ *
+ * @return 检测到的死锁任务数量（0 表示无死锁）
+ *
+ * @note mutex_lock() 已内联检测，此函数用于诊断和调试。
+ */
+int mutex_deadlock_check(void);
 
 #endif // MUTEX_H

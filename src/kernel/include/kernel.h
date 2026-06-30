@@ -9,6 +9,13 @@
 #include "kernel_types.h"
 #include "task.h"
 #include "scheduler.h"
+#include "irq.h"
+#include "bh.h"
+#include "mpu.h"
+#include "syscall.h"
+#include "capability.h"
+#include "fault.h"
+#include "vfs/vfs.h"
 
 /*============================================================================
  * 内核控制

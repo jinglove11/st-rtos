@@ -4,9 +4,11 @@
  */
 
 #include "semaphore.h"
+#include "wait_queue.h"
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "syscall.h"
 #include <string.h>
 
 /*============================================================================
@@ -47,65 +49,6 @@ static sem_t *sem_get(sem_id_t id) {
         return NULL;
     }
     return &sem_pool[id];
-}
-
-// 初始化等待队列
-static void wait_queue_init(wait_queue_t *wq) {
-    wq->head = NULL;
-    wq->tail = NULL;
-    wq->count = 0;
-}
-
-// 添加任务到等待队列尾部 (按优先级排序)
-static void wait_queue_add(wait_queue_t *wq, tcb_t *tcb) {
-    tcb->next = NULL;
-    tcb->prev = wq->tail;
-
-    if (wq->tail) {
-        wq->tail->next = tcb;
-    } else {
-        wq->head = tcb;
-    }
-    wq->tail = tcb;
-    wq->count++;
-}
-
-// 从等待队列移除任务
-static void wait_queue_remove(wait_queue_t *wq, tcb_t *tcb) {
-    if (tcb->prev) {
-        tcb->prev->next = tcb->next;
-    } else {
-        wq->head = tcb->next;
-    }
-
-    if (tcb->next) {
-        tcb->next->prev = tcb->prev;
-    } else {
-        wq->tail = tcb->prev;
-    }
-
-    tcb->next = NULL;
-    tcb->prev = NULL;
-    wq->count--;
-}
-
-// 获取等待队列中最高优先级的任务
-static tcb_t *wait_queue_get_highest(wait_queue_t *wq) {
-    if (wq->head == NULL) {
-        return NULL;
-    }
-
-    tcb_t *highest = wq->head;
-    tcb_t *curr = wq->head->next;
-
-    while (curr) {
-        if (curr->priority < highest->priority) {
-            highest = curr;
-        }
-        curr = curr->next;
-    }
-
-    return highest;
 }
 
 /*============================================================================
@@ -154,7 +97,9 @@ kern_err_t sem_delete(sem_id_t sem_id) {
     // 唤醒所有等待的任务
     tcb_t *tcb = sem->wait_queue.head;
     while (tcb) {
-        tcb_t *next = tcb->next;
+        tcb_t *next = tcb->wait_next;
+        tcb->wait_next = NULL;
+        tcb->wait_prev = NULL;
         tcb->block_result = KERN_ERR_NOEXIST;  // 对象已删除
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
@@ -169,22 +114,25 @@ kern_err_t sem_delete(sem_id_t sem_id) {
 }
 
 kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
-    uint32_t crit = hal_irq_save();
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+    uint32_t crit = hal_enter_critical();
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_PARAM;
     }
 
     if (sem->count > 0) {
         sem->count--;
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_TIMEOUT;
     }
 
@@ -194,47 +142,125 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
 
     wait_queue_add(&sem->wait_queue, current);
 
-    hal_irq_restore(crit);
+    /* 从就绪队列移除 */
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
 
-    kern_err_t result = sched_block(BLOCK_REASON_SEM, sem, timeout);
+    /* 设置阻塞状态 */
+    current->state = TASK_STATE_BLOCKED;
+    current->block_result = KERN_OK;
 
-    crit = hal_irq_save();
+    /* 设置超时唤醒时间 */
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+
+    /* 触发上下文切换 */
+    hal_trigger_pendsv();
+
+    /* 等待被唤醒 */
+    while (current->state == TASK_STATE_BLOCKED) {
+        __asm volatile("wfi");
+        __asm volatile("dmb");
+    }
+
+    kern_err_t result = current->block_result;
+
+    crit = hal_enter_critical();
     if (result != KERN_OK) {
         if (current->block_obj == sem) {
             wait_queue_remove(&sem->wait_queue, current);
             current->block_obj = NULL;
         }
     }
-    hal_irq_restore(crit);
+    hal_exit_critical(crit);
 
     return result;
 }
 
-kern_err_t sem_trywait(sem_id_t sem_id) {
-    uint32_t crit = hal_irq_save();
+#if SYSCALL_ENABLE
+kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+
+    uint32_t crit = hal_enter_critical();
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_PARAM;
     }
 
     if (sem->count > 0) {
         sem->count--;
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_OK;
     }
 
-    hal_irq_restore(crit);
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_SEM;
+    current->block_obj = sem;
+    current->block_result = KERN_OK;
+    wait_queue_add(&sem->wait_queue, current);
+
+    sched_remove_ready(current);
+    current->state = TASK_STATE_BLOCKED;
+
+    if (timeout > 0) {
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
+
+kern_err_t sem_trywait(sem_id_t sem_id) {
+    uint32_t crit = hal_enter_critical();
+
+    sem_t *sem = sem_get(sem_id);
+    if (sem == NULL) {
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (sem->count > 0) {
+        sem->count--;
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    hal_exit_critical(crit);
     return KERN_ERR_BUSY;
 }
 
 kern_err_t sem_post(sem_id_t sem_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = hal_enter_critical();
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_PARAM;
     }
 
@@ -252,26 +278,26 @@ kern_err_t sem_post(sem_id_t sem_id) {
         if (sem->count < sem->max_count) {
             sem->count++;
         } else {
-            hal_irq_restore(crit);
+            hal_exit_critical(crit);
             return KERN_ERR_OVERFLOW;  // 计数溢出
         }
     }
 
-    hal_irq_restore(crit);
+    hal_exit_critical(crit);
     return KERN_OK;
 }
 
 int32_t sem_get_count(sem_id_t sem_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = hal_enter_critical();
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return -1;
     }
 
     int32_t count = (int32_t)sem->count;
 
-    hal_irq_restore(crit);
+    hal_exit_critical(crit);
     return count;
 }

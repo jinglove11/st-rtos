@@ -6,10 +6,13 @@
  */
 
 #include "timer.h"
+#include "endpoint.h"
 #include "scheduler.h"
 #include "mqueue.h"
 #include "task.h"
 #include "kernel_config.h"
+#include "trace.h"
+#include "stats.h"
 #include "hal.h"
 #include <string.h>
 
@@ -48,6 +51,17 @@
 #define KERN_TIMER_STACK_SIZE   TIMER_TASK_STACK_SIZE
 #define KERN_TIMER_NAME_LEN     TIMER_NAME_LEN
 
+#ifndef TRACE_TIMER_CREATE
+#define TRACE_TIMER_CREATE      1
+#define TRACE_TIMER_START       2
+#define TRACE_TIMER_STOP        3
+#define TRACE_TIMER_FIRE        4
+#define TRACE_TIMER_DELETE      5
+#define TRACE_TIMER_QUEUE_FULL  6
+#define TRACE_TIMER_RESET       7
+#define TRACE_TIMER_CHANGE      8
+#endif
+
 /*============================================================================
  * 静态分配
  *============================================================================*/
@@ -71,6 +85,89 @@ static queue_id_t cmd_queue;
 
 /* 定时器服务任务 */
 static task_id_t timer_task_id;
+
+#endif /* TIMER_ENABLE */
+
+/*============================================================================
+ * Trace / Stats
+ *============================================================================*/
+
+#if TIMER_ENABLE
+
+static uint8_t timer_current_task_id(void) {
+    tcb_t *current = sched_get_current();
+    return current ? (uint8_t)current->id : 0xFFU;
+}
+
+#if TRACE_ENABLE
+static uint8_t timer_trace_result(kern_err_t err) {
+    switch (err) {
+        case KERN_OK:
+            return TRACE_RESULT_OK;
+        case KERN_ERR_TIMEOUT:
+            return TRACE_RESULT_TIMEOUT;
+        case KERN_ERR_BUSY:
+        case KERN_ERR_RESOURCE:
+        case KERN_ERR_OVERFLOW:
+            return TRACE_RESULT_FULL;
+        case KERN_ERR_NOEXIST:
+            return TRACE_RESULT_NOEXIST;
+        default:
+            return TRACE_RESULT_ERR;
+    }
+}
+#endif
+
+#if KERN_TASK_STATS
+static uint8_t timer_stats_counter(kern_err_t err) {
+    switch (err) {
+        case KERN_OK:
+            return STATS_COUNTER_OK;
+        case KERN_ERR_TIMEOUT:
+            return STATS_COUNTER_TIMEOUT;
+        case KERN_ERR_BUSY:
+        case KERN_ERR_RESOURCE:
+        case KERN_ERR_OVERFLOW:
+            return STATS_COUNTER_QUEUE_FULL;
+        case KERN_ERR_NOEXIST:
+            return STATS_COUNTER_NOEXIST;
+        default:
+            return STATS_COUNTER_ERROR;
+    }
+}
+#endif
+
+static void timer_record_event(timer_id_t timer_id, uint8_t action, kern_err_t err) {
+#if TRACE_ENABLE
+    uint8_t object_id = (timer_id >= 0) ? (uint8_t)timer_id : 0xFFU;
+    trace_timer(timer_current_task_id(), object_id, action, timer_trace_result(err));
+#else
+    (void)timer_id;
+    (void)action;
+#endif
+
+#if KERN_TASK_STATS
+    (void)stats_record_event(STATS_SUBSYS_TIMER, timer_stats_counter(err));
+#endif
+    (void)err;
+}
+
+static uint8_t timer_cmd_trace_action(timer_cmd_type_t type) {
+    switch (type) {
+        case TIMER_CMD_START:
+            return TRACE_TIMER_START;
+        case TIMER_CMD_STOP:
+            return TRACE_TIMER_STOP;
+        case TIMER_CMD_RESET:
+            return TRACE_TIMER_RESET;
+        case TIMER_CMD_CHANGE_PERIOD:
+            return TRACE_TIMER_CHANGE;
+        case TIMER_CMD_DELETE:
+            return TRACE_TIMER_DELETE;
+        default:
+            return TRACE_TIMER_QUEUE_FULL;
+    }
+}
 
 #endif /* TIMER_ENABLE */
 
@@ -276,8 +373,17 @@ static kern_err_t send_command(timer_cmd_type_t type, timer_id_t timer_id, uint3
     cmd.timer_id = timer_id;
     cmd.param = param;
 
-    /* 使用非阻塞发送，避免在中断中阻塞 */
-    return mqueue_trysend(cmd_queue, &cmd);
+    /* 非阻塞发送并重试，给服务任务排出队列的机会 */
+    kern_err_t err;
+    for (int retry = 0; retry < 3; retry++) {
+        err = mqueue_trysend(cmd_queue, &cmd);
+        if (err == KERN_OK) {
+            timer_record_event(timer_id, timer_cmd_trace_action(type), KERN_OK);
+            return KERN_OK;
+        }
+    }
+    timer_record_event(timer_id, TRACE_TIMER_QUEUE_FULL, err);
+    return err;
 }
 
 #endif /* TIMER_ENABLE */
@@ -291,6 +397,11 @@ static kern_err_t send_command(timer_cmd_type_t type, timer_id_t timer_id, uint3
 static void process_cmd_start(timer_id_t timer_id, uint32_t delay) {
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        timer_record_event(timer_id, TRACE_TIMER_START, KERN_ERR_NOEXIST);
+        return;
+    }
+    if (timer->delete_pending) {
+        timer_record_event(timer_id, TRACE_TIMER_START, KERN_ERR_NOEXIST);
         return;
     }
 
@@ -301,19 +412,32 @@ static void process_cmd_start(timer_id_t timer_id, uint32_t delay) {
 
     /* 设置到期时间 */
     uint32_t now = sched_get_tick_count();
-    timer->expire = now + (delay > 0 ? delay : timer->period);
+    uint32_t actual_delay = (delay > 0) ? delay : timer->period;
+    timer->expire = now + actual_delay;
+
+    /* 对于单次定时器，保存 delay 值以便 reset 使用 */
+    if (timer->one_shot && delay > 0) {
+        timer->period = delay;
+    }
 
     /* 插入堆，成功后再设置状态 */
     if (heap_insert(&timer_heap, timer) == 0) {
         timer->state = TIMER_STATE_ACTIVE;
+        timer->stop_pending = 0;
     } else {
         timer->state = TIMER_STATE_IDLE;
+        timer_record_event(timer_id, TRACE_TIMER_START, KERN_ERR_RESOURCE);
     }
 }
 
 static void process_cmd_stop(timer_id_t timer_id) {
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        timer_record_event(timer_id, TRACE_TIMER_STOP, KERN_ERR_NOEXIST);
+        return;
+    }
+    if (timer->delete_pending) {
+        timer_record_event(timer_id, TRACE_TIMER_STOP, KERN_ERR_NOEXIST);
         return;
     }
 
@@ -323,11 +447,17 @@ static void process_cmd_stop(timer_id_t timer_id) {
     }
 
     timer->state = TIMER_STATE_IDLE;
+    timer->stop_pending = 0;
 }
 
 static void process_cmd_reset(timer_id_t timer_id) {
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        timer_record_event(timer_id, TRACE_TIMER_RESET, KERN_ERR_NOEXIST);
+        return;
+    }
+    if (timer->delete_pending) {
+        timer_record_event(timer_id, TRACE_TIMER_RESET, KERN_ERR_NOEXIST);
         return;
     }
 
@@ -342,14 +472,21 @@ static void process_cmd_reset(timer_id_t timer_id) {
     /* 插入堆，成功后再设置状态 */
     if (heap_insert(&timer_heap, timer) == 0) {
         timer->state = TIMER_STATE_ACTIVE;
+        timer->stop_pending = 0;
     } else {
         timer->state = TIMER_STATE_IDLE;
+        timer_record_event(timer_id, TRACE_TIMER_RESET, KERN_ERR_RESOURCE);
     }
 }
 
 static void process_cmd_change_period(timer_id_t timer_id, uint32_t new_period) {
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        timer_record_event(timer_id, TRACE_TIMER_CHANGE, KERN_ERR_NOEXIST);
+        return;
+    }
+    if (timer->delete_pending) {
+        timer_record_event(timer_id, TRACE_TIMER_CHANGE, KERN_ERR_NOEXIST);
         return;
     }
 
@@ -365,8 +502,10 @@ static void process_cmd_change_period(timer_id_t timer_id, uint32_t new_period) 
         /* 插入堆，成功后再设置状态 */
         if (heap_insert(&timer_heap, timer) == 0) {
             timer->state = TIMER_STATE_ACTIVE;
+            timer->stop_pending = 0;
         } else {
             timer->state = TIMER_STATE_IDLE;
+            timer_record_event(timer_id, TRACE_TIMER_CHANGE, KERN_ERR_RESOURCE);
         }
     }
 }
@@ -374,8 +513,11 @@ static void process_cmd_change_period(timer_id_t timer_id, uint32_t new_period) 
 static void process_cmd_delete(timer_id_t timer_id) {
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
+        timer_record_event(timer_id, TRACE_TIMER_DELETE, KERN_ERR_NOEXIST);
         return;
     }
+
+    timer->delete_pending = 1;
 
     /* 从堆中移除 */
     if (timer->heap_index >= 0) {
@@ -384,6 +526,7 @@ static void process_cmd_delete(timer_id_t timer_id) {
 
     /* 清零并释放 */
     memset(timer, 0, sizeof(timer_t));
+    timer->state = TIMER_STATE_DELETED;
     free_timer_id(timer_id);
 }
 
@@ -421,7 +564,7 @@ static void process_expired_timers(void) {
     while (timer_heap.size > 0) {
         timer_t *timer = timer_heap.timers[0];
 
-        if (timer->expire > now) {
+        if ((int32_t)(timer->expire - now) > 0) {
             break;  /* 最近的定时器还未到期 */
         }
 
@@ -429,22 +572,32 @@ static void process_expired_timers(void) {
         heap_pop(&timer_heap);
         timer->state = TIMER_STATE_RUNNING;
 
+        if (timer->notify_bound) {
+            uint8_t notify_msg[KERN_EP_MSG_SIZE];
+            memset(notify_msg, 0, sizeof(notify_msg));
+            ((uint32_t *)notify_msg)[0] = timer->notify_badge;
+            ((uint32_t *)notify_msg)[1] = (uint32_t)timer->id;
+            (void)endpoint_notify(timer->notify_ep, notify_msg);
+        }
+
         /* 执行回调 */
         if (timer->callback) {
             timer->callback(timer->arg);
         }
+        timer_record_event(timer->id, TRACE_TIMER_FIRE, KERN_OK);
 
-        /* 周期定时器重新插入 */
-        if (!timer->one_shot && timer->state == TIMER_STATE_RUNNING) {
+        /* 周期定时器重新插入（除非回调中请求了停止） */
+        if (!timer->one_shot && !timer->stop_pending && !timer->delete_pending &&
+            timer->state == TIMER_STATE_RUNNING) {
             timer->expire = now + timer->period;
-            /* 插入堆，成功后再设置状态 */
             if (heap_insert(&timer_heap, timer) == 0) {
                 timer->state = TIMER_STATE_ACTIVE;
             } else {
                 timer->state = TIMER_STATE_IDLE;
             }
-        } else if (timer->one_shot) {
+        } else {
             timer->state = TIMER_STATE_IDLE;
+            timer->stop_pending = 0;
         }
     }
 }
@@ -466,14 +619,14 @@ static void timer_service_task(void *arg) {
         /* 计算等待时间 */
         if (timer_heap.size > 0) {
             uint32_t now = sched_get_tick_count();
-            uint32_t expire = timer_heap.timers[0]->expire;
-            if (expire > now) {
-                timeout = expire - now;
+            int32_t diff = (int32_t)(timer_heap.timers[0]->expire - now);
+            if (diff > 0) {
+                timeout = (uint32_t)diff;
             } else {
                 timeout = 0;  /* 已到期 */
             }
         } else {
-            timeout = 0xFFFFFFFF;  /* 无限等待 */
+            timeout = 100;  /* 堆空时定期轮询 */
         }
 
         /* 等待命令或超时 */
@@ -501,6 +654,7 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     timer_id_t id = alloc_timer_id();
     if (id == KERN_INVALID_ID) {
         hal_irq_restore(crit);
+        timer_record_event(KERN_INVALID_ID, TRACE_TIMER_CREATE, KERN_ERR_RESOURCE);
         return KERN_INVALID_ID;
     }
 
@@ -514,6 +668,7 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     timer->one_shot = (period == 0) ? 1 : 0;
     timer->state = TIMER_STATE_IDLE;
     timer->heap_index = -1;
+    timer->notify_ep = KERN_INVALID_ID;
     timer->in_use = 1;
 
     if (name) {
@@ -522,6 +677,7 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     }
 
     hal_irq_restore(crit);
+    timer_record_event(id, TRACE_TIMER_CREATE, KERN_OK);
     return id;
 #else
     (void)name;
@@ -538,11 +694,19 @@ kern_err_t timer_delete(timer_id_t timer_id) {
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
         hal_irq_restore(crit);
+        timer_record_event(timer_id, TRACE_TIMER_DELETE, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
+    if (timer->delete_pending) {
+        hal_irq_restore(crit);
+        timer_record_event(timer_id, TRACE_TIMER_DELETE, KERN_ERR_NOEXIST);
+        return KERN_ERR_NOEXIST;
+    }
+    timer->delete_pending = 1;
+    hal_irq_restore(crit);
 
     kern_err_t err = send_command(TIMER_CMD_DELETE, timer_id, 0);
-    hal_irq_restore(crit);
+
     return err;
 #else
     (void)timer_id;
@@ -554,8 +718,9 @@ kern_err_t timer_start(timer_id_t timer_id, uint32_t delay) {
 #if TIMER_ENABLE
     uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
-    if (timer == NULL) {
+    if (timer == NULL || timer->delete_pending) {
         hal_irq_restore(crit);
+        timer_record_event(timer_id, TRACE_TIMER_START, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
@@ -573,11 +738,13 @@ kern_err_t timer_stop(timer_id_t timer_id) {
 #if TIMER_ENABLE
     uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
-    if (timer == NULL) {
+    if (timer == NULL || timer->delete_pending) {
         hal_irq_restore(crit);
+        timer_record_event(timer_id, TRACE_TIMER_STOP, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
+    timer->stop_pending = 1;
     kern_err_t err = send_command(TIMER_CMD_STOP, timer_id, 0);
     hal_irq_restore(crit);
     return err;
@@ -591,8 +758,9 @@ kern_err_t timer_reset(timer_id_t timer_id) {
 #if TIMER_ENABLE
     uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
-    if (timer == NULL) {
+    if (timer == NULL || timer->delete_pending) {
         hal_irq_restore(crit);
+        timer_record_event(timer_id, TRACE_TIMER_RESET, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
@@ -609,8 +777,9 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 #if TIMER_ENABLE
     uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
-    if (timer == NULL) {
+    if (timer == NULL || timer->delete_pending) {
         hal_irq_restore(crit);
+        timer_record_event(timer_id, TRACE_TIMER_CHANGE, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
@@ -624,10 +793,40 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 #endif
 }
 
+kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
+                               uint32_t badge) {
+#if TIMER_ENABLE && IPC_ENDPOINT
+    uint32_t crit = hal_irq_save();
+    timer_t *timer = timer_get(timer_id);
+    if (timer == NULL || timer->delete_pending) {
+        hal_irq_restore(crit);
+        return KERN_ERR_PARAM;
+    }
+    if (!endpoint_exists(ep_id)) {
+        hal_irq_restore(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    timer->notify_ep = ep_id;
+    timer->notify_badge = badge;
+    timer->notify_bound = 1;
+    hal_irq_restore(crit);
+    return KERN_OK;
+#else
+    (void)timer_id;
+    (void)ep_id;
+    (void)badge;
+    return KERN_ERR;
+#endif
+}
+
 timer_state_t timer_get_state(timer_id_t timer_id) {
 #if TIMER_ENABLE
+    uint32_t crit = hal_irq_save();
     timer_t *timer = timer_get(timer_id);
-    return timer ? timer->state : TIMER_STATE_DELETED;
+    timer_state_t state = timer ? timer->state : TIMER_STATE_DELETED;
+    hal_irq_restore(crit);
+    return state;
 #else
     (void)timer_id;
     return TIMER_STATE_DELETED;
@@ -645,7 +844,8 @@ int32_t timer_get_remaining(timer_id_t timer_id) {
     }
 
     uint32_t now = sched_get_tick_count();
-    int32_t remaining = (timer->expire > now) ? (int32_t)(timer->expire - now) : 0;
+    int32_t diff = (int32_t)(timer->expire - now);
+    int32_t remaining = (diff > 0) ? diff : 0;
 
     hal_irq_restore(crit);
     return remaining;

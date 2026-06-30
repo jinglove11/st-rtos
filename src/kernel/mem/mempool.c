@@ -6,8 +6,25 @@
 #include "mempool.h"
 #include "mem.h"
 #include "kernel_config.h"
+#include "trace.h"
+#include "stats.h"
+#include "scheduler.h"
 #include "hal.h"
 #include <string.h>
+
+#ifndef TRACE_MEM_ALLOC
+#define TRACE_MEM_ALLOC       1
+#define TRACE_MEM_FREE        2
+#define TRACE_MEM_FAIL        3
+#endif
+
+#ifndef STATS_COUNTER_OK
+#define STATS_COUNTER_OK         0
+#define STATS_COUNTER_ERROR      1
+#define STATS_COUNTER_QUEUE_FULL 2
+#define STATS_COUNTER_DELETE     4
+#define STATS_COUNTER_NOEXIST    7
+#endif
 
 #define POOL_MAX_COUNT      8
 
@@ -22,6 +39,42 @@ typedef struct mem_pool {
 
 static mem_pool_t pools[POOL_MAX_COUNT];
 static uint32_t pool_used_bitmap = 0;
+
+static uint8_t mempool_current_task_id(void) {
+    tcb_t *current = sched_get_current();
+    return current ? (uint8_t)current->id : 0xFFU;
+}
+
+static void mempool_record_event(pool_id_t pool_id, uint8_t action,
+                                 kern_err_t err, uint8_t counter) {
+#if TRACE_ENABLE
+    uint8_t object_id = (pool_id >= 0) ? (uint8_t)pool_id : 0xFFU;
+    uint8_t result = (err == KERN_OK) ? TRACE_RESULT_OK :
+                     (err == KERN_ERR_NOEXIST ? TRACE_RESULT_NOEXIST :
+                      (err == KERN_ERR_RESOURCE ? TRACE_RESULT_FULL :
+                       TRACE_RESULT_ERR));
+    trace_mem(mempool_current_task_id(), object_id, action, result);
+#else
+    (void)pool_id;
+    (void)action;
+#endif
+
+#if KERN_TASK_STATS
+    if (err != KERN_OK) {
+        if (err == KERN_ERR_NOEXIST) {
+            counter = STATS_COUNTER_NOEXIST;
+        } else if (err == KERN_ERR_RESOURCE) {
+            counter = STATS_COUNTER_QUEUE_FULL;
+        } else {
+            counter = STATS_COUNTER_ERROR;
+        }
+    }
+    (void)stats_record_event(STATS_SUBSYS_MEM, counter);
+#else
+    (void)counter;
+#endif
+    (void)err;
+}
 
 static uint32_t crit_enter(void) {
     return hal_irq_save();
@@ -54,6 +107,8 @@ void mempool_init(void) {
 
 pool_id_t mempool_create(size_t block_size, uint32_t block_count) {
     if (block_size == 0 || block_count == 0) {
+        mempool_record_event(POOL_INVALID_ID, TRACE_MEM_ALLOC, KERN_ERR_PARAM,
+                             STATS_COUNTER_ERROR);
         return POOL_INVALID_ID;
     }
     
@@ -64,6 +119,8 @@ pool_id_t mempool_create(size_t block_size, uint32_t block_count) {
     pool_id_t id = alloc_pool_id();
     if (id == POOL_INVALID_ID) {
         crit_exit(crit);
+        mempool_record_event(POOL_INVALID_ID, TRACE_MEM_FAIL, KERN_ERR_RESOURCE,
+                             STATS_COUNTER_QUEUE_FULL);
         return POOL_INVALID_ID;
     }
     
@@ -74,6 +131,8 @@ pool_id_t mempool_create(size_t block_size, uint32_t block_count) {
     if (!pool->buffer) {
         free_pool_id(id);
         crit_exit(crit);
+        mempool_record_event(id, TRACE_MEM_FAIL, KERN_ERR_RESOURCE,
+                             STATS_COUNTER_QUEUE_FULL);
         return POOL_INVALID_ID;
     }
     
@@ -89,11 +148,14 @@ pool_id_t mempool_create(size_t block_size, uint32_t block_count) {
     pool->free_list = pool->buffer;
     
     crit_exit(crit);
+    mempool_record_event(id, TRACE_MEM_ALLOC, KERN_OK, STATS_COUNTER_OK);
     return id;
 }
 
 void mempool_delete(pool_id_t pool_id) {
     if (pool_id < 0 || pool_id >= POOL_MAX_COUNT) {
+        mempool_record_event(pool_id, TRACE_MEM_FREE, KERN_ERR_PARAM,
+                             STATS_COUNTER_ERROR);
         return;
     }
     
@@ -102,6 +164,8 @@ void mempool_delete(pool_id_t pool_id) {
     mem_pool_t *pool = &pools[pool_id];
     if (!pool->in_use) {
         crit_exit(crit);
+        mempool_record_event(pool_id, TRACE_MEM_FREE, KERN_ERR_NOEXIST,
+                             STATS_COUNTER_NOEXIST);
         return;
     }
     
@@ -110,10 +174,14 @@ void mempool_delete(pool_id_t pool_id) {
     free_pool_id(pool_id);
     
     crit_exit(crit);
+    mempool_record_event(pool_id, TRACE_MEM_FREE, KERN_OK,
+                         STATS_COUNTER_DELETE);
 }
 
 void *mempool_alloc(pool_id_t pool_id) {
     if (pool_id < 0 || pool_id >= POOL_MAX_COUNT) {
+        mempool_record_event(pool_id, TRACE_MEM_ALLOC, KERN_ERR_PARAM,
+                             STATS_COUNTER_ERROR);
         return NULL;
     }
     
@@ -122,6 +190,10 @@ void *mempool_alloc(pool_id_t pool_id) {
     mem_pool_t *pool = &pools[pool_id];
     if (!pool->in_use || !pool->free_list) {
         crit_exit(crit);
+        mempool_record_event(pool_id, TRACE_MEM_FAIL,
+                             pool->in_use ? KERN_ERR_RESOURCE : KERN_ERR_NOEXIST,
+                             pool->in_use ? STATS_COUNTER_QUEUE_FULL :
+                                            STATS_COUNTER_NOEXIST);
         return NULL;
     }
     
@@ -130,11 +202,14 @@ void *mempool_alloc(pool_id_t pool_id) {
     pool->free_count--;
     
     crit_exit(crit);
+    mempool_record_event(pool_id, TRACE_MEM_ALLOC, KERN_OK, STATS_COUNTER_OK);
     return block;
 }
 
 void mempool_free(pool_id_t pool_id, void *block) {
     if (pool_id < 0 || pool_id >= POOL_MAX_COUNT || !block) {
+        mempool_record_event(pool_id, TRACE_MEM_FREE, KERN_ERR_PARAM,
+                             STATS_COUNTER_ERROR);
         return;
     }
     
@@ -143,6 +218,8 @@ void mempool_free(pool_id_t pool_id, void *block) {
     mem_pool_t *pool = &pools[pool_id];
     if (!pool->in_use) {
         crit_exit(crit);
+        mempool_record_event(pool_id, TRACE_MEM_FREE, KERN_ERR_NOEXIST,
+                             STATS_COUNTER_NOEXIST);
         return;
     }
     
@@ -151,6 +228,7 @@ void mempool_free(pool_id_t pool_id, void *block) {
     pool->free_count++;
     
     crit_exit(crit);
+    mempool_record_event(pool_id, TRACE_MEM_FREE, KERN_OK, STATS_COUNTER_OK);
 }
 
 uint32_t mempool_get_free_count(pool_id_t pool_id) {

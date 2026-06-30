@@ -44,6 +44,11 @@ kern_err_t task_start(task_id_t task_id);
  * @param retval 返回值
  */
 void task_exit(void *retval) __attribute__((noreturn));
+kern_err_t task_exit_request(void *retval);
+kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result);
+void task_terminate(tcb_t *tcb);
+kern_err_t task_cancel_blocked_wait(tcb_t *tcb);
+void task_complete_blocked_syscall(tcb_t *tcb, kern_err_t result);
 
 /**
  * @brief 挂起任务
@@ -174,5 +179,33 @@ task_state_t task_get_state(task_id_t task_id);
 tcb_t *task_get_idle(void);
 
 uint32_t task_get_used_bitmap(void);
+
+/**
+ * @brief 回收已过期的终止任务 (由 tick handler 调用)
+ */
+void task_reclaim_expired(void);
+
+/*============================================================================
+ * 用户任务创建 (Phase 1)
+ *============================================================================*/
+
+/**
+ * @brief 创建用户任务 (非特权模式，启用 MPU 时附加内存保护)
+ *
+ * 用户任务运行在非特权模式，通过 svc #1 访问内核服务。
+ * 此函数自动配置 MPU region (代码/数据/栈)。
+ *
+ * @param name        任务名称
+ * @param entry       任务入口函数
+ * @param arg         任务参数
+ * @param priority    优先级
+ * @param stack_size  栈大小 (0 使用默认值)
+ * @return 任务 ID, 失败返回 KERN_INVALID_ID
+ */
+task_id_t task_create_user(const char   *name,
+                            task_func_t  entry,
+                            void        *arg,
+                            uint8_t      priority,
+                            uint32_t     stack_size);
 
 #endif // TASK_H

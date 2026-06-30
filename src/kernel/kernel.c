@@ -14,9 +14,15 @@
 #include "uart.h"
 #include "board_config.h"
 #include "timer.h"
-
-extern uint32_t task_used_bitmap;
-extern tcb_t task_pool[];
+#include "irq.h"
+#include "bh.h"
+#include "stats.h"
+#include "capability.h"
+#include "root_bootstrap.h"
+#include "vfs/vfs.h"
+#if DRIVER_ENABLE
+#include "device.h"
+#endif
 
 void kern_init(void) {
     hal_cpu_init();
@@ -25,7 +31,25 @@ void kern_init(void) {
     task_init();
     sched_init();
     ipc_init();
+    irq_init();
+    bh_init();
     timer_init();
+#if KERN_TASK_STATS
+    stats_init();
+#endif
+#if CAP_ENABLE
+    cap_init();
+    root_bootstrap_init();
+#endif
+#if VFS_ENABLE
+    vfs_init();
+#endif
+#if DRIVER_ENABLE
+    device_init();
+#endif
+#if KERN_WATCHDOG_ENABLE
+    hal_watchdog_init(KERN_WATCHDOG_TIMEOUT);
+#endif
 }
 
 void kern_start(void) {
@@ -42,6 +66,7 @@ void kern_start(void) {
 
     // 启动定时器服务任务
     timer_service_start();
+    bh_service_start();
 
     // 启动调度器
     sched_start();
@@ -89,8 +114,10 @@ void kern_tick_handler(void) {
 
 uint32_t kern_get_task_count(void) {
     uint32_t count = 0;
+    uint32_t bitmap = task_get_used_bitmap();
+
     for (int i = 0; i < KERN_MAX_TASKS; i++) {
-        if (task_used_bitmap & (1U << i)) {
+        if (bitmap & (1U << i)) {
             count++;
         }
     }
@@ -99,9 +126,14 @@ uint32_t kern_get_task_count(void) {
 
 void kern_foreach_task(void (*callback)(tcb_t *tcb, void *arg), void *arg) {
     if (callback == NULL) return;
+    uint32_t bitmap = task_get_used_bitmap();
+
     for (int i = 0; i < KERN_MAX_TASKS; i++) {
-        if (task_used_bitmap & (1U << i)) {
-            callback(&task_pool[i], arg);
+        if (bitmap & (1U << i)) {
+            tcb_t *tcb = task_get_tcb((task_id_t)i);
+            if (tcb) {
+                callback(tcb, arg);
+            }
         }
     }
     callback(task_get_idle(), arg);
@@ -123,7 +155,12 @@ void kern_assert_failed(const char *file, int line, const char *func, const char
 
 #endif
 
-void kern_syscall_handler(uint32_t svc_num, uint32_t *args) {
-    (void)svc_num;
-    (void)args;
+#if !SYSCALL_ENABLE
+kern_err_t kern_syscall_handler(uint32_t svc_num, uint32_t a1, uint32_t a2,
+                                 uint32_t a3, uint32_t a4, uint32_t a5,
+                                 uint32_t a6) {
+    (void)svc_num; (void)a1; (void)a2; (void)a3;
+    (void)a4; (void)a5; (void)a6;
+    return KERN_ERR;
 }
+#endif

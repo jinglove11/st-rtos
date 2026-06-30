@@ -4,9 +4,11 @@
  */
 
 #include "event.h"
+#include "wait_queue.h"
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "syscall.h"
 #include <string.h>
 
 /*============================================================================
@@ -61,46 +63,6 @@ static event_t *get_event(event_id_t id) {
     return &event_pool[id];
 }
 
-// 初始化等待队列
-static void wait_queue_init(wait_queue_t *wq) {
-    wq->head = NULL;
-    wq->tail = NULL;
-    wq->count = 0;
-}
-
-// 添加任务到等待队列尾部
-static void wait_queue_add(wait_queue_t *wq, tcb_t *tcb) {
-    tcb->next = NULL;
-    tcb->prev = wq->tail;
-
-    if (wq->tail) {
-        wq->tail->next = tcb;
-    } else {
-        wq->head = tcb;
-    }
-    wq->tail = tcb;
-    wq->count++;
-}
-
-// 从等待队列移除任务
-static void wait_queue_remove(wait_queue_t *wq, tcb_t *tcb) {
-    if (tcb->prev) {
-        tcb->prev->next = tcb->next;
-    } else {
-        wq->head = tcb->next;
-    }
-
-    if (tcb->next) {
-        tcb->next->prev = tcb->prev;
-    } else {
-        wq->tail = tcb->prev;
-    }
-
-    tcb->next = NULL;
-    tcb->prev = NULL;
-    wq->count--;
-}
-
 // 检查事件是否满足
 static int event_check(uint32_t current, uint32_t wait, uint32_t opt) {
     if (opt & EVENT_OPT_OR) {
@@ -118,6 +80,7 @@ static int event_check(uint32_t current, uint32_t wait, uint32_t opt) {
 
 void event_init(void) {
     memset(event_pool, 0, sizeof(event_pool));
+    memset(event_wait_info, 0, sizeof(event_wait_info));
     event_used_bitmap = 0;
 }
 
@@ -151,7 +114,13 @@ kern_err_t event_delete(event_id_t event_id) {
     // 唤醒所有等待的任务
     tcb_t *tcb = evt->wait_queue.head;
     while (tcb) {
-        tcb_t *next = tcb->next;
+        tcb_t *next = tcb->wait_next;
+        tcb->wait_next = NULL;
+        tcb->wait_prev = NULL;
+        if (tcb->id >= 0 && tcb->id < KERN_MAX_TASKS) {
+            memset(&event_wait_info[tcb->id], 0,
+                   sizeof(event_wait_info[tcb->id]));
+        }
         tcb->block_result = KERN_ERR_NOEXIST;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
@@ -167,11 +136,14 @@ kern_err_t event_delete(event_id_t event_id) {
 
 kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
                       uint32_t timeout, uint32_t *received) {
-    uint32_t crit = hal_irq_save();
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+    uint32_t crit = hal_enter_critical();
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_PARAM;
     }
 
@@ -182,12 +154,12 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
         if (opt & EVENT_OPT_CLEAR) {
             evt->flags &= ~flags;
         }
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_TIMEOUT;
     }
 
@@ -204,37 +176,127 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
 
     wait_queue_add(&evt->wait_queue, current);
 
-    hal_irq_restore(crit);
+    /* 从就绪队列移除 */
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
 
-    kern_err_t result = sched_block(BLOCK_REASON_EVENT, evt, timeout);
+    /* 设置阻塞状态 */
+    current->state = TASK_STATE_BLOCKED;
+    current->block_result = KERN_OK;
+
+    /* 设置超时唤醒时间 */
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+
+    /* 触发上下文切换 */
+    hal_trigger_pendsv();
+
+    /* 等待被唤醒 */
+    while (current->state == TASK_STATE_BLOCKED) {
+        __asm volatile("wfi");
+        __asm volatile("dmb");
+    }
+
+    kern_err_t result = current->block_result;
 
     if (result == KERN_OK) {
-        crit = hal_irq_save();
+        crit = hal_enter_critical();
         if (received) {
             *received = evt->flags;
         }
         if (opt & EVENT_OPT_CLEAR) {
             evt->flags &= ~flags;
         }
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
     } else {
-        crit = hal_irq_save();
+        crit = hal_enter_critical();
         if (current->block_obj == evt) {
             wait_queue_remove(&evt->wait_queue, current);
             current->block_obj = NULL;
         }
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
     }
 
     return result;
 }
 
-kern_err_t event_set(event_id_t event_id, uint32_t flags) {
-    uint32_t crit = hal_irq_save();
+#if SYSCALL_ENABLE
+kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
+                              uint32_t opt, uint32_t timeout) {
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+
+    uint32_t crit = hal_enter_critical();
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (event_check(evt->flags, flags, opt)) {
+        if (opt & EVENT_OPT_CLEAR) {
+            evt->flags &= ~flags;
+        }
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
+    if (timeout == 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERN_MAX_TASKS) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    event_wait_info[current->id].wait_flags = flags;
+    event_wait_info[current->id].wait_opt = opt;
+    event_wait_info[current->id].received = NULL;
+
+    current->syscall_blocked = 1;
+    current->block_reason = BLOCK_REASON_EVENT;
+    current->block_obj = evt;
+    current->block_result = KERN_OK;
+    wait_queue_add(&evt->wait_queue, current);
+
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+
+    current->state = TASK_STATE_BLOCKED;
+    if (timeout > 0) {
+        extern uint32_t sched_get_tick_count(void);
+        current->wake_tick = sched_get_tick_count() + timeout;
+    } else {
+        current->wake_tick = 0;
+    }
+
+    hal_exit_critical(crit);
+    return KERN_SYSCALL_BLOCKED;
+}
+#endif
+
+kern_err_t event_set(event_id_t event_id, uint32_t flags) {
+    uint32_t crit = hal_enter_critical();
+
+    event_t *evt = get_event(event_id);
+    if (evt == NULL) {
+        hal_exit_critical(crit);
         return KERN_ERR_PARAM;
     }
 
@@ -242,18 +304,28 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
 
     tcb_t *tcb = evt->wait_queue.head;
     while (tcb) {
-        tcb_t *next = tcb->next;
+        tcb_t *next = tcb->wait_next;
 
         task_id_t tid = tcb->id;
         uint32_t wait_flags = 0;
         uint32_t wait_opt = 0;
 
-        if (tid >= 0 && tid < KERN_MAX_TASKS) {
-            wait_flags = event_wait_info[tid].wait_flags;
-            wait_opt = event_wait_info[tid].wait_opt;
+        if (tid < 0 || tid >= KERN_MAX_TASKS) {
+            tcb = next;
+            continue;
         }
 
+        wait_flags = event_wait_info[tid].wait_flags;
+        wait_opt = event_wait_info[tid].wait_opt;
+
         if (event_check(evt->flags, wait_flags, wait_opt)) {
+            if (event_wait_info[tid].received != NULL) {
+                *event_wait_info[tid].received = evt->flags;
+            }
+            if (wait_opt & EVENT_OPT_CLEAR) {
+                evt->flags &= ~wait_flags;
+            }
+            memset(&event_wait_info[tid], 0, sizeof(event_wait_info[tid]));
             wait_queue_remove(&evt->wait_queue, tcb);
             tcb->block_result = KERN_OK;
             sched_wakeup(tcb, KERN_OK);
@@ -262,36 +334,36 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
         tcb = next;
     }
 
-    hal_irq_restore(crit);
+    hal_exit_critical(crit);
     return KERN_OK;
 }
 
 kern_err_t event_clear(event_id_t event_id, uint32_t flags) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = hal_enter_critical();
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return KERN_ERR_PARAM;
     }
 
     evt->flags &= ~flags;
 
-    hal_irq_restore(crit);
+    hal_exit_critical(crit);
     return KERN_OK;
 }
 
 uint32_t event_get(event_id_t event_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = hal_enter_critical();
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_irq_restore(crit);
+        hal_exit_critical(crit);
         return 0;
     }
 
     uint32_t flags = evt->flags;
 
-    hal_irq_restore(crit);
+    hal_exit_critical(crit);
     return flags;
 }
