@@ -44,15 +44,14 @@
 /*============================================================================
  * 时钟配置
  *
- * 使用 HSI 16MHz 作为系统时钟 (简单可靠)
- * 实际应用可切换到 HSE + PLL 获得更高性能
+ * HSI 16MHz → PLL (M=16, N=192, P=4) → SYSCLK 48MHz
+ * HCLK=/1, APB1=/1, APB2=/1
  *============================================================================*/
 
-#define HSI_HZ              (16 * 1000 * 1000)      // 16MHz (内部)
-#define SYS_CLK_HZ          HSI_HZ                  // 使用 HSI
-#define HCLK_HZ             SYS_CLK_HZ              // AHB 时钟
-#define PCLK1_HZ            HCLK_HZ                 // APB1 时钟
-#define PCLK2_HZ            HCLK_HZ                 // APB2 时钟
+#define SYS_CLK_HZ          (48 * 1000 * 1000)      // SYSCLK 48MHz (PLL)
+#define HCLK_HZ             SYS_CLK_HZ              // AHB = /1
+#define PCLK1_HZ            HCLK_HZ                 // APB1 = /1
+#define PCLK2_HZ            HCLK_HZ                 // APB2 = /1
 
 /*============================================================================
  * 栈配置
@@ -70,9 +69,9 @@ static inline void delay_cycles(uint32_t cycles) {
     }
 }
 
-// 大约微秒级延时 (假设 16MHz)
+// 大约微秒级延时 (假设 48MHz)
 static inline void delay_us(uint32_t us) {
-    delay_cycles(us * 4);      // 约 16/4 = 4 cycles/us
+    delay_cycles(us * 12);     // 约 48/4 = 12 cycles/us
 }
 
 // 大约毫秒级延时

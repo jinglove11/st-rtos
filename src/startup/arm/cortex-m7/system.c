@@ -105,23 +105,79 @@ void hardfault_print(uint32_t psp, uint32_t msp, uint32_t cfsr, uint32_t hfsr) {
 }
 
 /*============================================================================
- * SystemInit - 系统时钟初始化
- *
- * 使用 HSI 16MHz (内部振荡器) 作为系统时钟
- * 简单可靠，适合调试
+ * System clock frequency (set during SystemInit)
  *============================================================================*/
 
+static uint32_t sysclk_hz = 16000000UL;  /* updated after PLL lock */
+
+uint32_t hal_get_sysclk(void) {
+    return sysclk_hz;
+}
+
+/*============================================================================
+ * SystemInit - 系统时钟初始化
+ *
+ * HSI 16MHz → PLL → SYSCLK 48MHz (conservative, no VOS/OverDrive)
+ *   HCLK  = 48MHz  (AHB prescaler /1)
+ *   APB1  = 48MHz  (APB1 prescaler /1)
+ *   APB2  = 48MHz  (APB2 prescaler /1)
+ *   FLASH = 0 wait states, prefetch + ART enabled
+ *
+ * Does NOT touch PWR registers.  Safe for default VOS Scale 3.
+ *============================================================================*/
+
+#define PLL_M_HSI  16
+#define PLL_N_HSI  192
+#define PLL_P_DIV  4
+
 void SystemInit(void) {
-    // 1. 使能 HSI (默认已使能)
+    uint32_t reg;
+
+    /* 1. Enable HSI (always on at reset, but ensure it's stable) */
     RCC->CR |= RCC_CR_HSION;
     while (!(RCC->CR & RCC_CR_HSIRDY));
 
-    // 2. 选择 HSI 作为系统时钟
-    RCC->CFGR = (RCC->CFGR & ~3) | 0;  // SW = HSI
+    /* 2. FLASH: 1 wait state (STM32F7 needs 1 WS for 30-60 MHz at Scale 1/2/3) */
+    FLASH->ACR = FLASH_ACR_PRFTEN | FLASH_ACR_ARTEN | FLASH_ACR_LATENCY_1;
 
-    // 3. 等待切换完成
-    while ((RCC->CFGR & (3 << 2)) != 0);
+    /* 3. Configure PLL: HSI / 16 * 192 / 4 = 48 MHz (VCO=192MHz, min) */
+    reg  = (PLL_M_HSI << RCC_PLLCFGR_PLLM_SHIFT);
+    reg |= (PLL_N_HSI << RCC_PLLCFGR_PLLN_SHIFT);
+    reg |= (1U << RCC_PLLCFGR_PLLP_SHIFT);   /* PLLP = 4 */
+    /* PLLSRC = 0 (HSI) */
+    RCC->PLLCFGR = reg;
 
-    // 4. 设置向量表位置
-    SCB->VTOR = 0x08000000UL;
+    /* 4. Configure bus prescalers: AHB=/1, APB1=/1, APB2=/1 */
+    reg = RCC->CFGR;
+    reg &= ~((0xFU << RCC_CFGR_HPRE_SHIFT) |
+             (0x7U << RCC_CFGR_PPRE1_SHIFT) |
+             (0x7U << RCC_CFGR_PPRE2_SHIFT));
+    RCC->CFGR = reg;
+
+    /* 5. Enable PLL, wait for lock */
+    RCC->CR |= RCC_CR_PLLON;
+    while (!(RCC->CR & RCC_CR_PLLRDY));
+
+    /* 6. Switch system clock to PLL */
+    reg  = RCC->CFGR;
+    reg &= ~0x3U;
+    reg |= RCC_CFGR_SW_PLL;
+    RCC->CFGR = reg;
+    DSB();
+    while ((RCC->CFGR & (0x3U << RCC_CFGR_SWS_SHIFT))
+           != (RCC_CFGR_SW_PLL << RCC_CFGR_SWS_SHIFT));
+
+    sysclk_hz = 48000000UL;
+
+    /* 7. Copy vector table to RAM and remap VTOR */
+    extern uint32_t _vectors;
+    extern uint32_t __ram_vector_start;
+    uint32_t *src = &_vectors;
+    uint32_t *dst = &__ram_vector_start;
+    for (int i = 0; i < 128; i++) {
+        dst[i] = src[i];
+    }
+    SCB->VTOR = (uint32_t)&__ram_vector_start;
+    DSB();
+    ISB();
 }

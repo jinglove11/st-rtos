@@ -8,6 +8,16 @@
 
 #include "board_config.h"
 
+#define gpio_init(...)       rtos_gpio_init(__VA_ARGS__)
+#define gpio_set(...)        rtos_gpio_set(__VA_ARGS__)
+#define gpio_clr(...)        rtos_gpio_clr(__VA_ARGS__)
+#define gpio_toggle(...)     rtos_gpio_toggle(__VA_ARGS__)
+#define gpio_get(...)        rtos_gpio_get(__VA_ARGS__)
+#define gpio_set_func(...)   rtos_gpio_set_func(__VA_ARGS__)
+#define gpio_pull_up(...)    rtos_gpio_pull_up(__VA_ARGS__)
+#define gpio_pull_down(...)  rtos_gpio_pull_down(__VA_ARGS__)
+#define gpio_set_af(...)     rtos_gpio_set_af(__VA_ARGS__)
+
 /*============================================================================
  * 平台相关类型定义
  *============================================================================*/

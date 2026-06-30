@@ -38,15 +38,27 @@
 
 #if (TARGET_BOARD == BOARD_RP2350_PICO2)
     #include "pico2.h"
-    #define BOARD_NAME      "RP2350 (Pico 2)"
-    #define MCU_NAME        "RP2350"
-    #define CPU_CORE        "Cortex-M33"
+    #ifndef BOARD_DISPLAY_NAME
+    #define BOARD_DISPLAY_NAME   "RP2350 (Pico 2)"
+    #endif
+    #define MCU_NAME             "RP2350"
+    #define CPU_CORE             "Cortex-M33"
 
 #elif (TARGET_BOARD == BOARD_STM32F767_NUCLEO)
     #include "nucleo_f767.h"
-    #define BOARD_NAME      "Nucleo-F767ZI"
-    #define MCU_NAME        "STM32F767ZIT6"
-    #define CPU_CORE        "Cortex-M7"
+    #ifndef BOARD_DISPLAY_NAME
+    #define BOARD_DISPLAY_NAME   "Nucleo-F767ZI"
+    #endif
+    #define MCU_NAME             "STM32F767ZIT6"
+    #define CPU_CORE             "Cortex-M7"
+    #define BOARD_DEFAULT_UART   NUCLEO_DEFAULT_UART
+    #define BOARD_UART_BAUDRATE  NUCLEO_UART_BAUDRATE
+    #define BOARD_SRAM_BASE      SRAM_BASE
+    #define BOARD_SRAM_SIZE      SRAM_SIZE
+    #define BOARD_FLASH_BASE     FLASH_BASE
+    #define BOARD_FLASH_SIZE     FLASH_SIZE
+    #define BOARD_IRQ_COUNT      98U
+    #define BOARD_MPU_ARMV8      0
 
 #else
     #error "Unknown target board!"

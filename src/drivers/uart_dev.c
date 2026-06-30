@@ -1,0 +1,103 @@
+/**
+ * @file uart_dev.c
+ * @brief UART 设备驱动 — 将 uart_stm32.c 封装为 device_t
+ */
+
+#include "device.h"
+#include "uart.h"
+#include "board_config.h"
+#include "kernel_config.h"
+
+#if DRIVER_ENABLE
+
+static device_t *uart0_dev;
+
+/*============================================================================
+ * UART dev_ops 实现
+ *============================================================================*/
+
+static kern_err_t uart_dev_open(void *priv, uint32_t flags) {
+    (void)priv; (void)flags;
+    if (uart0_dev && uart_writable(BOARD_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+    }
+    return KERN_OK;
+}
+
+static kern_err_t uart_dev_close(void *priv) {
+    (void)priv;
+    return KERN_OK;
+}
+
+static int32_t uart_dev_read(void *priv, void *buf, uint32_t offset, uint32_t size) {
+    (void)priv; (void)offset;
+    if (!buf || size == 0) return 0;
+
+    char *p = (char *)buf;
+    uint32_t count = 0;
+
+    while (count < size) {
+        if (!uart_readable(BOARD_DEFAULT_UART)) break;
+        p[count++] = uart_getc(BOARD_DEFAULT_UART);
+    }
+
+    if (uart0_dev) {
+        if (uart_readable(BOARD_DEFAULT_UART)) {
+            (void)device_notify_events(uart0_dev, DEVICE_EVENT_READABLE);
+        } else {
+            (void)device_clear_events(uart0_dev, DEVICE_EVENT_READABLE);
+        }
+        if (uart_writable(BOARD_DEFAULT_UART)) {
+            (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+        }
+    }
+
+    return (int32_t)count;
+}
+
+static int32_t uart_dev_write(void *priv, const void *buf, uint32_t offset, uint32_t size) {
+    (void)priv; (void)offset;
+    if (!buf || size == 0) return 0;
+
+    const char *p = (const char *)buf;
+    for (uint32_t i = 0; i < size; i++) {
+        uart_putc(BOARD_DEFAULT_UART, p[i]);
+    }
+
+    if (uart0_dev && uart_writable(BOARD_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+    }
+
+    return (int32_t)size;
+}
+
+static dev_ops_t uart_dev_ops = {
+    .open  = uart_dev_open,
+    .close = uart_dev_close,
+    .read  = uart_dev_read,
+    .write = uart_dev_write,
+    .ioctl = NULL,
+};
+
+/*============================================================================
+ * UART 设备注册
+ *============================================================================*/
+
+device_t *uart_dev_register(void) {
+    uart0_dev = device_alloc("uart0", DEVICE_TYPE_CHAR);
+    if (!uart0_dev) return NULL;
+
+    uart0_dev->ops    = &uart_dev_ops;
+    uart0_dev->priv   = (void *)BOARD_DEFAULT_UART;
+    uart0_dev->irq_num = 0;
+    if (uart_writable(BOARD_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_WRITABLE);
+    }
+    if (uart_readable(BOARD_DEFAULT_UART)) {
+        (void)device_notify_events(uart0_dev, DEVICE_EVENT_READABLE);
+    }
+
+    return uart0_dev;
+}
+
+#endif /* DRIVER_ENABLE */

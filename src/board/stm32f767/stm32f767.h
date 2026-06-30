@@ -148,6 +148,32 @@ typedef struct {
 #define USART_ISR_TXE       (1U << 7)       // 发送数据寄存器空
 
 /*============================================================================
+ * FLASH 寄存器结构 (AXI interface)
+ *============================================================================*/
+
+#define FLASH_REG_BASE      (AHB1PERIPH_BASE + 0x3C00UL)
+
+typedef struct {
+    volatile uint32_t ACR;          // 访问控制寄存器
+    volatile uint32_t KEYR;         // 密钥寄存器
+    volatile uint32_t OPTKEYR;      // 选项密钥寄存器
+    volatile uint32_t SR;           // 状态寄存器
+    volatile uint32_t CR;           // 控制寄存器
+    volatile uint32_t OPTCR;        // 选项控制寄存器
+    volatile uint32_t OPTCR1;       // 选项控制寄存器1
+} flash_t;
+
+#define FLASH               ((flash_t *)FLASH_REG_BASE)
+
+// FLASH ACR 位定义
+#define FLASH_ACR_LATENCY_0 (0U << 0)
+#define FLASH_ACR_LATENCY_1 (1U << 0)   /* 1 WS: 30-60 MHz */
+#define FLASH_ACR_LATENCY_2 (2U << 0)
+#define FLASH_ACR_LATENCY_7 (7U << 0)
+#define FLASH_ACR_PRFTEN    (1U << 8)
+#define FLASH_ACR_ARTEN     (1U << 9)
+
+/*============================================================================
  * RCC 寄存器结构
  *============================================================================*/
 
@@ -202,6 +228,23 @@ typedef struct {
 #define RCC_CFGR_SW_HSE     1
 #define RCC_CFGR_SW_PLL     2
 #define RCC_CFGR_SWS_SHIFT  2
+#define RCC_CFGR_HPRE_SHIFT 4
+#define RCC_CFGR_HPRE_DIV1  (0U << RCC_CFGR_HPRE_SHIFT)
+#define RCC_CFGR_PPRE1_SHIFT 10
+#define RCC_CFGR_PPRE1_DIV4 (0b101U << RCC_CFGR_PPRE1_SHIFT)
+#define RCC_CFGR_PPRE2_SHIFT 13
+#define RCC_CFGR_PPRE2_DIV2 (0b100U << RCC_CFGR_PPRE2_SHIFT)
+
+// RCC PLLCFGR 位定义
+#define RCC_PLLCFGR_PLLM_SHIFT  0
+#define RCC_PLLCFGR_PLLN_SHIFT  6
+#define RCC_PLLCFGR_PLLP_SHIFT  16
+#define RCC_PLLCFGR_PLLP_DIV2   (0U << RCC_PLLCFGR_PLLP_SHIFT)
+#define RCC_PLLCFGR_PLLSRC_HSE  (1U << 22)
+#define RCC_PLLCFGR_PLLQ_SHIFT  24
+#define RCC_PLLCFGR_PLLQ_9      (9U << RCC_PLLCFGR_PLLQ_SHIFT)
+#define RCC_PLLCFGR_PLLR_SHIFT  28
+#define RCC_PLLCFGR_PLLR_DIV2   (0U << RCC_PLLCFGR_PLLR_SHIFT)
 
 // RCC AHB1ENR 位定义
 #define RCC_AHB1ENR_GPIOAEN (1U << 0)
@@ -219,6 +262,10 @@ typedef struct {
 #define RCC_APB1ENR_USART3EN    (1U << 18)
 #define RCC_APB1ENR_UART4EN     (1U << 19)
 #define RCC_APB1ENR_UART5EN     (1U << 20)
+
+// RCC CSR 位定义
+#define RCC_CSR_LSION          (1U << 0)
+#define RCC_CSR_LSIRDY         (1U << 1)
 
 // RCC APB2ENR 位定义
 #define RCC_APB2ENR_USART1EN    (1U << 4)
@@ -239,7 +286,19 @@ typedef struct {
 #define PWR                 ((pwr_t *)PWR_BASE)
 
 // PWR CR1 位定义
-#define PWR_CR1_VOS         (3U << 14)      // 电压缩放选择
+#define PWR_CR1_VOS_SHIFT   14
+#define PWR_CR1_VOS_SCALE1  (3U << PWR_CR1_VOS_SHIFT)
+#define PWR_CR1_VOS_SCALE2  (2U << PWR_CR1_VOS_SHIFT)
+#define PWR_CR1_VOS_SCALE3  (1U << PWR_CR1_VOS_SHIFT)
+#define PWR_CR1_ODEN        (1U << 16)
+#define PWR_CR1_ODSWEN      (1U << 17)
+#define PWR_CR1_UDEN        (1U << 18)
+
+// PWR CSR1 位定义
+#define PWR_CSR1_ODRDY      (1U << 16)
+#define PWR_CSR1_ODSWRDY    (1U << 17)
+#define PWR_CSR1_UDRDY      (1U << 18)
+#define PWR_CSR1_VOSRDY     (1U << 14)
 
 /*============================================================================
  * SCB (System Control Block) - Cortex-M7

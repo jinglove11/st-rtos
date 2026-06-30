@@ -1,24 +1,27 @@
 /**
- * @file startup_stm32f767.S
- * @brief STM32F767 启动代码
+ * @file vectors.S
+ * @brief STM32F767 中断向量表
+ *
+ * Cortex-M7 向量表布局：
+ *   [0]  初始 MSP
+ *   [1]  Reset_Handler
+ *   [2-15] 系统异常
+ *   [16+]  外部中断 (IRQ)
  */
 
     .syntax unified
     .cpu cortex-m7
     .thumb
 
-/*============================================================================
- * 外部声明
- *============================================================================*/
-
-    .extern hardfault_print
-
-    .global _reset_handler
-    .global _default_handler
-
-/*============================================================================
- * 向量表
- *============================================================================*/
+    .extern _default_handler
+    .extern _reset_handler
+    .extern HardFault_Handler
+    .extern MemManage_Handler
+    .extern BusFault_Handler
+    .extern UsageFault_Handler
+    .extern SVC_Handler
+    .extern PendSV_Handler
+    .extern SysTick_Handler
 
     .section .isr_vector, "a"
     .align 2
@@ -29,9 +32,9 @@ _vectors:
     .word   _reset_handler              // 1: Reset
     .word   _default_handler            // 2: NMI
     .word   HardFault_Handler           // 3: HardFault
-    .word   _default_handler            // 4: MemManage
-    .word   _default_handler            // 5: BusFault
-    .word   _default_handler            // 6: UsageFault
+    .word   MemManage_Handler           // 4: MemManage
+    .word   BusFault_Handler            // 5: BusFault
+    .word   UsageFault_Handler          // 6: UsageFault
     .word   0                           // 7: Reserved
     .word   0                           // 8: Reserved
     .word   0                           // 9: Reserved
@@ -42,7 +45,7 @@ _vectors:
     .word   PendSV_Handler              // 14: PendSV
     .word   SysTick_Handler             // 15: SysTick
 
-    // 外部中断 (STM32F767)
+    // 外部中断 (STM32F767, 16-113)
     .word   _default_handler            // 16: WWDG
     .word   _default_handler            // 17: PVD
     .word   _default_handler            // 18: TAMP_STAMP
@@ -141,105 +144,5 @@ _vectors:
     .word   _default_handler            // 111: I2C4_EV
     .word   _default_handler            // 112: I2C4_ER
     .word   _default_handler            // 113: SPDIF_RX
-
-/*============================================================================
- * 默认中断处理函数
- *============================================================================*/
-
-    .section .text
-    .type _default_handler, %function
-    .align 2
-
-_default_handler:
-    // 保存 LR 以便调试
-    // LR 包含返回地址，可以帮助定位异常来源
-    b   _default_handler
-
-    .size _default_handler, . - _default_handler
-
-/*============================================================================
- * HardFault 处理函数 - 打印异常信息
- *============================================================================*/
-
-    .section .text
-    .type HardFault_Handler, %function
-    .align 2
-
-HardFault_Handler:
-    // 保存寄存器
-    push    {r4-r7}
-
-    // 获取 PSP 和 MSP
-    mrs     r4, psp
-    mrs     r5, msp
-
-    // 读取故障寄存器
-    ldr     r6, =0xE000ED28     // CFSR
-    ldr     r6, [r6]
-    ldr     r7, =0xE000ED2C     // HFSR
-    ldr     r7, [r7]
-
-    // 调用 C 函数打印信息
-    // 参数: r0=PSP, r1=MSP, r2=CFSR, r3=HFSR
-    mov     r0, r4              // PSP
-    mov     r1, r5              // MSP
-    mov     r2, r6              // CFSR
-    mov     r3, r7              // HFSR
-    bl      hardfault_print
-
-    // 死循环
-    b       .
-
-    .size HardFault_Handler, . - HardFault_Handler
-
-/*============================================================================
- * Reset Handler
- *============================================================================*/
-
-    .section .text
-    .type _reset_handler, %function
-    .align 2
-
-_reset_handler:
-    // 设置栈指针
-    ldr r0, =_estack
-    mov sp, r0
-
-    // 复制数据段
-    ldr r0, =_sdata
-    ldr r1, =_edata
-    ldr r2, =_sidata
-
-copy_data:
-    cmp r0, r1
-    bge zero_bss
-    ldr r3, [r2], #4
-    str r3, [r0], #4
-    b copy_data
-
-zero_bss:
-    // 清零 BSS 段
-    ldr r0, =_sbss
-    ldr r1, =_ebss
-    mov r2, #0
-
-zero_loop:
-    cmp r0, r1
-    bge call_main
-    str r2, [r0], #4
-    b zero_loop
-
-call_main:
-    // 调用 SystemInit
-    bl SystemInit
-
-    // 调用 main
-    bl main
-
-    // main 返回后死循环
-infinite_loop:
-    b infinite_loop
-
-    .size _reset_handler, . - _reset_handler
 
     .end
