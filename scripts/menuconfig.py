@@ -76,9 +76,15 @@ class KconfigParser:
             # 解析配置项
             elif line.startswith('config '):
                 name = line[7:].strip()
-                option, i = self._parse_option(name, lines, i)
+                # _parse_option returns i pointing AT the next keyword line
+                # (next config/menu/endmenu/choice/endchoice). Decrement by 1
+                # so the trailing `i += 1` lands on that keyword — otherwise
+                # we'd silently skip the next config after a multi-line help
+                # block.
+                option, next_i = self._parse_option(name, lines, i)
                 self.options[name] = option
                 self.current_menu.items.append(('option', option))
+                i = next_i - 1
 
             # 解析 choice
             elif line.startswith('choice'):
@@ -131,17 +137,21 @@ class KconfigParser:
                 depends.append(line[10:].strip())
             elif line.startswith('help'):
                 # 收集帮助文本
+                # Consume indented lines until we hit a non-indented non-empty
+                # line (the next keyword). Leave i pointing AT that line so the
+                # outer loop recognizes it; we `continue` to skip the trailing
+                # `i += 1` which would otherwise skip the next config keyword.
                 i += 1
                 help_lines = []
                 while i < len(lines):
                     hline = lines[i].rstrip()
                     if hline and not hline[0].isspace() and hline.strip():
-                        i -= 1
                         break
                     if hline.strip():
                         help_lines.append(hline.strip())
                     i += 1
                 help_text = '\n'.join(help_lines)
+                continue
 
             i += 1
 
@@ -166,10 +176,14 @@ class KconfigParser:
                 choice_default = line[7:].strip()
             elif line.startswith('config '):
                 name = line[7:].strip()
-                option, i = self._parse_option(name, lines, i)
+                # Same off-by-one fix as in parse(): _parse_option returns i
+                # pointing at the terminating keyword; subtract 1 so the
+                # outer `i += 1` lands on it.
+                option, next_i = self._parse_option(name, lines, i)
                 self.options[name] = option
                 choice_options.append(option)
                 self.current_menu.items.append(('option', option))
+                i = next_i - 1
 
             i += 1
 

@@ -776,3 +776,285 @@ config DRIVER_MAX_DEVICES
       设备注册表最大设备数。
 
 endmenu
+
+#=============================================================================
+# Phase 2-9 Roadmap Subsystems
+#
+# 这些子系统代码尚未实现,CONFIG_* 在此作为 placeholder,默认全部关闭。
+# 代码落地后,对应 CONFIG_* 的 default 改为 y(default/full defconfig 启用)。
+# 详见 MICROKERNEL_OS_ROADMAP.md。
+#=============================================================================
+
+menu "Phase 2 — Fault-Tolerant Infrastructure"
+
+config FAULT_ENDPOINT
+    bool "Fault reporting endpoint"
+    default n
+    depends on FAULT_ENABLE && IPC_ENDPOINT
+    help
+      内核保留 endpoint,用户任务 crash 时把 fault_info 打包发送。
+      Supervisor 通过 sys_fault_subscribe() 订阅。
+      实现:Phase 2.1。
+
+config SUPERVISOR
+    bool "User-mode supervisor task"
+    default n
+    depends on FAULT_ENDPOINT
+    help
+      监控任务,接收 fault_info,按策略重启或 kill 故障任务。
+      Rate limit: 每服务每 5s 最多 1 次重启,3 次后永久 kill。
+      实现:Phase 2.2。
+
+config INIT_PROCESS
+    bool "User-mode init task"
+    default n
+    depends on SUPERVISOR
+    help
+      bootstrap 后第一个用户任务,负责启动 supervisor/driver servers/shell。
+      实现:Phase 2.3。
+
+config CAP_RESTART_SUBSET
+    bool "Capability subset on restart (drop CAP_GRANT)"
+    default n
+    depends on SUPERVISOR && CAP_ENABLE
+    help
+      重启的任务不再继承 CAP_GRANT,防止失控子任务派生 cap。
+      实现:Phase 2.4。
+
+endmenu
+
+menu "Phase 3 — Driver Servers"
+
+config DRIVER_GPIO_SERVER
+    bool "GPIO server (user-mode)"
+    default n
+    depends on DRIVER_ENABLE
+    help
+      GPIO pin 操作经 cap + endpoint 暴露给用户任务。
+      实现:Phase 3.1。
+
+config DRIVER_I2C_SERVER
+    bool "I2C server (user-mode)"
+    default n
+    depends on DRIVER_ENABLE
+    help
+      I2C bus 操作经 cap + endpoint 暴露。
+      实现:Phase 3.2。
+
+config DRIVER_SPI
+    bool "SPI bus driver"
+    default n
+    depends on DRIVER_ENABLE
+    help
+      SPI 控制器驱动 (RP2350 PIO / hardware SPI)。
+      实现:Phase 3.3。
+
+config BLOCK_DEVICE
+    bool "Block device abstraction"
+    default n
+    depends on DRIVER_SPI
+    help
+      块设备 API (read/write/erase sector)。前置:CONFIG_DRIVER_SPI。
+      实现:Phase 3.3。
+
+config DRIVER_RTC
+    bool "RTC + wall clock driver"
+    default n
+    depends on DRIVER_ENABLE
+    help
+      RP2350 RTC 驱动 + 用户态 timer server 代理。
+      实现:Phase 3.4。
+
+endmenu
+
+menu "Phase 4 — Persistent Filesystem"
+
+config FS_PERSISTENT
+    bool "Persistent filesystem (littlefs)"
+    default n
+    depends on VFS_ENABLE && BLOCK_DEVICE
+    help
+      引入 littlefs (Apache 2.0),挂载到 /flash。
+      Power-cut safe + wear-leveling 内建。
+      实现:Phase 4.2。
+
+config FS_LITTLEFS
+    bool "Build littlefs third-party library"
+    default n
+    depends on FS_PERSISTENT
+    help
+      把 third_party/littlefs/ 编为 static library。
+      关闭则 FS_PERSISTENT 无效。
+
+endmenu
+
+menu "Phase 5 — Application Runtime"
+
+config USER_LIBC
+    bool "User-mode libc (printf/malloc/string)"
+    default n
+    help
+      port mini-libc (Public Domain) 为 userlibc.a。
+      用户应用 -luserlc 链接。
+      实现:Phase 5.1。
+
+config ELF_LOADER
+    bool "ELF loader (sys_proc_exec)"
+    default n
+    depends on USER_LIBC && FS_PERSISTENT
+    help
+      从 /flash/apps/<name>.elf 加载 ELF,解析 PT_LOAD + relocations。
+      RP2350 NS 约束:同物理地址空间,MPU 隔代码/数据区。
+      不支持 fork、ASLR、动态链接(动态链接留 CONFIG_DYNAMIC_LINKING)。
+      实现:Phase 5.2。
+
+endmenu
+
+menu "Phase 6 — SMP (Cortex-M33 Core 1)"
+
+config SMP
+    bool "Symmetric multiprocessing (Core 0 + Core 1)"
+    default n
+    help
+      启用 RP2350 第二个 Cortex-M33 核。触发 scheduler / IPC / cap / mpu
+      彻底重写为 per-CPU 架构。详见 MICROKERNEL_OS_ROADMAP.md §6。
+      实现:Phase 6 (4 周,5 个子切片)。
+
+config SMP_MAX_CPUS
+    int "Maximum CPU count"
+    default 2
+    depends on SMP
+    range 2 2
+    help
+      RP2350 只有 2 个 Cortex-M33,固定为 2。
+
+config SMP_WORK_STEALING
+    bool "Idle CPU steals work from busy CPU"
+    default y
+    depends on SMP
+    help
+      idle CPU 从其他 CPU 的 run queue 末尾偷任务。
+      关闭则任务严格按 affinity 跑。
+
+config CAP_RCU
+    bool "Capability table RCU reader"
+    default n
+    depends on SMP && CAP_ENABLE
+    help
+      跨核 cap 访问的 read-copy-update 同步。
+      关闭则退化为全局 spinlock (性能差但简单)。
+
+endmenu
+
+menu "Phase 7 — Networking"
+
+config DRIVER_CYW43
+    bool "CYW43 WiFi bus driver"
+    default n
+    depends on DRIVER_ENABLE
+    help
+      RP2350 onboard CYW43 WiFi。Firmware 从 /flash/cyw43_fw.bin 加载。
+      实现:Phase 7.1。
+
+config NET
+    bool "Network stack (lwIP + socket syscalls)"
+    default n
+    depends on DRIVER_CYW43
+    help
+      port lwIP (BSD),syscall-based socket API。
+      实现:Phase 7.2。
+
+config NET_DHCP
+    bool "DHCP client"
+    default y
+    depends on NET
+
+config NET_DNS
+    bool "DNS resolver"
+    default y
+    depends on NET
+
+config MBEDTLS
+    bool "mbedTLS for HTTPS"
+    default n
+    depends on NET
+    help
+      TLS 支持。默认关,资源占用大。
+
+endmenu
+
+menu "Phase 8 — Security & Reliability"
+
+config SECURE_BOOT
+    bool "Signed boot image (Ed25519)"
+    default n
+    help
+      签名 boot2 + 应用镜像,启动时验签。
+      实现:Phase 8.1。
+
+config PANIC_LOG
+    bool "Panic dump to /flash/panic.log"
+    default n
+    depends on FS_PERSISTENT
+    help
+      panic 时把 backtrace 写到 flash 最后一个 sector。
+      上电时 supervisor 检查并上报。实现:Phase 8.2。
+
+config PROFILER
+    bool "PC sampler + flamegraph export"
+    default n
+    depends on KERN_TASK_STATS
+    help
+      SysTick hook 采样 PC,导出 flamegraph 兼容格式。
+      实现:Phase 8.3。
+
+config OTA
+    bool "Over-the-air update (A/B partition)"
+    default n
+    depends on FS_PERSISTENT && SECURE_BOOT
+    help
+      双 bank 镜像切换 + 签名校验 + 回滚。
+      实现:Phase 8.4。
+
+endmenu
+
+menu "Phase 9 — Comprehensiveness"
+
+config PM
+    bool "Power management (sleep/deep-sleep/wakeup)"
+    default n
+    help
+      WFI / SLEEP / DEEP-SLEEP 状态机 + wakeup source + 驱动 suspend/resume hook。
+      实现:Phase 9.1。
+
+config RT_SCHED
+    bool "Real-time scheduling classes (FIFO/RR)"
+    default n
+    help
+      SCHED_NORMAL / SCHED_FIFO / SCHED_RR。
+      RT 任务优先级永远高于 normal。实现:Phase 9.2。
+
+config DYNAMIC_LINKING
+    bool "Dynamic linking (.so + dlopen)"
+    default n
+    depends on ELF_LOADER
+    help
+      PLT/GOT + sys_dlopen/sys_dlsym。资源占用大,默认关。
+      实现:Phase 9.3。
+
+config FV
+    bool "Formal verification runtime hooks"
+    default n
+    help
+      运行时不变量检查 (~5% 性能损失)。非真形式化验证。
+      实现:Phase 9.4。
+
+config FB
+    bool "Framebuffer / GUI subsystem"
+    default n
+    depends on DRIVER_SPI || DRIVER_I2C_SERVER
+    help
+      仅当接 display 硬件 (SSD1306 / ILI9341) 时启用。
+      实现:Phase 9.5。
+
+endmenu
