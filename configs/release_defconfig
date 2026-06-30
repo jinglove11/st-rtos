@@ -1,0 +1,134 @@
+#
+# My-RTOS Configuration — RELEASE preset
+#
+# Goal: production firmware. Strip diagnostics/tests, keep fault tolerance +
+# essential driver surface. Size-optimized (gcc -Os or -Oz) but still safe.
+#
+# Use cases:
+#   - Shipped firmware
+#   - Battery-powered / constrained deployments
+#   - CI smoke build that mimics prod (catches release-only build breakage)
+#
+# Apply with:
+#   cp configs/release_defconfig .config
+#   python3 scripts/menuconfig.py genconfig
+#   cmake --build build/rp2350-pico-sdk --config Release
+#   # (or set CMAKE_BUILD_TYPE=Release at configure time)
+#
+# Expected footprint: ~60-90KB flash, ~16-24KB RAM
+# Kept: MPU, syscall, capability, IPC (full), fault (no crash dump UART spam),
+#       timer, basic driver
+# Stripped: test framework, shell, trace, debug symbols, deadlock detect
+# ============================================================================
+
+PROJECT_NAME="my-rtos"
+PROJECT_VERSION="1.0.0"
+
+# ---- Board ----
+CONFIG_BOARD_RP2350=y
+BOARD_NAME="rp2350"
+BOARD_DISPLAY_NAME="Raspberry Pi Pico 2 W (release)"
+
+# ---- Kernel (production) ----
+KERNEL_TICK_RATE=1000
+KERN_NAME="My-RTOS"
+KERN_VERSION_MAJOR=1
+KERN_VERSION_MINOR=0
+KERN_VERSION_PATCH=0
+KERN_TASK_NAME_LEN=12
+KERNEL_MAX_TASKS=16
+KERNEL_MAX_PRIORITIES=16
+KERNEL_TASK_STACK_SIZE=768
+KERNEL_IDLE_STACK_SIZE=192
+KERNEL_IDLE_PRIORITY=15
+KERN_DEFAULT_TIME_SLICE=5
+KERN_TASK_STATS=y       # keep stats — cheap and useful for runtime telemetry
+# TRACE_ENABLE is not set  # release: no trace buffer (RAM cost)
+# KERNEL_WATCHDOG is not set  # TODO Phase: enable hardware watchdog in release
+KERNEL_IDLE_SLEEP=y     # release: critical for power
+
+# ---- Memory (heap on — app likely needs malloc) ----
+MEM_DYNAMIC=y
+MEM_HEAP_SIZE=2048
+MEM_POOL_COUNT=3
+
+# ---- IPC (full — microkernel needs it) ----
+IPC_SEMAPHORE=y
+IPC_SEMAPHORE_MAX=6
+IPC_MUTEX=y
+IPC_MUTEX_MAX=6
+# MUTEX_DEADLOCK_DETECT is not set  # release: skip extra runtime check
+IPC_MQUEUE=y
+IPC_MQUEUE_MAX=2
+IPC_EVENT=y
+IPC_EVENT_MAX=4
+IPC_ENDPOINT=y
+IPC_ENDPOINT_MAX=8
+IPC_EP_MSG_SIZE=64
+IPC_EP_MAX_PENDING=4
+IPC_CHANNEL=y
+IPC_CHANNEL_MAX=2
+IPC_CH_MSG_SIZE=64
+
+# ---- Timer ----
+TIMER_ENABLE=y
+TIMER_MAX=12
+TIMER_CMD_QUEUE_SIZE=4
+TIMER_TASK_PRIORITY=1
+TIMER_TASK_STACK_SIZE=384
+TIMER_NAME_LEN=12
+
+# ---- VFS (on — most apps need it; can disable per-product) ----
+VFS_ENABLE=y
+VFS_MAX_INODES=16
+VFS_MAX_FDS=4
+
+# ---- Microkernel ----
+MPU_ENABLE=y
+SYSCALL_ENABLE=y
+SYSCALL_TABLE_SIZE=48
+MPU_REGION_COUNT=8
+
+# ---- Interrupt (full) ----
+IRQ_ENABLE=y
+IRQ_MAX_USER=12
+IRQ_DEFAULT_PRIORITY=8
+IRQ_BH_ENABLE=y
+IRQ_BH_MAX=4
+IRQ_THREADED_ENABLE=y
+IRQ_THREADED_MAX=2
+IRQ_THREADED_STACK_SIZE=384
+
+# ---- Capability ----
+CAP_ENABLE=y
+CAP_MAX_COUNT=64
+KERN_TASK_CAP_SLOTS=16
+
+# ---- Fault (catch but don't dump to UART in release) ----
+FAULT_ENABLE=y
+# FAULT_CRASH_DUMP is not set
+
+# ---- Shell (off — no interactive console in release) ----
+# SHELL_ENABLE is not set
+
+# ---- Driver ----
+DRIVER_ENABLE=y
+DRIVER_MAX_DEVICES=4
+
+# ---- Debug (off — release) ----
+# DEBUG_ENABLE is not set
+# DEBUG_STACK_CHECK is not set
+ASSERT_ENABLE=y      # keep asserts — cheap and catches real bugs
+
+# ---- Test (off — release) ----
+# TEST_ENABLE is not set
+
+# ---- Phase 2-9 subsystems (off — opt-in when stable) ----
+# FAULT_ENDPOINT is not set
+# SUPERVISOR is not set
+# DRIVER_GPIO_SERVER is not set
+# FS_PERSISTENT is not set
+# ELF_LOADER is not set
+# SMP is not set
+# NET is not set
+# SECURE_BOOT is not set
