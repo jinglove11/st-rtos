@@ -27,6 +27,11 @@ typedef enum {
     KERN_ERR_BUSY       = -8,    // 忙
     KERN_ERR_NOEXIST    = -9,    // 对象不存在
     KERN_ERR_OVERFLOW   = -10,   // 溢出
+    KERN_ERR_DEADLOCK   = -11,   // 死锁
+    KERN_ERR_PERM       = -12,   // 权限不足
+    KERN_ERR_NOTDIR     = -13,   // 不是目录
+    KERN_ERR_ISDIR      = -14,   // 是目录 (不可作为文件操作)
+    KERN_ERR_FAULT      = -15,   // 任务因 fault 终止
 } kern_err_t;
 
 /*============================================================================
@@ -40,6 +45,8 @@ typedef int16_t queue_id_t;      // 消息队列 ID
 typedef int16_t event_id_t;      // 事件标志组 ID
 typedef int16_t timer_id_t;      // 定时器 ID
 typedef int16_t cap_id_t;        // 能力 ID
+typedef int16_t ep_id_t;         // Endpoint ID
+typedef int16_t ch_id_t;         // Channel ID
 
 #define KERN_INVALID_ID      (-1)
 
@@ -56,6 +63,10 @@ typedef enum {
     TASK_STATE_TERMINATED  = 5,  // 已终止
 } task_state_t;
 
+/* 任务属性 */
+#define TASK_ATTR_PRIVILEGED   0x00   // 内核任务 (特权模式)
+#define TASK_ATTR_USER         0x01   // 用户任务 (非特权模式)
+
 /*============================================================================
  * 任务阻塞原因
  *============================================================================*/
@@ -69,11 +80,48 @@ typedef enum {
     BLOCK_REASON_TIMER     = 5,  // 等待定时器
     BLOCK_REASON_SLEEP     = 6,  // 延时
     BLOCK_REASON_JOIN      = 7,  // 等待任务结束
+    BLOCK_REASON_IRQ       = 8,  // 等待线程化 IRQ 信号
+    BLOCK_REASON_EP_SEND   = 9,  // 等待 endpoint 回复
+    BLOCK_REASON_EP_RECV   = 10, // 等待 endpoint 请求
+    BLOCK_REASON_CH_SEND   = 11, // 等待 channel 对端接收
+    BLOCK_REASON_CH_RECV   = 12, // 等待 channel 对端发送
 } block_reason_t;
+
+/*============================================================================
+ * VFS 类型 (前置声明)
+ *============================================================================*/
+
+#if VFS_ENABLE
+
+/* 前向声明 */
+struct inode;
+
+/** 文件描述符条目 — 嵌入 TCB */
+typedef struct {
+    struct inode *inode;        /* 指向打开的 inode */
+    uint32_t      flags;        /* O_RDONLY / O_WRONLY / O_RDWR */
+    uint32_t      offset;       /* 当前读写位置 */
+    uint8_t       in_use;       /* 槽位是否使用中 */
+} fd_entry_t;
+
+#endif /* VFS_ENABLE */
 
 /*============================================================================
  * 任务控制块 (TCB)
  *============================================================================*/
+
+#if MPU_ENABLE && CAP_ENABLE
+#define TASK_SHM_MAP_MAX 5
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  region;
+    uint8_t  rights;
+    uint8_t  _pad;
+    cap_id_t cap;
+    void    *addr;
+    size_t   size;
+} shm_mapping_t;
+#endif
 
 typedef struct tcb {
     // --- 上下文保存区 (汇编访问, 必须在最前面) ---
@@ -89,6 +137,7 @@ typedef struct tcb {
     // --- 栈信息 ---
     void       *stack_base;           // 栈基址
     uint32_t    stack_size;           // 栈大小 (字节)
+    uint32_t    sp_limit;             // PSP 下界 (装载到 PSPLIM, M33 栈溢出保护)
 
     // --- 调度信息 ---
     uint32_t    time_slice;           // 剩余时间片
@@ -101,19 +150,46 @@ typedef struct tcb {
     void       *block_obj;            // 阻塞对象指针
     kern_err_t  block_result;         // 阻塞结果
 
+    /* --- join 支持 --- */
+    void       *exit_value;           // task_exit 存储的返回值
+    struct tcb *joiners;              // 等待此任务结束的链表头
+    struct tcb *join_next;            // joiner 链表的 next 指针
+    uint32_t    reclaim_at;           // 延迟回收时间戳 (tick), 0=不需要回收
+
     // --- 链表节点 (用于各种队列) ---
-    struct tcb *next;                 // 下一个
-    struct tcb *prev;                 // 前一个
+    struct tcb *next;                 // 下一个 (就绪队列)
+    struct tcb *prev;                 // 前一个 (就绪队列)
+
+    // --- 等待队列链表节点 ---
+    struct tcb *wait_next;            // 下一个 (等待队列)
+    struct tcb *wait_prev;            // 前一个 (等待队列)
+
+    // --- MPU 内存保护 (Phase 1) ---
+    uint8_t     attrs;                // TASK_ATTR_PRIVILEGED / TASK_ATTR_USER
+    uint8_t     syscall_blocked;      // blocked inside SVC, resume via saved frame
+    uint8_t     _pad1[2];             // 4 字节对齐
+#if MPU_ENABLE
+    uint32_t    mpu_regions[8][2];   // MPU region [RBAR, RASR/RLAR] x 8
+#if CAP_ENABLE
+    shm_mapping_t shm_maps[TASK_SHM_MAP_MAX];
+#endif
+#endif
 
     // --- 能力 ---
-#if KERN_ENABLE_CAPABILITY
-    uint16_t    capabilities;         // 能力位图
+#if CAP_ENABLE
+    uint32_t    capabilities;         // 能力位图
+    cap_id_t    cap_set[32];         // 持有的能力集 (Phase 2)
 #endif
 
     // --- 统计信息 ---
 #if KERN_TASK_STATS
     uint32_t    ctx_switch_count;     // 上下文切换次数
     uint32_t    cpu_usage;            // CPU 使用率 (万分比)
+#endif
+
+    // --- 文件描述符表 ---
+#if VFS_ENABLE
+    fd_entry_t  fd_table[VFS_MAX_FDS];   // 每任务独立 fd 空间
 #endif
 
 } tcb_t;
@@ -224,12 +300,19 @@ typedef struct {
     timer_callback_t callback;                  // 回调函数
     void           *arg;                        // 回调参数
 
+    // --- 通知信息 ---
+    ep_id_t         notify_ep;                  // 到期通知 endpoint
+    uint32_t        notify_badge;               // 到期通知 badge
+
     // --- 堆索引 ---
     int16_t         heap_index;                 // 在最小堆中的索引，-1 表示不在堆中
 
     // --- 标志 ---
     uint8_t         one_shot;                   // 单次触发标志
     uint8_t         in_use;                     // 使用标志
+    uint8_t         stop_pending;               // 回调中请求了 stop
+    uint8_t         delete_pending;             // 删除已请求
+    uint8_t         notify_bound;               // 是否绑定 endpoint 通知
 } timer_t;
 
 /**
@@ -255,15 +338,27 @@ typedef struct {
 #endif
 
 /*============================================================================
+ * 函数类型
+ *============================================================================*/
+
+typedef void (*task_func_t)(void *arg);    // 任务函数
+typedef void (*isr_func_t)(void);          // 中断服务函数
+
+/*============================================================================
  * 中断线程描述符
  *============================================================================*/
 
-#if KERN_IRQ_THREADED
+#if IRQ_THREADED_ENABLE
 typedef struct {
     task_id_t   task_id;               // 关联任务 ID
-    uint32_t    irq_num;               // IRQ 号
+    int16_t     irq_num;               // IRQ 号
+    task_func_t handler;               // 用户线程模式处理函数
+    void       *arg;                   // 用户参数
     uint8_t     priority;              // 线程优先级
     uint8_t     in_use;                // 使用标志
+    uint8_t     pending;               // ISR 已触发的待处理标志
+    uint8_t     running;               // 线程 handler 正在执行
+    uint8_t     stopping;              // release 已请求停止
 } irq_thread_t;
 #endif
 
@@ -276,29 +371,32 @@ typedef void (*bh_handler_t)(void *arg);
 typedef struct {
     bh_handler_t handler;              // 处理函数
     void        *arg;                  // 参数
+    ep_id_t      notify_ep;            // 通知 endpoint
+    uint32_t     notify_badge;         // 通知 badge
     uint8_t      pending;              // 待处理标志
+    uint8_t      in_use;               // 使用标志
+    uint8_t      running;              // handler 正在执行
+    uint8_t      delete_pending;       // 运行中删除，返回后释放
+    uint8_t      notify_bound;         // 是否绑定 endpoint 通知
 } bh_t;
-
-/*============================================================================
- * 函数类型
- *============================================================================*/
-
-typedef void (*task_func_t)(void *arg);    // 任务函数
-typedef void (*isr_func_t)(void);          // 中断服务函数
 
 /*============================================================================
  * 通用宏
  *============================================================================*/
 
 #define ARRAY_SIZE(arr)        (sizeof(arr) / sizeof((arr)[0]))
+#ifndef MIN
 #define MIN(a, b)              ((a) < (b) ? (a) : (b))
+#endif
+#ifndef MAX
 #define MAX(a, b)              ((a) > (b) ? (a) : (b))
+#endif
 
 #define ALIGN_UP(x, align)     (((x) + (align) - 1) & ~((align) - 1))
 #define ALIGN_DOWN(x, align)   ((x) & ~((align) - 1))
 
 #ifndef BIT
-#define BIT(n)                 (1U << (n))
+#define BIT(n)                 (1UL << (n))
 #endif
 #define SET_BIT(x, n)          ((x) |= BIT(n))
 #define CLR_BIT(x, n)          ((x) &= ~BIT(n))
