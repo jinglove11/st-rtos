@@ -6,6 +6,11 @@ build/
 *.hex
 *.map
 *.dis
+__pycache__/
+tools/pico-sdk/
+tools/picotool-src/
+tools/picotool-build/
+tools/picotool/
 
 # IDE
 .vscode/
