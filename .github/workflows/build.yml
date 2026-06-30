@@ -1,0 +1,164 @@
+# Build matrix for My-RTOS.
+#
+# Goals:
+#   - Catch build regressions on both supported boards (RP2350 + STM32F767).
+#   - Verify all 4 config presets (tiny/default/release/full) still compile.
+#   - Catch Kconfig doc drift (gen_kconfig_docs.py --check).
+#   - Run image verification (verify_pico2w_build.py) for RP2350.
+#
+# No hardware tests in CI — there's no QEMU for Cortex-M33 and no DAPLink in
+# the runner. Hardware validation runs locally via scripts/regression.sh.
+
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  PICO_SDK_VERSION: "2.2.0"
+  JOBS: 4
+
+jobs:
+  # -------------------------------------------------------------------
+  # RP2350 (Pico 2 W) — CMake path, 4 config presets
+  # -------------------------------------------------------------------
+  rp2350:
+    name: RP2350 / ${{ matrix.preset }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [tiny, default, release, full]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arm-none-eabi toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            cmake ninja-build python3
+
+      - name: Cache Pico SDK + picotool
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: |
+            tools/pico-sdk
+            tools/picotool
+          key: pico-sdk-${{ env.PICO_SDK_VERSION }}-${{ runner.os }}
+
+      - name: Fetch Pico SDK + picotool
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: make setup-pico-sdk
+
+      - name: Apply ${{ matrix.preset }} preset
+        run: |
+          cp configs/${{ matrix.preset }}_defconfig .config
+          python3 scripts/menuconfig.py genconfig
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build/rp2350-pico-sdk \
+            -DPICO_SDK_PATH=$PWD/tools/pico-sdk \
+            -DPICO_TOOLCHAIN_PATH=$PWD/tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin \
+            -Dpicotool_DIR=$PWD/tools/picotool/picotool \
+            -DPICO_BOARD=pico2_w \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/rp2350-pico-sdk -j$JOBS
+
+      - name: Verify image metadata
+        if: matrix.preset != 'full'  # full enables unbuilt subsystems; skip verify
+        run: |
+          python3 scripts/verify_pico2w_build.py \
+            --elf build/rp2350-pico-sdk/my-rtos-pico2w.elf \
+            --uf2 build/rp2350-pico-sdk/my-rtos-pico2w.uf2
+
+      - name: Upload ELF + UF2 + map
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rp2350-${{ matrix.preset }}
+          path: |
+            build/rp2350-pico-sdk/my-rtos-pico2w.elf
+            build/rp2350-pico-sdk/my-rtos-pico2w.uf2
+            build/rp2350-pico-sdk/my-rtos-pico2w.map
+          if-no-files-found: warn
+          retention-days: 14
+
+  # -------------------------------------------------------------------
+  # STM32F767 (Nucleo F767) — classic Make path
+  # -------------------------------------------------------------------
+  stm32f767:
+    name: STM32F767 / default
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Apply default config + generate header
+        run: |
+          cp configs/stm32f767_defconfig .config
+          python3 scripts/menuconfig.py genconfig
+
+      - name: Build
+        run: make BOARD=stm32f767 -j$JOBS
+
+      - name: Verify ELF exists
+        run: |
+          test -f build/stm32f767/my-rtos-stm32f767.elf
+          ${ARM_TOOLCHAIN:-arm-none-eabi-}size build/stm32f767/my-rtos-stm32f767.elf
+
+      - name: Upload ELF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stm32f767-default
+          path: |
+            build/stm32f767/my-rtos-stm32f767.elf
+            build/stm32f767/my-rtos-stm32f767.map
+          if-no-files-found: warn
+          retention-days: 14
+
+  # -------------------------------------------------------------------
+  # Docs + Kconfig sanity — runs once, fast
+  # -------------------------------------------------------------------
+  kconfig-docs:
+    name: Kconfig docs in sync
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Regenerate docs (must match committed)
+        run: |
+          # Regenerate then diff against git-tracked state.
+          python3 scripts/gen_kconfig_docs.py
+          git diff --exit-code -- docs/kconfig/
+          if [[ $? -ne 0 ]]; then
+            echo "::error::docs/kconfig/ is stale; run 'python3 scripts/gen_kconfig_docs.py' and commit"
+            exit 1
+          fi
+
+      - name: All 4 presets parse cleanly
+        run: |
+          for preset in tiny default release full; do
+            echo "== $preset =="
+            cp configs/${preset}_defconfig .config
+            python3 scripts/menuconfig.py genconfig
+          done
