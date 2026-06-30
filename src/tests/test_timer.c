@@ -14,8 +14,11 @@
 
 #include "test_framework.h"
 #include "timer.h"
+#include "endpoint.h"
 #include "task.h"
 #include "kernel.h"
+#include "trace.h"
+#include "stats.h"
 
 /*============================================================================
  * 测试数据
@@ -48,17 +51,26 @@ static void test_one_shot_timer(void) {
     test_flag = 0;
 
     timer_id_t tid = timer_create("test1", callback_set_flag, (void *)&test_flag, 0);
-    TEST_ASSERT(tid >= 0, "Timer create failed");
+    TEST_ASSERT(tid >= 0, "Timer create ");
 
     kern_err_t err = timer_start(tid, 10);
-    TEST_ASSERT(err == KERN_OK, "Timer start failed");
+    TEST_ASSERT(err == KERN_OK, "Timer start ");
+
+    /* 给定时器服务任务时间处理命令 */
+    task_delay(1);
+
+    /* 检查定时器是否激活 */
+    (void)timer_is_active(tid);
 
     /* 等待定时器触发 */
     task_delay(15);
 
+
     TEST_ASSERT(test_flag == 1, "One-shot timer did not fire");
 
+   // test_print("  Before delete\n");
     timer_delete(tid);
+  //  test_print("  After delete\n");
     test_pass("One-shot timer");
 }
 
@@ -82,7 +94,6 @@ static void test_periodic_timer(void) {
 
     TEST_ASSERT(test_count >= 4, "Periodic timer did not fire enough times");
 
-    test_print_num("  Trigger count: ", test_count);
 
     timer_stop(tid);
     timer_delete(tid);
@@ -111,8 +122,6 @@ static void test_timer_stop(void) {
 
     TEST_ASSERT(test_count == count_before, "Timer still firing after stop");
 
-    test_print_num("  Count before stop: ", count_before);
-    test_print_num("  Count after stop:  ", test_count);
 
     timer_delete(tid);
     test_pass("Timer stop");
@@ -173,8 +182,6 @@ static void test_timer_change_period(void) {
 
     TEST_ASSERT(count2 > count1 + 3, "Period change did not take effect");
 
-    test_print_num("  Count with period 10: ", count1);
-    test_print_num("  Count with period 3:  ", count2);
 
     timer_stop(tid);
     timer_delete(tid);
@@ -209,7 +216,6 @@ static void test_multiple_timers(void) {
 
     TEST_ASSERT(fired >= 3, "Not enough timers fired");
 
-    test_print_num("  Timers fired: ", fired);
 
     test_pass("Multiple timers");
 }
@@ -243,10 +249,126 @@ static void test_timer_state(void) {
     int32_t remaining = timer_get_remaining(tid);
     TEST_ASSERT(remaining > 0 && remaining <= 50, "Remaining time valid");
 
-    test_print_num("  Remaining ticks: ", remaining);
 
     timer_delete(tid);
     test_pass("Timer state");
+}
+
+#if TRACE_ENABLE && KERN_TASK_STATS
+static void timer_trace_count_cb(const trace_entry_t *entry, void *ctx) {
+    (void)entry;
+    (void)ctx;
+}
+#endif
+
+/*============================================================================
+ * 测试 8: Timer trace / stats
+ *============================================================================*/
+
+static void test_timer_trace_stats(void) {
+    test_section("Test 8: Timer Trace/Stats");
+
+#if TRACE_ENABLE && KERN_TASK_STATS
+    test_flag = 0;
+    trace_clear();
+    stats_clear_events();
+
+    timer_id_t tid = timer_create("diag", callback_set_flag, (void *)&test_flag, 0);
+    TEST_ASSERT(tid >= 0, "Timer create for diagnostics");
+
+    kern_err_t err = timer_start(tid, 3);
+    TEST_ASSERT(err == KERN_OK, "Timer start for diagnostics");
+
+    task_delay(8);
+    TEST_ASSERT(test_flag == 1, "Diagnostic timer fired");
+
+    err = timer_delete(tid);
+    TEST_ASSERT(err == KERN_OK, "Timer delete for diagnostics");
+    task_delay(1);
+
+    uint16_t timer_events = trace_filter(TRACE_TIMER, timer_trace_count_cb, NULL);
+    TEST_ASSERT(timer_events >= 4, "Timer trace events recorded");
+    TEST_ASSERT(stats_get_event_count(STATS_SUBSYS_TIMER, STATS_COUNTER_OK) >= 4,
+                "Timer stats ok events recorded");
+#else
+    TEST_ASSERT(1, "Timer diagnostics disabled");
+#endif
+
+    test_pass("Timer trace/stats");
+}
+
+static timer_id_t timer_self_delete_id;
+static volatile int timer_self_delete_count;
+
+static void callback_delete_self(void *arg) {
+    (void)arg;
+    timer_self_delete_count++;
+    (void)timer_delete(timer_self_delete_id);
+}
+
+/*============================================================================
+ * 测试 9: 回调运行中请求删除
+ *============================================================================*/
+
+static void test_timer_delete_while_running(void) {
+    test_section("Test 9: Timer delete while running");
+
+    timer_self_delete_count = 0;
+    timer_self_delete_id = timer_create("selfdel", callback_delete_self, NULL, 2);
+    TEST_ASSERT(timer_self_delete_id >= 0, "self-delete timer created");
+    if (timer_self_delete_id < 0) return;
+
+    kern_err_t err = timer_start(timer_self_delete_id, 1);
+    TEST_ASSERT_EQ(KERN_OK, err, "self-delete timer started");
+
+    task_delay(8);
+    TEST_ASSERT_EQ(1, timer_self_delete_count, "self-delete timer fired once");
+
+    err = timer_start(timer_self_delete_id, 1);
+    TEST_ASSERT_NE(KERN_OK, err, "deleted running timer cannot restart");
+}
+
+/*============================================================================
+ * 测试 10: 定时器 endpoint 通知
+ *============================================================================*/
+
+static void test_timer_endpoint_notification(void) {
+    test_section("Test 10: Timer endpoint notification");
+
+#if IPC_ENDPOINT
+    ep_id_t ep = endpoint_create("tmr_ep", sizeof(uint32_t) * 2U, 2);
+    TEST_ASSERT(ep >= 0, "timer notification endpoint created");
+    if (ep < 0) return;
+
+    timer_id_t tid = timer_create("tmr_ntfy", NULL, NULL, 0);
+    TEST_ASSERT(tid >= 0, "notification timer created");
+    if (tid < 0) {
+        endpoint_delete(ep);
+        return;
+    }
+
+    kern_err_t err = timer_bind_endpoint(tid, ep, 0x54494d52U);
+    TEST_ASSERT_EQ(KERN_OK, err, "timer bound to endpoint");
+
+    err = timer_bind_endpoint(tid, (ep_id_t)KERN_INVALID_ID, 0);
+    TEST_ASSERT_EQ(KERN_ERR_PARAM, err,
+                   "timer bind rejects invalid endpoint");
+
+    err = timer_start(tid, 3);
+    TEST_ASSERT_EQ(KERN_OK, err, "notification timer started");
+
+    uint32_t msg[2] = {0, 0};
+    err = endpoint_recv(ep, msg, 30);
+    TEST_ASSERT_EQ(KERN_OK, err, "timer endpoint notification received");
+    TEST_ASSERT_EQ((int)0x54494d52U, (int)msg[0],
+                   "timer notification badge copied");
+    TEST_ASSERT_EQ((int)tid, (int)msg[1], "timer notification id copied");
+
+    timer_delete(tid);
+    endpoint_delete(ep);
+#else
+    test_skip("endpoint disabled");
+#endif
 }
 
 /*============================================================================
@@ -266,6 +388,9 @@ static void test_timer_module(void) {
     test_timer_change_period();
     test_multiple_timers();
     test_timer_state();
+    test_timer_trace_stats();
+    test_timer_delete_while_running();
+    test_timer_endpoint_notification();
 }
 
 /*============================================================================

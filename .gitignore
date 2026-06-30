@@ -24,3 +24,6 @@ Thumbs.db
 
 # Debug
 *.log
+
+# Claude tool artifacts
+docs/superpowers/
