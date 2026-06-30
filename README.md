@@ -1,14 +1,18 @@
 # My-RTOS
 
-My-RTOS 是一个面向 ARM Cortex-M 的自研 RTOS / 微内核实验系统。当前主线以
-STM32 Nucleo-F767ZI 为主要验证平台，目标不是只实现一个最小调度器，而是逐步把
-RTOS 推向具备用户/内核隔离、系统调用、capability 权限、IPC request/reply、VFS、
-驱动模型、fault 隔离和诊断能力的微内核风格操作系统。
+My-RTOS 是一个面向 ARM Cortex-M 的自研微内核实验系统。当前主线平台为
+**RP2350 / Pico 2 W（Cortex-M33, ARMv8-M, Non-secure）**，同时保留
+**STM32F767 / Nucleo-F767ZI（Cortex-M7）** 作为经典路径并行支持。
+
+目标不是只实现一个最小调度器，而是逐步把 RTOS 推向具备用户/内核隔离、系统调用、
+capability 权限、IPC request/reply、VFS、驱动模型、fault 隔离和诊断能力的微内核
+风格操作系统。完整路线图见 [`MICROKERNEL_OS_ROADMAP.md`](MICROKERNEL_OS_ROADMAP.md)
+（9 个 Phase / ~6 个月）。
 
 当前状态可以概括为：**具备微内核核心机制的 RTOS 原型**。调度、任务生命周期、
-MPU 隔离、SVC/syscall、capability、endpoint/channel IPC、VFS/devfs/ramfs、IRQ/BH、
-timer、trace/stats、shell 和板级测试框架都已经接入。后续真正微内核化的重点是把
-FS、driver、device manager、name server 等服务迁到用户态。
+MPU 隔离（PMSAv8 完整 MAIR 表）、SVC/syscall、capability、endpoint/channel IPC、
+VFS/devfs/ramfs、IRQ/BH、timer、trace/stats、shell 和板级测试框架都已经接入，RP2350
+板上测试基线为 **2867/2867 PASS**。
 
 ## 当前能力
 
@@ -130,19 +134,41 @@ FreeRTOS 这类传统 RTOS 通常提供小而稳定的调度、队列、信号�
 
 ## 支持平台
 
-| 平台 | 状态 | 说明 |
-| --- | --- | --- |
-| STM32 Nucleo-F767ZI | 主验证平台 | Cortex-M7，当前主要开发和板测目标 |
-| RP2350 / Pico 2 | 构建入口存在 | 仍处于次要平台，主线验证以 STM32F767 为准 |
+双轨构建系统：**RP2350 走 CMake + Pico SDK**，**STM32F767 走经典 Make**。两个板子
+各自维护一份默认 defconfig；feature matrix 见 [`docs/BOARD_SUPPORT.md`](docs/BOARD_SUPPORT.md)。
 
-STM32F767 默认串口：
+| 平台 | 构建系统 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| **RP2350 / Pico 2 W** | CMake + Pico SDK 2.2.0 | **主验证平台** | Cortex-M33 NS / ARMv8-M / PMSAv8 / 2×M33 + 2×Hazard3 RV (本期仅用 Core 0) |
+| STM32 Nucleo-F767ZI | 经典 Make | 维护中 | Cortex-M7 / PMSAv7 / 历史主线 |
 
-| 项目 | 配置 |
-| --- | --- |
-| UART | USART3 |
-| Pins | PD8 / PD9 |
-| Baudrate | 115200 |
-| Format | 8N1 |
+每板各自的串口：
+
+| 平台 | UART | Pins | Baudrate | Format |
+| --- | --- | --- | --- | --- |
+| RP2350 | uart0 | GPIO0 (TX) / GPIO1 (RX) | 115200 | 8N1 |
+| STM32F767 | USART3 | PD8 / PD9 | 115200 | 8N1 |
+
+## 配置预设
+
+仓库内置 4 个 defconfig 预设，满足从最小固件到全特性镜像的不同场景：
+
+| 预设 | 文件 | 目标 | 估计 footprint |
+| --- | --- | --- | --- |
+| **tiny** | `configs/tiny_defconfig` | 最小可用镜像；单任务、无 shell/test/trace | ~24-32KB flash / ~4-8KB RAM |
+| **default** | `configs/default_defconfig` | 开发 + 测试基线（2867/2867 PASS） | ~120-180KB flash / ~32-48KB RAM |
+| **release** | `configs/release_defconfig` | 生产：去 test/shell/trace，保留 IPC/cap/fault | ~60-90KB flash / ~16-24KB RAM |
+| **full** | `configs/full_defconfig` | 所有子系统 ON（包括未实装的 Phase 2-9 占位） | ~300-800KB flash / ~64-128KB RAM |
+
+切换：
+
+```bash
+cp configs/<preset>_defconfig .config
+python3 scripts/menuconfig.py genconfig
+```
+
+每个 `CONFIG_*` 的细节见 [`docs/kconfig/INDEX.md`](docs/kconfig/INDEX.md)（共 123 个
+配置项，每个都有独立页面）。
 
 ## 目录结构
 
@@ -200,23 +226,46 @@ tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin
 
 ## 快速开始
 
-加载 STM32F767 默认配置：
+### 路径 A：RP2350 / Pico 2 W（CMake，主验证平台）
+
+首次需要拉取 Pico SDK 与 picotool（一次性，~50MB 下载 + 编译）：
+
+```bash
+make setup-pico-sdk
+```
+
+应用默认配置并构建：
+
+```bash
+cp configs/default_defconfig .config
+python3 scripts/menuconfig.py genconfig
+make            # 等价于 cmake --build build/rp2350-pico-sdk -j4
+```
+
+烧录（DAPLink / CMSIS-DAP，经 OpenOCD，ELF 优先）：
+
+```bash
+make flash
+# 或手动：
+openocd -f tools/openocd.cfg \
+    -c "program build/rp2350-pico-sdk/my-rtos-pico2w.elf verify reset exit"
+```
+
+串口（DAPLink CDC 通常枚举为 `/dev/ttyACM0`）：
+
+```bash
+picocom -b 115200 /dev/ttyACM0
+```
+
+### 路径 B：STM32F767 / Nucleo-F767ZI（经典 Make）
 
 ```bash
 make stm32f767_defconfig
-```
-
-构建：
-
-```bash
 make BOARD=stm32f767
-```
-
-烧录：
-
-```bash
 make BOARD=stm32f767 flash
 ```
+
+### 通用
 
 清理：
 
@@ -237,9 +286,25 @@ make menuconfig
 make genconfig
 ```
 
+### 一键回归（烧录 + 串口捕获 + 检查 PASS 行）
+
+```bash
+scripts/regression.sh                 # 默认 BOARD=rp2350, PORT=/dev/ttyACM0
+BOARD=stm32f767 scripts/regression.sh # 切到 STM32
+SKIP_FLASH=1 scripts/regression.sh    # 只验 build,不烧录
+```
+
+### 本地 CI 镜像（与 `.github/workflows/build.yml` 同款）
+
+```bash
+scripts/ci_local.sh                   # 全矩阵: 4 preset × rp2350 + stm32 + docs
+scripts/ci_local.sh rp2350 default    # 单 preset
+scripts/ci_local.sh docs              # 只验 Kconfig doc 同步
+```
+
 ## 串口使用
 
-烧录后连接 USART3，串口参数为 `115200 8N1`。例如：
+烧录后连接板上 UART（RP2350 GPIO0/1 或 STM32 USART3），参数为 `115200 8N1`：
 
 ```bash
 picocom -b 115200 /dev/ttyACM0
@@ -307,17 +372,18 @@ my-rtos> stats
 
 主要配置文件：
 
-- `.config`
-- `configs/stm32f767_defconfig`
-- `configs/rp2350_defconfig`
-- `src/kernel/include/kernel_config.h`
+- `.config`（本地状态，不入 git）
+- `configs/<preset>_defconfig` — 4 个预设：tiny / default / release / full
+- `configs/rp2350_defconfig`、`configs/stm32f767_defconfig` — 各板硬件默认
+- `src/kernel/include/kernel_config.h`（生成产物）
+- `docs/kconfig/INDEX.md` — 全部 123 个 `CONFIG_*` 的索引与每项详情
 
 推荐通过下面命令生成配置头：
 
 ```bash
-make stm32f767_defconfig
-make menuconfig
-make genconfig
+cp configs/<preset>_defconfig .config
+make menuconfig    # 交互式
+make genconfig     # 仅生成头文件
 ```
 
 常见配置项包括：
