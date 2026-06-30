@@ -1,11 +1,16 @@
 /**
  * @file kstring.c
  * @brief 内核字符串/内存函数实现
+ *
+ * GCC 在 -O2+ 下会把 while(n--) *p++ = c; 识别为 memset idiom 并 emit 对自身
+ * 的调用（loop-distribute-patterns），在 freestanding 环境里造成无限递归。
+ * 用 attribute 关掉这个优化，让函数真正循环。
  */
 
 #include <stdint.h>
 #include <stddef.h>
 
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
 void *memset(void *s, int c, size_t n) {
     uint8_t *p = (uint8_t *)s;
     while (n--) {
@@ -14,6 +19,7 @@ void *memset(void *s, int c, size_t n) {
     return s;
 }
 
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
 void *memcpy(void *dest, const void *src, size_t n) {
     uint8_t *d = (uint8_t *)dest;
     const uint8_t *s = (const uint8_t *)src;
@@ -23,6 +29,7 @@ void *memcpy(void *dest, const void *src, size_t n) {
     return dest;
 }
 
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
 void *memmove(void *dest, const void *src, size_t n) {
     uint8_t *d = (uint8_t *)dest;
     const uint8_t *s = (const uint8_t *)src;
