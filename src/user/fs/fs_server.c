@@ -1,0 +1,486 @@
+/**
+ * @file fs_server.c
+ * @brief Minimal user-space FS server over endpoint IPC
+ */
+
+#include "fs_proto.h"
+#include "user_api.h"
+#include "inode.h"
+#include <stdint.h>
+
+#if VFS_ENABLE && CAP_ENABLE
+
+typedef struct {
+    uint8_t in_use;
+    int real_fd;
+} fs_fd_entry_t;
+
+int fs_opcode_valid(uint16_t opcode) {
+    return opcode >= FS_OP_PING && opcode <= FS_OP_STAT;
+}
+
+void fs_msg_init(fs_msg_t *msg, uint16_t opcode, uint32_t seq) {
+    if (msg == NULL) {
+        return;
+    }
+    for (uint32_t i = 0; i < sizeof(*msg); i++) {
+        ((uint8_t *)msg)[i] = 0;
+    }
+    msg->magic = FS_MAGIC;
+    msg->opcode = opcode;
+    msg->seq = seq;
+    msg->fd = KERN_INVALID_ID;
+}
+
+static void fs_copy_path(char *dst, const char *src) {
+    for (uint32_t i = 0; i < FS_PATH_MAX; i++) {
+        dst[i] = src[i];
+        if (src[i] == '\0') {
+            return;
+        }
+    }
+    dst[FS_PATH_MAX - 1U] = '\0';
+}
+
+static int fs_path_valid(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+    for (uint32_t i = 0; i < FS_PATH_MAX; i++) {
+        if (path[i] == '\0') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void fs_copy_dirent_name(char *dst, const char *src) {
+    for (uint32_t i = 0; i < FS_PATH_MAX; i++) {
+        dst[i] = src[i];
+        if (src[i] == '\0') {
+            return;
+        }
+    }
+    dst[FS_PATH_MAX - 1U] = '\0';
+}
+
+static void fs_restore_dirent_name(char *dst, const char *src) {
+    for (uint32_t i = 0; i < INODE_NAME_LEN; i++) {
+        dst[i] = '\0';
+    }
+    for (uint32_t i = 0; i < FS_PATH_MAX && i < INODE_NAME_LEN; i++) {
+        dst[i] = src[i];
+        if (src[i] == '\0') {
+            return;
+        }
+    }
+    dst[INODE_NAME_LEN - 1U] = '\0';
+}
+
+static int fs_check_reply(const fs_msg_t *msg, uint16_t opcode) {
+    if (msg->magic != FS_MAGIC || msg->opcode != opcode) {
+        return KERN_ERR_STATE;
+    }
+    return msg->status;
+}
+
+static int fs_send_simple(int ep_cap, fs_msg_t *msg, uint32_t timeout) {
+    int err = sys_ep_send(ep_cap, msg, (int)timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    return fs_check_reply(msg, msg->opcode);
+}
+
+int fs_ping(int ep_cap, uint32_t timeout) {
+    fs_msg_t msg;
+
+    if (ep_cap <= 0) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_PING, 0);
+    return fs_send_simple(ep_cap, &msg, timeout);
+}
+
+int fs_open(int ep_cap, const char *path, uint32_t flags, uint32_t timeout) {
+    fs_msg_t msg;
+    int err;
+
+    if (ep_cap <= 0 || !fs_path_valid(path)) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_OPEN, 0);
+    msg.flags = (uint16_t)flags;
+    fs_copy_path(msg.path, path);
+    err = fs_send_simple(ep_cap, &msg, timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    return msg.result;
+}
+
+int fs_close(int ep_cap, int fd, uint32_t timeout) {
+    fs_msg_t msg;
+
+    if (ep_cap <= 0 || fd <= 0) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_CLOSE, 0);
+    msg.fd = fd;
+    return fs_send_simple(ep_cap, &msg, timeout);
+}
+
+int fs_read(int ep_cap, int fd, void *buf, uint32_t len, uint32_t timeout) {
+    fs_msg_t msg;
+    uint8_t *dst = (uint8_t *)buf;
+    int err;
+
+    if (ep_cap <= 0 || fd <= 0 || (buf == NULL && len > 0U) ||
+        len > FS_PAYLOAD_MAX) {
+        return KERN_ERR_PARAM;
+    }
+    if (dst != NULL) {
+        for (uint32_t i = 0; i < len; i++) {
+            dst[i] = 0;
+        }
+    }
+    fs_msg_init(&msg, FS_OP_READ, 0);
+    msg.fd = fd;
+    msg.length = len;
+    err = fs_send_simple(ep_cap, &msg, timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    if (msg.result < 0 || (uint32_t)msg.result > len ||
+        (uint32_t)msg.result > FS_PAYLOAD_MAX) {
+        return KERN_ERR_OVERFLOW;
+    }
+    for (uint32_t i = 0; i < (uint32_t)msg.result; i++) {
+        dst[i] = msg.payload[i];
+    }
+    return msg.result;
+}
+
+int fs_write(int ep_cap, int fd, const void *buf, uint32_t len,
+             uint32_t timeout) {
+    fs_msg_t msg;
+    const uint8_t *src = (const uint8_t *)buf;
+    int err;
+
+    if (ep_cap <= 0 || fd <= 0 || (buf == NULL && len > 0U) ||
+        len > FS_PAYLOAD_MAX) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_WRITE, 0);
+    msg.fd = fd;
+    msg.length = len;
+    for (uint32_t i = 0; i < len; i++) {
+        msg.payload[i] = src[i];
+    }
+    err = fs_send_simple(ep_cap, &msg, timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    return msg.result;
+}
+
+int fs_lseek(int ep_cap, int fd, int32_t offset, uint32_t whence,
+             uint32_t timeout) {
+    fs_msg_t msg;
+    int err;
+
+    if (ep_cap <= 0 || fd <= 0 || whence > SEEK_END) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_LSEEK, 0);
+    msg.fd = fd;
+    msg.flags = (uint16_t)whence;
+    msg.offset = offset;
+    err = fs_send_simple(ep_cap, &msg, timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    return msg.result;
+}
+
+int fs_readdir(int ep_cap, int fd, dirent_t *entry, uint32_t timeout) {
+    fs_msg_t msg;
+    int err;
+
+    if (ep_cap <= 0 || fd <= 0 || entry == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    entry->ino = 0;
+    entry->type = 0;
+    for (uint32_t i = 0; i < INODE_NAME_LEN; i++) {
+        entry->name[i] = '\0';
+    }
+
+    fs_msg_init(&msg, FS_OP_READDIR, 0);
+    msg.fd = fd;
+    err = fs_send_simple(ep_cap, &msg, timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    entry->ino = (uint32_t)msg.result;
+    entry->type = (uint8_t)msg.length;
+    fs_restore_dirent_name(entry->name, msg.path);
+    return KERN_OK;
+}
+
+int fs_unlink(int ep_cap, const char *path, uint32_t timeout) {
+    fs_msg_t msg;
+
+    if (ep_cap <= 0 || !fs_path_valid(path)) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_UNLINK, 0);
+    fs_copy_path(msg.path, path);
+    return fs_send_simple(ep_cap, &msg, timeout);
+}
+
+int fs_mkdir(int ep_cap, const char *path, uint32_t timeout) {
+    fs_msg_t msg;
+
+    if (ep_cap <= 0 || !fs_path_valid(path)) {
+        return KERN_ERR_PARAM;
+    }
+    fs_msg_init(&msg, FS_OP_MKDIR, 0);
+    fs_copy_path(msg.path, path);
+    return fs_send_simple(ep_cap, &msg, timeout);
+}
+
+int fs_stat(int ep_cap, const char *path, vfs_stat_t *st, uint32_t timeout) {
+    fs_msg_t msg;
+    int err;
+
+    if (ep_cap <= 0 || !fs_path_valid(path) || st == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    st->ino = 0;
+    st->size = 0;
+    st->type = 0;
+
+    fs_msg_init(&msg, FS_OP_STAT, 0);
+    fs_copy_path(msg.path, path);
+    err = fs_send_simple(ep_cap, &msg, timeout);
+    if (err != KERN_OK) {
+        return err;
+    }
+    st->ino = (uint32_t)msg.result;
+    st->size = msg.length;
+    st->type = (uint8_t)msg.flags;
+    return KERN_OK;
+}
+
+const char *fs_error_name(int err) {
+    switch (err) {
+    case KERN_OK:
+        return "ok";
+    case KERN_ERR_PARAM:
+        return "param";
+    case KERN_ERR_TIMEOUT:
+        return "timeout";
+    case KERN_ERR_RESOURCE:
+        return "resource";
+    case KERN_ERR_STATE:
+        return "state";
+    case KERN_ERR_CAP:
+        return "cap";
+    case KERN_ERR_BUSY:
+        return "busy";
+    case KERN_ERR_NOEXIST:
+        return "noexist";
+    case KERN_ERR_OVERFLOW:
+        return "overflow";
+    case KERN_ERR_PERM:
+        return "perm";
+    case KERN_ERR_NOTDIR:
+        return "notdir";
+    case KERN_ERR_ISDIR:
+        return "isdir";
+    case KERN_ERR_FAULT:
+        return "fault";
+    default:
+        return "unknown";
+    }
+}
+
+static int fs_fd_alloc(fs_fd_entry_t *fds, int real_fd) {
+    for (uint32_t i = 0; i < FS_FD_MAX; i++) {
+        if (!fds[i].in_use) {
+            fds[i].in_use = 1U;
+            fds[i].real_fd = real_fd;
+            return (int)i + 1;
+        }
+    }
+    return KERN_ERR_RESOURCE;
+}
+
+static int fs_fd_get(fs_fd_entry_t *fds, int token) {
+    if (token <= 0 || token > (int)FS_FD_MAX ||
+        !fds[(uint32_t)token - 1U].in_use) {
+        return KERN_ERR_PARAM;
+    }
+    return fds[(uint32_t)token - 1U].real_fd;
+}
+
+static void fs_fd_free(fs_fd_entry_t *fds, int token) {
+    if (token > 0 && token <= (int)FS_FD_MAX) {
+        fds[(uint32_t)token - 1U].in_use = 0U;
+        fds[(uint32_t)token - 1U].real_fd = KERN_INVALID_ID;
+    }
+}
+
+static int fs_reply(int ep_cap, fs_msg_t *msg, int status, int result) {
+    msg->status = status;
+    msg->result = result;
+    return sys_ep_reply(ep_cap, msg);
+}
+
+int fs_server_run(int ep_cap, uint32_t max_requests) {
+    fs_fd_entry_t fds[FS_FD_MAX];
+    fs_msg_t msg;
+    int err = KERN_OK;
+
+    if (ep_cap <= 0) {
+        return KERN_ERR_PARAM;
+    }
+    for (uint32_t i = 0; i < FS_FD_MAX; i++) {
+        fds[i].in_use = 0U;
+        fds[i].real_fd = KERN_INVALID_ID;
+    }
+
+    for (uint32_t round = 0;
+         (max_requests == 0U || round < max_requests) && err == KERN_OK;
+         round++) {
+        fs_msg_init(&msg, 0, 0);
+        err = sys_ep_recv(ep_cap, &msg, 1000);
+        if (err == KERN_ERR_TIMEOUT && max_requests == 0U) {
+            err = KERN_OK;
+            continue;
+        }
+        if (err != KERN_OK) {
+            break;
+        }
+
+        if (msg.magic != FS_MAGIC || !fs_opcode_valid(msg.opcode)) {
+            err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
+            continue;
+        }
+
+        if (msg.opcode == FS_OP_PING) {
+            err = fs_reply(ep_cap, &msg, KERN_OK, 0);
+        } else if (msg.opcode == FS_OP_OPEN) {
+            if (!fs_path_valid(msg.path)) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
+            } else {
+                int real_fd = open(msg.path, msg.flags);
+                if (real_fd < 0) {
+                    err = fs_reply(ep_cap, &msg, real_fd, 0);
+                } else {
+                    int token = fs_fd_alloc(fds, real_fd);
+                    if (token < 0) {
+                        (void)close(real_fd);
+                        err = fs_reply(ep_cap, &msg, token, 0);
+                    } else {
+                        err = fs_reply(ep_cap, &msg, KERN_OK, token);
+                    }
+                }
+            }
+        } else if (msg.opcode == FS_OP_CLOSE) {
+            int real_fd = fs_fd_get(fds, msg.fd);
+            if (real_fd < 0) {
+                err = fs_reply(ep_cap, &msg, real_fd, 0);
+            } else {
+                int close_err = close(real_fd);
+                if (close_err == KERN_OK) {
+                    fs_fd_free(fds, msg.fd);
+                }
+                err = fs_reply(ep_cap, &msg, close_err, 0);
+            }
+        } else if (msg.opcode == FS_OP_READ) {
+            int real_fd = fs_fd_get(fds, msg.fd);
+            if (real_fd < 0 || msg.length > FS_PAYLOAD_MAX) {
+                err = fs_reply(ep_cap, &msg,
+                               real_fd < 0 ? real_fd : KERN_ERR_PARAM, 0);
+            } else {
+                int n = read(real_fd, msg.payload, (int)msg.length);
+                err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
+                               n < 0 ? 0 : n);
+            }
+        } else if (msg.opcode == FS_OP_WRITE) {
+            int real_fd = fs_fd_get(fds, msg.fd);
+            if (real_fd < 0 || msg.length > FS_PAYLOAD_MAX) {
+                err = fs_reply(ep_cap, &msg,
+                               real_fd < 0 ? real_fd : KERN_ERR_PARAM, 0);
+            } else {
+                int n = write(real_fd, msg.payload, (int)msg.length);
+                err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
+                               n < 0 ? 0 : n);
+            }
+        } else if (msg.opcode == FS_OP_LSEEK) {
+            int real_fd = fs_fd_get(fds, msg.fd);
+            if (real_fd < 0) {
+                err = fs_reply(ep_cap, &msg, real_fd, 0);
+            } else {
+                int pos = lseek(real_fd, msg.offset, msg.flags);
+                err = fs_reply(ep_cap, &msg, pos < 0 ? pos : KERN_OK,
+                               pos < 0 ? 0 : pos);
+            }
+        } else if (msg.opcode == FS_OP_READDIR) {
+            int real_fd = fs_fd_get(fds, msg.fd);
+            if (real_fd < 0) {
+                err = fs_reply(ep_cap, &msg, real_fd, 0);
+            } else {
+                dirent_t entry;
+                int readdir_err = readdir(real_fd, &entry);
+                if (readdir_err != KERN_OK) {
+                    err = fs_reply(ep_cap, &msg, readdir_err, 0);
+                } else {
+                    msg.length = entry.type;
+                    fs_copy_dirent_name(msg.path, entry.name);
+                    err = fs_reply(ep_cap, &msg, KERN_OK,
+                                   (int)entry.ino);
+                }
+            }
+        } else if (msg.opcode == FS_OP_UNLINK) {
+            if (!fs_path_valid(msg.path)) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
+            } else {
+                int unlink_err = unlink(msg.path);
+                err = fs_reply(ep_cap, &msg, unlink_err, 0);
+            }
+        } else if (msg.opcode == FS_OP_MKDIR) {
+            if (!fs_path_valid(msg.path)) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
+            } else {
+                int mkdir_err = mkdir(msg.path);
+                err = fs_reply(ep_cap, &msg, mkdir_err, 0);
+            }
+        } else if (msg.opcode == FS_OP_STAT) {
+            if (!fs_path_valid(msg.path)) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
+            } else {
+                vfs_stat_t st;
+                int stat_err = stat(msg.path, &st);
+                msg.flags = st.type;
+                msg.length = st.size;
+                err = fs_reply(ep_cap, &msg, stat_err,
+                               stat_err == KERN_OK ? (int)st.ino : 0);
+            }
+        } else {
+            err = fs_reply(ep_cap, &msg, KERN_ERR_STATE, 0);
+        }
+    }
+
+    for (uint32_t i = 0; i < FS_FD_MAX; i++) {
+        if (fds[i].in_use) {
+            (void)close(fds[i].real_fd);
+            fds[i].in_use = 0U;
+        }
+    }
+    return err;
+}
+
+#endif /* VFS_ENABLE && CAP_ENABLE */
