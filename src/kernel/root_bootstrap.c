@@ -87,16 +87,6 @@ static void root_bootstrap_cleanup_all_service_endpoints(void) {
     }
 }
 
-static kern_err_t root_bootstrap_set_initial_arg(tcb_t *task, void *arg) {
-    if (task == NULL || task->state != TASK_STATE_CREATED || task->sp == NULL) {
-        return KERN_ERR_STATE;
-    }
-
-    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)task->sp + 32U);
-    *stacked_r0 = (uint32_t)arg;
-    return KERN_OK;
-}
-
 kern_err_t root_bootstrap_prepare(tcb_t *root_task) {
     if (root_task == NULL || root_task->id < 0) {
         return KERN_ERR_PARAM;
@@ -325,8 +315,8 @@ kern_err_t root_bootstrap_create_service_endpoint(cap_id_t service_task_cap,
         return KERN_ERR_RESOURCE;
     }
 
-    kern_err_t err = root_bootstrap_set_initial_arg(service_task,
-                                                    (void *)(uintptr_t)service_cap);
+    kern_err_t err = task_set_initial_arg(service_id,
+                                          (void *)(uintptr_t)service_cap);
     if (err != KERN_OK) {
         cap_delete(service_cap);
         cap_delete(root_cap);

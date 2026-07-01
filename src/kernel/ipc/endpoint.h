@@ -17,6 +17,7 @@ void endpoint_init(void);
 ep_id_t    endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pending);
 kern_err_t endpoint_delete(ep_id_t ep_id);
 int        endpoint_exists(ep_id_t ep_id);
+uint16_t   endpoint_msg_size(ep_id_t ep_id);
 kern_err_t endpoint_send(ep_id_t ep_id, void *msg, uint32_t timeout);
 kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg);
 kern_err_t endpoint_send_syscall(ep_id_t ep_id,

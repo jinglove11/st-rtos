@@ -323,6 +323,14 @@ ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pendin
     return id;
 }
 
+uint16_t endpoint_msg_size(ep_id_t ep_id) {
+    uint32_t crit = hal_irq_save();
+    endpoint_t *ep = ep_get(ep_id);
+    uint16_t size = ep != NULL ? ep->msg_size : 0U;
+    hal_irq_restore(crit);
+    return size;
+}
+
 kern_err_t endpoint_delete(ep_id_t ep_id) {
     uint32_t crit = hal_irq_save();
 

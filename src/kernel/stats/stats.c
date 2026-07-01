@@ -22,7 +22,7 @@ static uint32_t subsys_counters[STATS_SUBSYS_MAX][STATS_COUNTER_MAX];
  * 外部引用
  *============================================================================*/
 
-extern uint32_t task_get_used_bitmap(void);
+extern uint64_t task_get_used_bitmap(void);
 /*============================================================================
  * 初始化
  *============================================================================*/
@@ -68,9 +68,9 @@ void stats_tick_update(void) {
     }
     last_stat_tick = tick;
 
-    uint32_t bitmap = task_get_used_bitmap();
+    uint64_t bitmap = task_get_used_bitmap();
     for (int i = 0; i < KERNEL_MAX_TASKS; i++) {
-        if (bitmap & (1U << i)) {
+        if (bitmap & (1ULL << i)) {
             tcb_t *tcb = task_get_tcb((task_id_t)i);
             if (tcb) {
                 tcb->cpu_usage = tcb->total_ticks * 10000 / elapsed;

@@ -87,24 +87,42 @@ static void irq_test_set_arg(task_id_t task_id, uint32_t arg) {
 static void test_isr_pool(void) {
     test_section("Test 1: ISR Pool Management");
 
-    /* 1a: 注册最大数量 ISR */
+    /*
+     * Registering an IRQ also enables it in the NVIC.  Keep PRIMASK asserted
+     * while filling the synthetic pool: on RP2350 the numeric range includes
+     * live UART/timer sources whose status this test handler does not clear.
+     */
+    uint32_t outer_crit = hal_enter_critical();
+    int16_t registered[IRQ_MAX_USER];
     int count = 0;
-    for (int i = 0; i < IRQ_MAX_USER; i++) {
+    int limit = IRQ_MAX_USER;
+    if (limit > (int)BOARD_IRQ_COUNT) {
+        limit = (int)BOARD_IRQ_COUNT;
+    }
+    for (int i = 0; i < limit; i++) {
         kern_err_t err = irq_register((int16_t)i, test_handler_stub, 8);
         if (err == KERN_OK) {
-            count++;
+            registered[count++] = (int16_t)i;
         }
-        if (count >= IRQ_MAX_USER) break;
     }
 
-    /* 1b: 满池再注册应失败 (IRQ 0 已占用, 返回 BUSY) */
-    kern_err_t err = irq_register(0, test_handler_stub, 8);
+    int16_t extra_irq = (count < (int)BOARD_IRQ_COUNT) ?
+                        (int16_t)count : registered[0];
+    kern_err_t err = irq_register(extra_irq, test_handler_stub, 8);
     TEST_ASSERT(err != KERN_OK, "Pool full: register fails");
 
-    /* 1c: 注销后可以重新注册 */
-    err = irq_unregister(0);
-    TEST_ASSERT_EQ(KERN_OK, err, "Unregister IRQ 0");
+    if (count > 0) {
+        int16_t reusable_irq = registered[0];
+        err = irq_unregister(reusable_irq);
+        TEST_ASSERT_EQ(KERN_OK, err, "Unregister IRQ slot");
+        err = irq_register(reusable_irq, test_handler_stub, 8);
+        TEST_ASSERT_EQ(KERN_OK, err, "Released IRQ slot reusable");
+    }
 
+    for (int i = 0; i < count; i++) {
+        (void)irq_unregister(registered[i]);
+    }
+    hal_exit_critical(outer_crit);
 }
 
 /*============================================================================
@@ -171,7 +189,12 @@ static void test_bh_lifecycle(void) {
         ids[i] = bh_create(bh_test_handler, &bh_test_counter);
         if (ids[i] >= 0) created++;
     }
-    TEST_ASSERT_EQ(IRQ_BH_MAX, created, "All BH slots creatable");
+    int expected_available = IRQ_BH_MAX;
+#if FAULT_ENDPOINT
+    expected_available--;
+#endif
+    TEST_ASSERT_EQ(expected_available, created,
+                   "All non-reserved BH slots creatable");
 
     /* 清理 */
     for (int i = 0; i < created; i++) {

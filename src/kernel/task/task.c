@@ -63,7 +63,7 @@ tcb_t task_pool[KERNEL_MAX_TASKS];
  */
 static void *exit_retain[KERNEL_MAX_TASKS];
 static kern_err_t exit_retain_result[KERNEL_MAX_TASKS];
-static uint32_t exit_retain_bitmap = 0;
+static uint64_t exit_retain_bitmap = 0;
 
 /* 任务栈池 */
 static uint8_t task_stacks[KERNEL_MAX_TASKS][KERNEL_TASK_STACK_SIZE]
@@ -86,7 +86,9 @@ static uint8_t idle_stack[IDLE_STACK_SIZE_ACTUAL]
 static tcb_t idle_task;
 
 /* 任务使用位图 */
-uint32_t task_used_bitmap = 0;
+uint64_t task_used_bitmap = 0;
+
+typedef char task_bitmap_covers_config[(KERNEL_MAX_TASKS <= 64) ? 1 : -1];
 
 /*============================================================================
  * 内部函数
@@ -131,7 +133,7 @@ static void idle_task_func(void *arg) {
 // 查找空闲任务 ID。调用者负责在提交 bitmap 前持有临界区。
 static task_id_t find_free_task_id(void) {
     for (int i = 0; i < KERNEL_MAX_TASKS; i++) {
-        if (!(task_used_bitmap & (1U << i))) {
+        if (!(task_used_bitmap & (1ULL << i))) {
             return (task_id_t)i;
         }
     }
@@ -140,20 +142,20 @@ static task_id_t find_free_task_id(void) {
 
 static void mark_task_id_used(task_id_t id) {
     if (id >= 0 && id < KERNEL_MAX_TASKS) {
-        task_used_bitmap |= (1U << id);
+        task_used_bitmap |= (1ULL << id);
     }
 }
 
 // 释放任务 ID
 static void free_task_id(task_id_t id) {
     if (id >= 0 && id < KERNEL_MAX_TASKS) {
-        task_used_bitmap &= ~(1U << id);
+        task_used_bitmap &= ~(1ULL << id);
     }
 }
 
 static int task_id_is_used(task_id_t id) {
     return (id >= 0 && id < KERNEL_MAX_TASKS &&
-            (task_used_bitmap & (1U << id)) != 0);
+            (task_used_bitmap & (1ULL << id)) != 0);
 }
 
 static void task_wake_joiners(tcb_t *tcb, kern_err_t result) {
@@ -176,7 +178,7 @@ static void task_record_exit(tcb_t *tcb, void *retval, kern_err_t result) {
     tcb->exit_value = retval;
     exit_retain[tcb->id] = retval;
     exit_retain_result[tcb->id] = result;
-    exit_retain_bitmap |= (1U << tcb->id);
+    exit_retain_bitmap |= (1ULL << tcb->id);
 }
 
 static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
@@ -380,7 +382,7 @@ task_id_t task_create(const char   *name,
     /* 清除保留表条目 (ID 可能被复用) */
     exit_retain[id] = NULL;
     exit_retain_result[id] = KERN_OK;
-    exit_retain_bitmap &= ~(1U << id);
+    exit_retain_bitmap &= ~(1ULL << id);
 
     tcb_t *tcb = &task_pool[id];
 
@@ -398,7 +400,7 @@ task_id_t task_create(const char   *name,
         tcb->name[KERN_TASK_NAME_LEN - 1] = '\0';
     } else {
         strcpy(tcb->name, "task");
-        char num[12];
+        char num[12] = {0};
         int_to_str(id, num);
         uint32_t pos = 4U;
         uint32_t i = 0U;
@@ -436,6 +438,32 @@ task_id_t task_create(const char   *name,
     hal_exit_critical(crit);
 
     return id;
+}
+
+kern_err_t task_set_initial_arg(task_id_t task_id, void *arg) {
+    if (task_id < 0 || task_id >= KERNEL_MAX_TASKS) {
+        return KERN_ERR_PARAM;
+    }
+
+    uint32_t crit = hal_enter_critical();
+    if (!task_id_is_used(task_id)) {
+        hal_exit_critical(crit);
+        return KERN_ERR_NOEXIST;
+    }
+
+    tcb_t *tcb = &task_pool[task_id];
+    if (tcb->state != TASK_STATE_CREATED || tcb->stack_base == NULL ||
+        tcb->stack_size < 32U) {
+        hal_exit_critical(crit);
+        return KERN_ERR_STATE;
+    }
+
+    /* R0 is the lowest word of the Cortex-M hardware exception frame. */
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->stack_base +
+                                        tcb->stack_size - 32U);
+    *stacked_r0 = (uint32_t)(uintptr_t)arg;
+    hal_exit_critical(crit);
+    return KERN_OK;
 }
 
 kern_err_t task_start(task_id_t task_id) {
@@ -590,9 +618,9 @@ kern_err_t task_delete(task_id_t task_id) {
     uint32_t crit = hal_enter_critical();
 
     if (!task_id_is_used(task_id)) {
-        if (exit_retain_bitmap & (1U << task_id)) {
+        if (exit_retain_bitmap & (1ULL << task_id)) {
             exit_retain_result[task_id] = KERN_OK;
-            exit_retain_bitmap &= ~(1U << task_id);
+            exit_retain_bitmap &= ~(1ULL << task_id);
             exit_retain[task_id] = NULL;
             hal_exit_critical(crit);
             return KERN_OK;
@@ -621,7 +649,7 @@ kern_err_t task_delete(task_id_t task_id) {
     if (tcb->state != TASK_STATE_TERMINATED) {
         task_cleanup_resources(tcb, KERN_ERR_NOEXIST);
     } else if (task_id >= 0 && task_id < KERNEL_MAX_TASKS) {
-        exit_retain_bitmap &= ~(1U << task_id);
+        exit_retain_bitmap &= ~(1ULL << task_id);
         exit_retain[task_id] = NULL;
         exit_retain_result[task_id] = KERN_OK;
     }
@@ -649,7 +677,7 @@ tcb_t *task_get_tcb(task_id_t task_id) {
         return NULL;
     }
 
-    if ((task_used_bitmap & (1U << task_id)) == 0) {
+    if ((task_used_bitmap & (1ULL << task_id)) == 0) {
         return NULL;
     }
 
@@ -665,7 +693,7 @@ tcb_t *task_get_tcb(task_id_t task_id) {
 task_id_t task_get_next(task_id_t task_id) {
     int start = (task_id < 0) ? 0 : task_id + 1;
     for (int i = start; i < KERNEL_MAX_TASKS; i++) {
-        if (task_used_bitmap & (1U << i)) {
+        if (task_used_bitmap & (1ULL << i)) {
             return (task_id_t)i;
         }
     }
@@ -746,10 +774,10 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
         return KERN_ERR_PARAM;
 
     if (!task_id_is_used(task_id)) {
-        if (exit_retain_bitmap & (1U << task_id)) {
+        if (exit_retain_bitmap & (1ULL << task_id)) {
             if (retval) *retval = exit_retain[task_id];
             kern_err_t result = exit_retain_result[task_id];
-            exit_retain_bitmap &= ~(1U << task_id);
+            exit_retain_bitmap &= ~(1ULL << task_id);
             exit_retain[task_id] = NULL;
             exit_retain_result[task_id] = KERN_OK;
             return result;
@@ -767,10 +795,10 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     /* 已终止 — 直接取 retval */
     if (tcb->state == TASK_STATE_TERMINATED) {
         if (retval) *retval = tcb->exit_value;
-        kern_err_t result = (exit_retain_bitmap & (1U << task_id))
+        kern_err_t result = (exit_retain_bitmap & (1ULL << task_id))
                             ? exit_retain_result[task_id] : KERN_OK;
         /* 清除保留表条目 */
-        exit_retain_bitmap &= ~(1U << task_id);
+        exit_retain_bitmap &= ~(1ULL << task_id);
         exit_retain[task_id] = NULL;
         exit_retain_result[task_id] = KERN_OK;
         return result;
@@ -785,13 +813,13 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     if (!task_id_is_used(task_id)) {
         kern_err_t result = KERN_OK;
         if (retval) {
-            *retval = (exit_retain_bitmap & (1U << task_id))
+            *retval = (exit_retain_bitmap & (1ULL << task_id))
                       ? exit_retain[task_id] : NULL;
         }
-        if (exit_retain_bitmap & (1U << task_id)) {
+        if (exit_retain_bitmap & (1ULL << task_id)) {
             result = exit_retain_result[task_id];
         }
-        exit_retain_bitmap &= ~(1U << task_id);
+        exit_retain_bitmap &= ~(1ULL << task_id);
         exit_retain[task_id] = NULL;
         exit_retain_result[task_id] = KERN_OK;
         return result;
@@ -806,12 +834,12 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
 
     if (err == KERN_OK) {
         kern_err_t result = KERN_OK;
-        if (exit_retain_bitmap & (1U << task_id)) {
+        if (exit_retain_bitmap & (1ULL << task_id)) {
             result = exit_retain_result[task_id];
             if (retval) {
                 *retval = exit_retain[task_id];
             }
-            exit_retain_bitmap &= ~(1U << task_id);
+            exit_retain_bitmap &= ~(1ULL << task_id);
             exit_retain[task_id] = NULL;
             exit_retain_result[task_id] = KERN_OK;
             return result;
@@ -839,7 +867,7 @@ tcb_t *task_get_idle(void) {
     return &idle_task;
 }
 
-uint32_t task_get_used_bitmap(void) {
+uint64_t task_get_used_bitmap(void) {
     return task_used_bitmap;
 }
 
@@ -986,7 +1014,7 @@ void task_terminate(tcb_t *tcb) {
 
 void task_check_stack_overflow(void) {
     for (task_id_t id = 0; id < KERNEL_MAX_TASKS; id++) {
-        if (!(task_used_bitmap & (1U << id))) continue;
+        if (!(task_used_bitmap & (1ULL << id))) continue;
 
         tcb_t *tcb = &task_pool[id];
         if (tcb->state == TASK_STATE_TERMINATED) continue;

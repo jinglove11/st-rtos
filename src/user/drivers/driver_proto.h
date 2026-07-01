@@ -57,6 +57,9 @@ typedef struct {
     uint32_t length;
     uint32_t command;
     uint8_t payload[DRV_PAYLOAD_MAX];
+#if KERN_EP_MSG_SIZE > 60
+    uint8_t reserved[KERN_EP_MSG_SIZE - 60U];
+#endif
 } drv_msg_t;
 
 int driver_opcode_valid(uint16_t opcode);

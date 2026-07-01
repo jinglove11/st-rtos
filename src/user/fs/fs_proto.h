@@ -38,6 +38,9 @@ typedef struct {
     int32_t offset;
     char path[FS_PATH_MAX];
     uint8_t payload[FS_PAYLOAD_MAX];
+#if KERN_EP_MSG_SIZE > 68
+    uint8_t reserved[KERN_EP_MSG_SIZE - 68U];
+#endif
 } fs_msg_t;
 
 int fs_opcode_valid(uint16_t opcode);

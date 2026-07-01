@@ -79,13 +79,13 @@ static void test_cpu_usage_sum(void) {
      * 在停止忙等任务之前读取 cpu_usage
      * (task_exit 后 TCB 会被 reclaim 清零，cpu_usage 丢失)
      */
-    extern uint32_t task_get_used_bitmap(void);
+    extern uint64_t task_get_used_bitmap(void);
     extern tcb_t task_pool[];
-    uint32_t bitmap = task_get_used_bitmap();
+    uint64_t bitmap = task_get_used_bitmap();
     uint32_t sum = 0;
 
     for (int i = 0; i < KERNEL_MAX_TASKS; i++) {
-        if (bitmap & (1U << i)) {
+        if (bitmap & (1ULL << i)) {
             sum += task_pool[i].cpu_usage;
         }
     }

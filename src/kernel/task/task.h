@@ -33,6 +33,11 @@ task_id_t task_create(const char   *name,
                       uint32_t     stack_size);
 
 /**
+ * @brief Update the initial R0 argument of a task that has not started
+ */
+kern_err_t task_set_initial_arg(task_id_t task_id, void *arg);
+
+/**
  * @brief 启动任务
  * @param task_id 任务 ID
  * @return 操作结果
@@ -178,7 +183,7 @@ task_state_t task_get_state(task_id_t task_id);
  */
 tcb_t *task_get_idle(void);
 
-uint32_t task_get_used_bitmap(void);
+uint64_t task_get_used_bitmap(void);
 
 /**
  * @brief 回收已过期的终止任务 (由 tick handler 调用)

@@ -254,6 +254,70 @@ static void test_terminate_join_result(void) {
 }
 
 /*============================================================================
+ * Test 10: task bitmap covers IDs above 31
+ *============================================================================*/
+
+static void test_task_bitmap_high_half(void) {
+    test_section("Test 10: 64-bit task allocation bitmap");
+
+#if KERNEL_MAX_TASKS > 32
+    task_id_t ids[KERNEL_MAX_TASKS];
+    int created = 0;
+    task_id_t high_id = KERN_INVALID_ID;
+
+    while (created < KERNEL_MAX_TASKS) {
+        task_id_t id = task_create("bm_hi", syscall_test_task,
+                                   NULL, 10, 512);
+        if (id < 0) {
+            break;
+        }
+        ids[created++] = id;
+        if (id >= 32) {
+            high_id = id;
+            break;
+        }
+    }
+
+    TEST_ASSERT(high_id >= 32, "task allocator reaches ID 32 or above");
+    if (high_id >= 32) {
+        uint64_t bitmap = task_get_used_bitmap();
+        TEST_ASSERT((bitmap & (1ULL << high_id)) != 0,
+                    "high task ID is represented in allocation bitmap");
+    }
+
+    for (int i = 0; i < created; i++) {
+        (void)task_delete(ids[i]);
+    }
+#else
+    test_pass("32-bit task configuration needs no high-half bitmap");
+#endif
+}
+
+static void test_initial_arg_update(void) {
+    test_section("Test 11: update initial task argument");
+
+    task_id_t tid = task_create_user("arg_update", syscall_test_task,
+                                     NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "initial-argument task created");
+    if (tid < 0) {
+        return;
+    }
+
+    void *expected = (void *)(uintptr_t)0x1234U;
+    kern_err_t err = task_set_initial_arg(tid, expected);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "created task initial argument updated");
+
+    tcb_t *tcb = task_get_tcb(tid);
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->stack_base +
+                                        tcb->stack_size - 32U);
+    TEST_ASSERT_EQ((uintptr_t)expected, (uintptr_t)*stacked_r0,
+                   "updated argument stored in hardware R0 frame");
+
+    (void)task_delete(tid);
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -267,6 +331,8 @@ static void test_task_module(void) {
     test_exit_no_double_free();
     test_delete_blocked_task();
     test_terminate_join_result();
+    test_task_bitmap_high_half();
+    test_initial_arg_update();
 }
 
 TEST_MODULE_REGISTER(task, test_task_module);
