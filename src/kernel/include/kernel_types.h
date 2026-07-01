@@ -50,6 +50,7 @@ typedef int16_t ep_id_t;         // Endpoint ID
 typedef int16_t ch_id_t;         // Channel ID
 
 #define KERN_INVALID_ID      (-1)
+#define KERN_WAIT_FOREVER    UINT32_MAX
 
 /*============================================================================
  * 任务状态

@@ -16,6 +16,9 @@
 #include "shell.h"
 #include "board.h"
 #include <string.h>
+#if INIT_PROCESS && CAP_ENABLE
+#include "root_bootstrap.h"
+#endif
 
 #define TEST_UART BOARD_DEFAULT_UART
 
@@ -273,6 +276,23 @@ void test_run_all_modules(void) {
 static void test_runner_task(void *arg) {
     (void)arg;
     test_run_all_modules();
+
+#if INIT_PROCESS && CAP_ENABLE
+    /* Phase 2 §2.3: after the suite passes (so init/supervisor never disturb
+     * tests), launch the user-mode init process via the root bootstrap path.
+     * init registers restart recipes, spawns the supervisor, and exits. The
+     * shell still starts separately below — it is a privileged kernel task
+     * for now and cannot be a child of a user-mode init. */
+    {
+        extern void init_main(void *arg);
+        task_id_t init_tid = KERN_INVALID_ID;
+        kern_err_t err = root_bootstrap_create("init", init_main, NULL,
+                                               3, 1024, &init_tid);
+        if (err == KERN_OK && init_tid >= 0) {
+            (void)root_bootstrap_start();
+        }
+    }
+#endif
 
 #if SHELL_ENABLE
     shell_start();

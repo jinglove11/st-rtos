@@ -1405,7 +1405,22 @@ static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
     if (kern_fault_ep == KERN_INVALID_ID) {
         return KERN_ERR_STATE;
     }
+#if CAP_ENABLE
+    /* Hand the caller a CAP_READ capability over the fault endpoint, so it
+     * can pass it to sys_ep_recv (which requires a cap under CAP_ENABLE).
+     * Returning the raw ep id here would leave the supervisor spinning:
+     * sys_ep_recv's cap_resolve would reject the raw id on every call. */
+    tcb_t *cur = sched_get_current();
+    cap_id_t cap = cap_create_for(cur,
+                                  (void *)(uintptr_t)(kern_fault_ep + 1),
+                                  CAP_OBJ_ENDPOINT, CAP_READ);
+    if (cap < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+    return (int)cap;
+#else
     return (int)kern_fault_ep;
+#endif
 }
 #else
 static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,

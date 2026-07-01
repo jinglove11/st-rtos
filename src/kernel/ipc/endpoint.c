@@ -555,7 +555,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
             current->block_reason = BLOCK_REASON_EP_SEND;
             current->block_obj = ep;
             current->block_result = KERN_OK;
-            if (timeout > 0) {
+            if (timeout != KERN_WAIT_FOREVER) {
                 extern uint32_t sched_get_tick_count(void);
                 current->wake_tick = sched_get_tick_count() + timeout;
             } else {
@@ -601,7 +601,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
         }
         current->state = TASK_STATE_BLOCKED;
         current->block_result = KERN_OK;
-        if (timeout > 0) {
+        if (timeout != KERN_WAIT_FOREVER) {
             extern uint32_t sched_get_tick_count(void);
             current->wake_tick = sched_get_tick_count() + timeout;
         } else {
@@ -680,7 +680,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
     current->block_reason = BLOCK_REASON_EP_SEND;
     current->block_obj = ep;
     current->block_result = KERN_OK;
-    if (timeout > 0) {
+    if (timeout != KERN_WAIT_FOREVER) {
         extern uint32_t sched_get_tick_count(void);
         current->wake_tick = sched_get_tick_count() + timeout;
     } else {
@@ -836,7 +836,7 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
     current->block_reason = BLOCK_REASON_EP_SEND;
     current->block_obj = ep;
     current->block_result = KERN_OK;
-    if (timeout > 0) {
+    if (timeout != KERN_WAIT_FOREVER) {
         extern uint32_t sched_get_tick_count(void);
         current->wake_tick = sched_get_tick_count() + timeout;
     } else {
@@ -974,7 +974,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
         }
         current->state = TASK_STATE_BLOCKED;
         current->block_result = KERN_OK;
-        if (timeout > 0) {
+        if (timeout != KERN_WAIT_FOREVER) {
             extern uint32_t sched_get_tick_count(void);
             current->wake_tick = sched_get_tick_count() + timeout;
         } else {
@@ -1180,7 +1180,7 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
 
     current->state = TASK_STATE_BLOCKED;
     current->block_result = KERN_OK;
-    if (timeout > 0) {
+    if (timeout != KERN_WAIT_FOREVER) {
         extern uint32_t sched_get_tick_count(void);
         current->wake_tick = sched_get_tick_count() + timeout;
     } else {
@@ -1248,7 +1248,7 @@ kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
 
     current->state = TASK_STATE_BLOCKED;
     current->block_result = KERN_OK;
-    if (timeout > 0) {
+    if (timeout != KERN_WAIT_FOREVER) {
         extern uint32_t sched_get_tick_count(void);
         current->wake_tick = sched_get_tick_count() + timeout;
     } else {

@@ -270,56 +270,63 @@ uint32_t supervisor_service_count(void) {
 
 #if SUPERVISOR && FAULT_ENDPOINT
 
-static supervisor_recipe_t recipes[SUPERVISOR_SERVICE_MAX];
-static uint8_t recipe_used[SUPERVISOR_SERVICE_MAX];
+void supervisor_runtime_init(supervisor_runtime_t *runtime) {
+    if (runtime != NULL) {
+        memset(runtime, 0, sizeof(*runtime));
+    }
+}
 
-int supervisor_register_recipe(const char *name,
+int supervisor_register_recipe(supervisor_runtime_t *runtime,
+                               const char *name,
                                void (*entry)(void *),
                                void *arg,
                                uint8_t priority,
                                uint32_t stack_size,
                                uint8_t cap_rights_mask) {
-    if (name == NULL || entry == NULL) {
+    if (runtime == NULL || name == NULL || entry == NULL) {
         return KERN_ERR_PARAM;
     }
     /* Idempotent: refresh existing recipe. */
     for (uint32_t i = 0; i < SUPERVISOR_SERVICE_MAX; i++) {
-        if (recipe_used[i] && strcmp(recipes[i].name, name) == 0) {
-            recipes[i].entry = entry;
-            recipes[i].arg = arg;
-            recipes[i].priority = priority;
-            recipes[i].stack_size = stack_size;
-            recipes[i].cap_rights_mask = cap_rights_mask;
+        if (runtime->recipe_used[i] &&
+            strcmp(runtime->recipes[i].name, name) == 0) {
+            runtime->recipes[i].entry = entry;
+            runtime->recipes[i].arg = arg;
+            runtime->recipes[i].priority = priority;
+            runtime->recipes[i].stack_size = stack_size;
+            runtime->recipes[i].cap_rights_mask = cap_rights_mask;
             /* keep rate-limit state across re-registration */
             return KERN_OK;
         }
     }
     for (uint32_t i = 0; i < SUPERVISOR_SERVICE_MAX; i++) {
-        if (!recipe_used[i]) {
-            recipes[i].name = name;
-            recipes[i].entry = entry;
-            recipes[i].arg = arg;
-            recipes[i].priority = priority;
-            recipes[i].stack_size = stack_size;
-            recipes[i].cap_rights_mask = cap_rights_mask;
-            recipes[i].restart_count = 0;
-            recipes[i].last_restart_tick = 0;
-            recipes[i].backoff_ticks = SUPERVISOR_BACKOFF_BASE_MS;
-            recipes[i].killed = 0;
-            recipe_used[i] = 1;
+        if (!runtime->recipe_used[i]) {
+            runtime->recipes[i].name = name;
+            runtime->recipes[i].entry = entry;
+            runtime->recipes[i].arg = arg;
+            runtime->recipes[i].priority = priority;
+            runtime->recipes[i].stack_size = stack_size;
+            runtime->recipes[i].cap_rights_mask = cap_rights_mask;
+            runtime->recipes[i].restart_count = 0;
+            runtime->recipes[i].last_restart_tick = 0;
+            runtime->recipes[i].backoff_ticks = SUPERVISOR_BACKOFF_BASE_MS;
+            runtime->recipes[i].killed = 0;
+            runtime->recipe_used[i] = 1;
             return KERN_OK;
         }
     }
     return KERN_ERR_RESOURCE;
 }
 
-supervisor_recipe_t *supervisor_find_recipe(const char *name) {
-    if (name == NULL) {
+supervisor_recipe_t *supervisor_find_recipe(supervisor_runtime_t *runtime,
+                                            const char *name) {
+    if (runtime == NULL || name == NULL) {
         return NULL;
     }
     for (uint32_t i = 0; i < SUPERVISOR_SERVICE_MAX; i++) {
-        if (recipe_used[i] && strcmp(recipes[i].name, name) == 0) {
-            return &recipes[i];
+        if (runtime->recipe_used[i] &&
+            strcmp(runtime->recipes[i].name, name) == 0) {
+            return &runtime->recipes[i];
         }
     }
     return NULL;
@@ -327,13 +334,14 @@ supervisor_recipe_t *supervisor_find_recipe(const char *name) {
 
 /* Caller passes a fault_event_t* (typed as const void* so the header doesn't
  * need to pull fault_endpoint.h for the prototype). */
-int supervisor_handle_fault(const void *event) {
+int supervisor_handle_fault(supervisor_runtime_t *runtime,
+                            const void *event) {
     const fault_event_t *evt = (const fault_event_t *)event;
     if (evt == NULL) {
         return 0;
     }
 
-    supervisor_recipe_t *r = supervisor_find_recipe(evt->task_name);
+    supervisor_recipe_t *r = supervisor_find_recipe(runtime, evt->task_name);
     if (r == NULL) {
         /* Unknown task — not our responsibility. Log nothing (no printf path
          * yet); just record for the global fault counter via the registry. */
@@ -388,6 +396,10 @@ int supervisor_handle_fault(const void *event) {
 void supervisor_monitor_loop(void *arg) {
     (void)arg;
 
+    /* USER writable state must live in this task's mapped stack. */
+    supervisor_runtime_t runtime;
+    supervisor_runtime_init(&runtime);
+
     int ep = sys_fault_subscribe();
     if (ep < 0) {
         /* No fault endpoint — nothing to monitor. Sleep forever. */
@@ -398,13 +410,17 @@ void supervisor_monitor_loop(void *arg) {
 
     fault_event_t evt;
     while (1) {
-        /* Block up to 1s; -1 (forever) would also work but a bounded timeout
-         * keeps the loop responsive to recipe changes. */
-        int rc = sys_ep_recv(ep, &evt, 1000);
+        /* Block indefinitely for a fault event (-1 == forever). A bounded
+         * timeout caused the supervisor to wake every second and re-enter
+         * ep_recv, which exposed a path where the timed-out wake raced with
+         * the endpoint wait-queue bookkeeping and wedged the tick handler.
+         * The supervisor only needs to act on real fault events, so blocking
+         * forever is both correct and avoids that wake-thrash. */
+        int rc = sys_ep_recv(ep, &evt, (int)KERN_WAIT_FOREVER);
         if (rc < 0) {
-            continue;  /* timeout or transient error */
+            continue;  /* transient error — re-arm the wait */
         }
-        (void)supervisor_handle_fault(&evt);
+        (void)supervisor_handle_fault(&runtime, &evt);
     }
 }
 

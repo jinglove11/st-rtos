@@ -97,6 +97,16 @@ typedef struct {
     uint8_t  killed;           /* set once max restarts exceeded          */
 } supervisor_recipe_t;
 
+/** Mutable state owned by one supervisor task.
+ *
+ * USER tasks cannot access kernel/global SRAM. Keep this object in memory
+ * mapped to the supervisor, normally as a local in supervisor_monitor_loop().
+ */
+typedef struct {
+    supervisor_recipe_t recipes[SUPERVISOR_SERVICE_MAX];
+    uint8_t recipe_used[SUPERVISOR_SERVICE_MAX];
+} supervisor_runtime_t;
+
 /** Restart policy knobs. */
 #define SUPERVISOR_MAX_RESTARTS   3   /* permanent kill after this many   */
 #define SUPERVISOR_RATE_WINDOW_MS 5000 /* at most 1 restart per 5s window */
@@ -105,7 +115,10 @@ typedef struct {
 
 /** Register a restart recipe. Called at boot (e.g. from init.c) before the
  *  monitor loop starts. Returns 0 on success, <0 on table-full. */
-int supervisor_register_recipe(const char *name,
+void supervisor_runtime_init(supervisor_runtime_t *runtime);
+
+int supervisor_register_recipe(supervisor_runtime_t *runtime,
+                               const char *name,
                                void (*entry)(void *),
                                void *arg,
                                uint8_t priority,
@@ -113,7 +126,8 @@ int supervisor_register_recipe(const char *name,
                                uint8_t cap_rights_mask);
 
 /** Look up a recipe by service name (NULL-safe). */
-supervisor_recipe_t *supervisor_find_recipe(const char *name);
+supervisor_recipe_t *supervisor_find_recipe(supervisor_runtime_t *runtime,
+                                            const char *name);
 
 /** The monitor loop entry point — run as a user task:
  *    sys_fault_subscribe() then loop on sys_ep_recv(fault_event_t).
@@ -123,7 +137,8 @@ void supervisor_monitor_loop(void *arg);
 /** Decide restart-vs-kill for one fault event and act on it.
  *  Exposed for unit testing (inject synthetic fault_event_t without a real
  *  fault). Returns 1 if a restart was issued, 0 if killed/ignored. */
-int supervisor_handle_fault(const void *event);
+int supervisor_handle_fault(supervisor_runtime_t *runtime,
+                            const void *event);
 
 #endif /* SUPERVISOR && FAULT_ENDPOINT */
 

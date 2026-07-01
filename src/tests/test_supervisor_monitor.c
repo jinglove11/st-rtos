@@ -16,6 +16,9 @@
 #include "task.h"
 #include "scheduler.h"
 #include "kernel.h"
+#include "capability.h"
+#include "endpoint.h"
+#include "user_api.h"
 #include <string.h>
 
 #if FAULT_ENDPOINT && SUPERVISOR
@@ -53,13 +56,13 @@ static fault_event_t make_event(const char *name, uint32_t tick) {
  * Test 1: unknown task is ignored (no recipe registered)
  *============================================================================*/
 
-static void test_unknown_task_ignored(void) {
+static void test_unknown_task_ignored(supervisor_runtime_t *runtime) {
     test_section("Test 1: unknown task ignored");
     /* Ensure clean state: register then the lookup for an unrelated name. */
-    supervisor_register_recipe("known_svc", dummy_entry, NULL, 5, 1024,
+    supervisor_register_recipe(runtime, "known_svc", dummy_entry, NULL, 5, 1024,
                                0x1F /* CAP_FULL */);
     fault_event_t e = make_event("totally_unknown", 100);
-    int acted = supervisor_handle_fault(&e);
+    int acted = supervisor_handle_fault(runtime, &e);
     TEST_ASSERT_EQ(0, acted, "unknown task → no action");
 
     /* cleanup: the recipe table is static; reset by re-registering is not
@@ -71,10 +74,10 @@ static void test_unknown_task_ignored(void) {
  *         but the decision path runs (returns 0 from the failed restart).
  *============================================================================*/
 
-static void test_known_task_runs_decision(void) {
+static void test_known_task_runs_decision(supervisor_runtime_t *runtime) {
     test_section("Test 2: known task decision path");
 
-    supervisor_recipe_t *r = supervisor_find_recipe("known_svc");
+    supervisor_recipe_t *r = supervisor_find_recipe(runtime, "known_svc");
     TEST_ASSERT_NOT_NULL(r, "recipe registered");
     if (r == NULL) return;
 
@@ -85,7 +88,7 @@ static void test_known_task_runs_decision(void) {
     r->killed = 0;
 
     fault_event_t e = make_event("known_svc", 100);
-    int acted = supervisor_handle_fault(&e);
+    int acted = supervisor_handle_fault(runtime, &e);
     /* In kernel-mode test context sys_task_restart will fail (no usable cap),
      * so acted should be 0 — but the function must not crash and the recipe
      * must remain unkilled. */
@@ -97,10 +100,10 @@ static void test_known_task_runs_decision(void) {
  * Test 3: rate-limit window — a second fault within the window is ignored
  *============================================================================*/
 
-static void test_rate_limit_window(void) {
+static void test_rate_limit_window(supervisor_runtime_t *runtime) {
     test_section("Test 3: rate-limit window");
 
-    supervisor_recipe_t *r = supervisor_find_recipe("known_svc");
+    supervisor_recipe_t *r = supervisor_find_recipe(runtime, "known_svc");
     TEST_ASSERT_NOT_NULL(r, "recipe for rate-limit test");
     if (r == NULL) return;
     r->restart_count = 1;
@@ -110,7 +113,7 @@ static void test_rate_limit_window(void) {
 
     /* Fault 1ms after a restart at tick 1000 → within the 5000ms window. */
     fault_event_t early = make_event("known_svc", 1001);
-    int acted = supervisor_handle_fault(&early);
+    int acted = supervisor_handle_fault(runtime, &early);
     TEST_ASSERT_EQ(0, acted, "fault within rate window ignored");
     TEST_ASSERT(r->restart_count == 1, "restart_count unchanged within window");
 }
@@ -119,10 +122,10 @@ static void test_rate_limit_window(void) {
  * Test 4: permanent kill after MAX_RESTARTS exceeded
  *============================================================================*/
 
-static void test_permanent_kill_after_max(void) {
+static void test_permanent_kill_after_max(supervisor_runtime_t *runtime) {
     test_section("Test 4: permanent kill after max restarts");
 
-    supervisor_recipe_t *r = supervisor_find_recipe("known_svc");
+    supervisor_recipe_t *r = supervisor_find_recipe(runtime, "known_svc");
     TEST_ASSERT_NOT_NULL(r, "recipe for kill test");
     if (r == NULL) return;
     r->restart_count = SUPERVISOR_MAX_RESTARTS;
@@ -131,13 +134,13 @@ static void test_permanent_kill_after_max(void) {
     r->killed = 0;
 
     fault_event_t e = make_event("known_svc", 100000);
-    int acted = supervisor_handle_fault(&e);
+    int acted = supervisor_handle_fault(runtime, &e);
     TEST_ASSERT_EQ(0, acted, "fault over max returns no-restart");
     TEST_ASSERT(r->killed == 1, "service marked permanently killed");
 
     /* A subsequent fault on a killed service is ignored. */
     fault_event_t again = make_event("known_svc", 200000);
-    int acted2 = supervisor_handle_fault(&again);
+    int acted2 = supervisor_handle_fault(runtime, &again);
     TEST_ASSERT_EQ(0, acted2, "killed service ignores further faults");
 }
 
@@ -155,15 +158,134 @@ static void test_event_carries_task_name(void) {
 }
 
 /*============================================================================
+ * Test 6: real USER task keeps mutable supervisor state on its own stack
+ *============================================================================*/
+
+static void supervisor_user_runtime_task(void *arg) {
+    (void)arg;
+    supervisor_runtime_t runtime;
+    supervisor_runtime_init(&runtime);
+
+    int err = supervisor_register_recipe(&runtime, "user_svc", dummy_entry,
+                                         NULL, 5, 1024, CAP_FULL);
+    supervisor_recipe_t *recipe = supervisor_find_recipe(&runtime, "user_svc");
+    if (err != KERN_OK || recipe == NULL) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+    recipe->restart_count = 2;
+    if (recipe->restart_count != 2) {
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+    sys_task_exit((void *)(intptr_t)KERN_OK);
+}
+
+static void test_user_runtime_is_stack_accessible(void) {
+    test_section("Test 6: USER supervisor runtime is stack-accessible");
+
+    task_id_t tid = task_create_user("sup_user_rt",
+                                     supervisor_user_runtime_task,
+                                     NULL, 10, 2048);
+    TEST_ASSERT(tid >= 0, "USER supervisor runtime task created");
+    if (tid < 0) return;
+
+    kern_err_t err = task_start(tid);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "USER supervisor runtime task started");
+
+    void *retval = NULL;
+    err = task_join(tid, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "USER supervisor runtime task joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "USER supervisor reads and writes stack runtime");
+}
+
+/*============================================================================
+ * Test 7: USER endpoint receive honors KERN_WAIT_FOREVER
+ *============================================================================*/
+
+static void supervisor_forever_wait_task(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    uint8_t msg[KERN_EP_MSG_SIZE];
+    memset(msg, 0, sizeof(msg));
+
+    int err = sys_ep_recv(ep_cap, msg, (int)KERN_WAIT_FOREVER);
+    if (err == KERN_OK && msg[0] == 0x5AU) {
+        sys_task_exit((void *)(intptr_t)KERN_OK);
+    }
+    sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+}
+
+static void test_user_forever_wait(void) {
+    test_section("Test 7: USER endpoint wait-forever semantics");
+
+    ep_id_t ep = endpoint_create("sup_wait", KERN_EP_MSG_SIZE, 2);
+    TEST_ASSERT(ep >= 0, "wait-forever endpoint created");
+    if (ep < 0) return;
+
+    task_id_t tid = task_create_user("sup_wait",
+                                     supervisor_forever_wait_task,
+                                     NULL, 10, 1024);
+    TEST_ASSERT(tid >= 0, "wait-forever USER task created");
+    if (tid < 0) {
+        (void)endpoint_delete(ep);
+        return;
+    }
+
+    tcb_t *task = task_get_tcb(tid);
+    cap_id_t ep_cap = cap_create_for(task,
+                                     (void *)(uintptr_t)(ep + 1),
+                                     CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(ep_cap >= 0, "wait-forever USER task receives endpoint cap");
+    if (ep_cap < 0) {
+        (void)task_delete(tid);
+        (void)endpoint_delete(ep);
+        return;
+    }
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)task_set_initial_arg(tid,
+                                             (void *)(uintptr_t)ep_cap),
+                   "wait-forever endpoint cap installed as task argument");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)task_start(tid),
+                   "wait-forever USER task started");
+
+    task_delay(3);
+    TEST_ASSERT_EQ((int)TASK_STATE_BLOCKED, (int)task_get_state(tid),
+                   "wait-forever task remains blocked across ticks");
+
+    uint8_t msg[KERN_EP_MSG_SIZE];
+    memset(msg, 0, sizeof(msg));
+    msg[0] = 0x5AU;
+    TEST_ASSERT_EQ((int)KERN_OK, (int)endpoint_notify(ep, msg),
+                   "wait-forever task notified");
+
+    void *retval = NULL;
+    kern_err_t err = task_join(tid, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "wait-forever USER task joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                   "wait-forever USER task received notification");
+
+    if (endpoint_exists(ep)) {
+        (void)endpoint_delete(ep);
+    }
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
 static void test_supervisor_monitor_module(void) {
-    test_unknown_task_ignored();
-    test_known_task_runs_decision();
-    test_rate_limit_window();
-    test_permanent_kill_after_max();
+    supervisor_runtime_t runtime;
+    supervisor_runtime_init(&runtime);
+
+    test_unknown_task_ignored(&runtime);
+    test_known_task_runs_decision(&runtime);
+    test_rate_limit_window(&runtime);
+    test_permanent_kill_after_max(&runtime);
     test_event_carries_task_name();
+    test_user_runtime_is_stack_accessible();
+    test_user_forever_wait();
 }
 
 TEST_MODULE_REGISTER(supervisor_monitor, test_supervisor_monitor_module);
