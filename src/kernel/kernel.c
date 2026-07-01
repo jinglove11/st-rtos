@@ -23,6 +23,10 @@
 #if DRIVER_ENABLE
 #include "device.h"
 #endif
+#include "fault.h"
+#if FAULT_ENDPOINT
+#include "fault/fault_endpoint.h"
+#endif
 
 void kern_init(void) {
     hal_cpu_init();
@@ -46,6 +50,11 @@ void kern_init(void) {
 #endif
 #if DRIVER_ENABLE
     device_init();
+#endif
+#if FAULT_ENDPOINT
+    /* Requires IPC (for endpoint_create) + BH (for bh_create), both
+     * already initialized above. */
+    kern_fault_endpoint_init();
 #endif
 #if KERN_WATCHDOG_ENABLE
     hal_watchdog_init(KERN_WATCHDOG_TIMEOUT);
@@ -114,10 +123,10 @@ void kern_tick_handler(void) {
 
 uint32_t kern_get_task_count(void) {
     uint32_t count = 0;
-    uint32_t bitmap = task_get_used_bitmap();
+    uint64_t bitmap = task_get_used_bitmap();
 
     for (int i = 0; i < KERN_MAX_TASKS; i++) {
-        if (bitmap & (1U << i)) {
+        if (bitmap & (1ULL << i)) {
             count++;
         }
     }
@@ -126,10 +135,10 @@ uint32_t kern_get_task_count(void) {
 
 void kern_foreach_task(void (*callback)(tcb_t *tcb, void *arg), void *arg) {
     if (callback == NULL) return;
-    uint32_t bitmap = task_get_used_bitmap();
+    uint64_t bitmap = task_get_used_bitmap();
 
     for (int i = 0; i < KERN_MAX_TASKS; i++) {
-        if (bitmap & (1U << i)) {
+        if (bitmap & (1ULL << i)) {
             tcb_t *tcb = task_get_tcb((task_id_t)i);
             if (tcb) {
                 callback(tcb, arg);

@@ -32,6 +32,7 @@ typedef enum {
     KERN_ERR_NOTDIR     = -13,   // 不是目录
     KERN_ERR_ISDIR      = -14,   // 是目录 (不可作为文件操作)
     KERN_ERR_FAULT      = -15,   // 任务因 fault 终止
+    KERN_ERR_NOSYS      = -16,   // 功能未实现/未启用 (e.g. FAULT_ENDPOINT off)
 } kern_err_t;
 
 /*============================================================================

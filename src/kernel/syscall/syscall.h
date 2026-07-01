@@ -117,6 +117,8 @@
 #define SYSCALL_UNLINK           68
 #define SYSCALL_MKDIR            69
 #define SYSCALL_STAT             70
+#define SYSCALL_FAULT_SUBSCRIBE  71
+#define SYSCALL_TASK_RESTART     72
 
 /*============================================================================
  * Syscall 分发

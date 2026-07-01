@@ -6,6 +6,12 @@
 #include "supervisor.h"
 #include <string.h>
 
+#if SUPERVISOR && FAULT_ENDPOINT
+#include "kernel_config.h"
+#include "user_api.h"
+#include "fault_endpoint.h"
+#endif
+
 static supervisor_service_t supervisor_services[SUPERVISOR_SERVICE_MAX];
 static uint8_t supervisor_service_used[SUPERVISOR_SERVICE_MAX];
 
@@ -257,3 +263,149 @@ uint32_t supervisor_service_count(void) {
     }
     return count;
 }
+
+/*============================================================================
+ * Phase 2 §2.2 — fault-driven monitor loop + restart recipes
+ *============================================================================*/
+
+#if SUPERVISOR && FAULT_ENDPOINT
+
+static supervisor_recipe_t recipes[SUPERVISOR_SERVICE_MAX];
+static uint8_t recipe_used[SUPERVISOR_SERVICE_MAX];
+
+int supervisor_register_recipe(const char *name,
+                               void (*entry)(void *),
+                               void *arg,
+                               uint8_t priority,
+                               uint32_t stack_size,
+                               uint8_t cap_rights_mask) {
+    if (name == NULL || entry == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    /* Idempotent: refresh existing recipe. */
+    for (uint32_t i = 0; i < SUPERVISOR_SERVICE_MAX; i++) {
+        if (recipe_used[i] && strcmp(recipes[i].name, name) == 0) {
+            recipes[i].entry = entry;
+            recipes[i].arg = arg;
+            recipes[i].priority = priority;
+            recipes[i].stack_size = stack_size;
+            recipes[i].cap_rights_mask = cap_rights_mask;
+            /* keep rate-limit state across re-registration */
+            return KERN_OK;
+        }
+    }
+    for (uint32_t i = 0; i < SUPERVISOR_SERVICE_MAX; i++) {
+        if (!recipe_used[i]) {
+            recipes[i].name = name;
+            recipes[i].entry = entry;
+            recipes[i].arg = arg;
+            recipes[i].priority = priority;
+            recipes[i].stack_size = stack_size;
+            recipes[i].cap_rights_mask = cap_rights_mask;
+            recipes[i].restart_count = 0;
+            recipes[i].last_restart_tick = 0;
+            recipes[i].backoff_ticks = SUPERVISOR_BACKOFF_BASE_MS;
+            recipes[i].killed = 0;
+            recipe_used[i] = 1;
+            return KERN_OK;
+        }
+    }
+    return KERN_ERR_RESOURCE;
+}
+
+supervisor_recipe_t *supervisor_find_recipe(const char *name) {
+    if (name == NULL) {
+        return NULL;
+    }
+    for (uint32_t i = 0; i < SUPERVISOR_SERVICE_MAX; i++) {
+        if (recipe_used[i] && strcmp(recipes[i].name, name) == 0) {
+            return &recipes[i];
+        }
+    }
+    return NULL;
+}
+
+/* Caller passes a fault_event_t* (typed as const void* so the header doesn't
+ * need to pull fault_endpoint.h for the prototype). */
+int supervisor_handle_fault(const void *event) {
+    const fault_event_t *evt = (const fault_event_t *)event;
+    if (evt == NULL) {
+        return 0;
+    }
+
+    supervisor_recipe_t *r = supervisor_find_recipe(evt->task_name);
+    if (r == NULL) {
+        /* Unknown task — not our responsibility. Log nothing (no printf path
+         * yet); just record for the global fault counter via the registry. */
+        return 0;
+    }
+
+    /* Already permanently killed — ignore further faults. */
+    if (r->killed) {
+        return 0;
+    }
+
+    /* Rate limit: at most one restart per RATE_WINDOW_MS. If within the
+     * window, ignore (the task already faulted again too fast — let the
+     * backoff elapse). */
+    uint32_t now = evt->tick;
+    uint32_t elapsed = now - r->last_restart_tick;
+    if (r->restart_count > 0 && elapsed < SUPERVISOR_RATE_WINDOW_MS) {
+        return 0;
+    }
+
+    /* Max restarts exceeded → permanent kill. */
+    if (r->restart_count >= SUPERVISOR_MAX_RESTARTS) {
+        r->killed = 1;
+        return 0;
+    }
+
+    /* Honor exponential backoff before restarting. */
+    if (r->restart_count > 0 && elapsed < r->backoff_ticks) {
+        return 0;
+    }
+
+    /* Issue the restart via the §2.4 syscall (reduced cap, GRANT stripped). */
+    int rc = sys_task_restart(r->name, r->entry, r->arg,
+                              (int)r->priority, (int)r->stack_size,
+                              (int)r->cap_rights_mask);
+    if (rc < 0) {
+        /* Restart failed (resource exhaustion, etc.) — leave it; will retry
+         * on the next fault event. */
+        return 0;
+    }
+
+    r->restart_count++;
+    r->last_restart_tick = now;
+    /* Exponential backoff: double, capped. */
+    r->backoff_ticks <<= 1;
+    if (r->backoff_ticks > SUPERVISOR_BACKOFF_CAP_MS) {
+        r->backoff_ticks = SUPERVISOR_BACKOFF_CAP_MS;
+    }
+    return 1;
+}
+
+void supervisor_monitor_loop(void *arg) {
+    (void)arg;
+
+    int ep = sys_fault_subscribe();
+    if (ep < 0) {
+        /* No fault endpoint — nothing to monitor. Sleep forever. */
+        while (1) {
+            sys_task_delay(1000);
+        }
+    }
+
+    fault_event_t evt;
+    while (1) {
+        /* Block up to 1s; -1 (forever) would also work but a bounded timeout
+         * keeps the loop responsive to recipe changes. */
+        int rc = sys_ep_recv(ep, &evt, 1000);
+        if (rc < 0) {
+            continue;  /* timeout or transient error */
+        }
+        (void)supervisor_handle_fault(&evt);
+    }
+}
+
+#endif /* SUPERVISOR && FAULT_ENDPOINT */

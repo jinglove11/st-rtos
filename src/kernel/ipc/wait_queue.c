@@ -44,6 +44,7 @@ void wait_queue_add(wait_queue_t *wq, tcb_t *tcb) {
 
 static int wait_queue_remove_impl(wait_queue_t *wq, tcb_t *tcb,
                                   int warn_missing) {
+    (void)warn_missing;
     if (!wait_queue_contains(wq, tcb)) {
 #if KERN_DEBUG_ENABLE
         if (warn_missing) {

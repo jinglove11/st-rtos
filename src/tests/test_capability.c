@@ -8,6 +8,9 @@
 #include "ipc_transfer.h"
 #include "mem.h"
 #include <string.h>
+#if CAP_RESTART_SUBSET
+#include "cap_subset.h"
+#endif
 
 #if CAP_ENABLE && TEST_MODULE_CAP
 
@@ -883,6 +886,108 @@ static void test_mmio_cap_lifecycle(void) {
  * Module registration
  *============================================================================*/
 
+#if CAP_RESTART_SUBSET
+/*============================================================================
+ * Test 30: cap_derive_for_restart strips CAP_GRANT and installs into new task
+ *============================================================================*/
+
+static void test_cap_derive_for_restart_strips_grant(void) {
+    test_section("Test 30: derive_for_restart strips CAP_GRANT");
+
+    /* supervisor: a user task holding a CAP_FULL TASK cap */
+    task_id_t sup_id = task_create("caprst_sup", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(sup_id >= 0, "create supervisor task");
+    tcb_t *sup = task_get_tcb(sup_id);
+    TEST_ASSERT(sup != NULL, "get supervisor TCB");
+    if (sup == NULL) { (void)task_delete(sup_id); return; }
+    sup->attrs = TASK_ATTR_USER;
+
+    /* The supervisor's "self" TASK cap (mimics what sys_task_create grants). */
+    cap_id_t parent = cap_create_for(sup,
+                                     (void *)(uintptr_t)(sup_id + 1),
+                                     CAP_OBJ_TASK, CAP_FULL);
+    TEST_ASSERT(parent != ((cap_id_t)-1), "supervisor gets CAP_FULL TASK cap");
+
+    /* new task to receive the reduced-rights child */
+    task_id_t new_id = task_create("caprst_new", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(new_id >= 0, "create new task");
+    tcb_t *new_task = task_get_tcb(new_id);
+    TEST_ASSERT(new_task != NULL, "get new task TCB");
+    if (new_task == NULL) {
+        cap_delete(parent);
+        (void)task_delete(sup_id);
+        (void)task_delete(new_id);
+        return;
+    }
+    new_task->attrs = TASK_ATTR_USER;
+    uint32_t new_caps_before = new_task->capabilities;
+
+    /* Request CAP_FULL — CAP_GRANT must be stripped regardless. */
+    cap_id_t child = cap_derive_for_restart(sup, parent, new_task, CAP_FULL);
+    TEST_ASSERT(child != ((cap_id_t)-1), "derive_for_restart succeeds");
+    TEST_ASSERT(new_task->capabilities != new_caps_before,
+                "child installed into NEW task cspace");
+
+    /* The child's rights must be CAP_FULL & ~CAP_GRANT. */
+    uint8_t child_rights = 0;
+    kern_err_t err = cap_get_rights_for(new_task, child, &child_rights);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "child rights queryable");
+    TEST_ASSERT_EQ((int)(CAP_FULL & ~CAP_GRANT), (int)child_rights,
+                   "child rights = CAP_FULL minus CAP_GRANT");
+    TEST_ASSERT((child_rights & CAP_GRANT) == 0, "CAP_GRANT is stripped");
+
+    /* Supervisor must NOT have gained a cspace entry (install target = new). */
+    /* (supervisor already held parent; nothing new should appear for child.) */
+    void *sup_resolve = cap_lookup_for(sup, child, CAP_OBJ_TASK, CAP_READ);
+    TEST_ASSERT(sup_resolve == NULL,
+                "supervisor does NOT receive the child cap handle");
+
+    cap_delete(parent);
+    (void)task_delete(sup_id);
+    (void)task_delete(new_id);
+}
+
+/*============================================================================
+ * Test 31: derive_for_restart denied without CAP_GRANT on parent
+ *============================================================================*/
+
+static void test_cap_derive_for_restart_no_grant(void) {
+    test_section("Test 31: derive_for_restart denied without CAP_GRANT");
+
+    task_id_t sup_id = task_create("caprst_ng", cap_test_task, NULL, 10, 512);
+    tcb_t *sup = task_get_tcb(sup_id);
+    TEST_ASSERT(sup != NULL, "create supervisor for no-grant test");
+    if (sup == NULL) { (void)task_delete(sup_id); return; }
+    sup->attrs = TASK_ATTR_USER;
+
+    /* Parent with CAP_GRANT explicitly cleared. */
+    cap_id_t parent = cap_create_for(sup,
+                                     (void *)(uintptr_t)(sup_id + 1),
+                                     CAP_OBJ_TASK,
+                                     CAP_FULL & ~CAP_GRANT);
+    TEST_ASSERT(parent != ((cap_id_t)-1), "create no-grant parent");
+
+    task_id_t new_id = task_create("caprst_ng_new", cap_test_task, NULL, 10, 512);
+    tcb_t *new_task = task_get_tcb(new_id);
+    TEST_ASSERT(new_task != NULL, "create new task for no-grant test");
+    if (new_task == NULL) {
+        cap_delete(parent);
+        (void)task_delete(sup_id);
+        (void)task_delete(new_id);
+        return;
+    }
+    new_task->attrs = TASK_ATTR_USER;
+
+    cap_id_t child = cap_derive_for_restart(sup, parent, new_task, CAP_READ);
+    TEST_ASSERT(child == ((cap_id_t)-1),
+                "derive_for_restart denied without CAP_GRANT");
+
+    cap_delete(parent);
+    (void)task_delete(sup_id);
+    (void)task_delete(new_id);
+}
+#endif /* CAP_RESTART_SUBSET */
+
 static void test_capability_module(void) {
     test_cap_create_basic();
     test_cap_create_pool_full();
@@ -914,6 +1019,10 @@ static void test_capability_module(void) {
     test_cap_object_refcount();
     test_cap_cleanup_callback();
     test_mmio_cap_lifecycle();
+#if CAP_RESTART_SUBSET
+    test_cap_derive_for_restart_strips_grant();
+    test_cap_derive_for_restart_no_grant();
+#endif
 }
 
 TEST_MODULE_REGISTER(capability, test_capability_module);

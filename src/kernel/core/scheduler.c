@@ -51,13 +51,15 @@
 
 #if TRACE_ENABLE
 #include "trace.h"
+#endif
+#if KERN_TASK_STATS
 #include "stats.h"
 #endif
 
 /* 外部函数声明 */
 extern tcb_t *task_get_tcb(task_id_t task_id);
 extern task_id_t task_get_next(task_id_t task_id);
-extern uint32_t task_get_used_bitmap(void);
+extern uint64_t task_get_used_bitmap(void);
 
 #if KERN_DEBUG_ENABLE
 extern void kern_panic(const char *msg);
@@ -820,9 +822,9 @@ void sched_tick_handler(void) {
      * 遍历所有任务，检查是否有阻塞任务超时
      * 如果 wake_tick <= 当前滴答，则唤醒该任务
      */
-    uint32_t used_snapshot = task_get_used_bitmap();
+    uint64_t used_snapshot = task_get_used_bitmap();
     for (task_id_t id = 0; id < KERNEL_MAX_TASKS; id++) {
-        if ((used_snapshot & (1U << id)) == 0) {
+        if ((used_snapshot & (1ULL << id)) == 0) {
             continue;
         }
 

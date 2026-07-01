@@ -11,6 +11,9 @@
 #include "trace.h"
 #include "stats.h"
 #include "mpu.h"
+#if FAULT_ENDPOINT
+#include "fault_endpoint.h"
+#endif
 
 #if FAULT_ENABLE
 
@@ -231,8 +234,12 @@ void fault_handler_c(uint32_t fault_type, void *exc_frame, uint32_t exc_return) 
     exception_frame_t *frame = (exception_frame_t *)exc_frame;
     tcb_t *current = sched_get_current();
 
+#if TRACE_ENABLE
     trace_record(TRACE_FAULT, current ? (uint8_t)current->id : 0, (uint16_t)fault_type);
+#endif
+#if KERN_TASK_STATS
     stats_record_fault();
+#endif
 
     /* 填充 crash dump */
     crash_dump.fault_type = fault_type;
@@ -292,6 +299,23 @@ void fault_handler_c(uint32_t fault_type, void *exc_frame, uint32_t exc_return) 
     if (is_user_fault) {
         /* 用户任务 fault → 终止任务 */
         (void)task_terminate_with_result(current, KERN_ERR_FAULT);
+
+#if FAULT_ENDPOINT
+        /* Phase 2 S1: notify any supervisor listening on kern_fault_ep.
+         * Done AFTER task_terminate so the task slot is freed by the time
+         * the supervisor recv's and tries to inspect/restart. The BH
+         * drain happens in thread mode, so by then PendSV has cleaned up.
+         * current->name is still valid: task_terminate sets TERMINATED +
+         * cleans resources, but the TCB is only zeroed later by
+         * task_reclaim_expired. */
+        kern_fault_notify(fault_type,
+                          (uint32_t)current->id,
+                          current->name,
+                          frame ? frame->pc : 0,
+                          cfsr,
+                          crash_dump.mmfar,
+                          crash_dump.bfar);
+#endif
 
         /* 修改异常帧的 PC，使其指向 task_fault_exit */
         frame->pc = (uint32_t)(uintptr_t)task_fault_exit | 1U;

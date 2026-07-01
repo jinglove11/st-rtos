@@ -595,10 +595,11 @@ config SYSCALL_ENABLE
 config SYSCALL_TABLE_SIZE
     int "Syscall table size"
     depends on SYSCALL_ENABLE
-    default 71
+    default 73
     range 16 96
     help
-      系统调用分发表大小。
+      系统调用分发表大小。必须 ≥ 最高 syscall 编号 + 1
+      (当前 SYSCALL_TASK_RESTART=72，所以 default=73)。
 
 config MPU_REGION_COUNT
     int "MPU regions per task"

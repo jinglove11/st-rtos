@@ -78,7 +78,9 @@ jobs:
         run: |
           python3 scripts/verify_pico2w_build.py \
             --elf build/rp2350-pico-sdk/my-rtos-pico2w.elf \
-            --uf2 build/rp2350-pico-sdk/my-rtos-pico2w.uf2
+            --uf2 build/rp2350-pico-sdk/my-rtos-pico2w.uf2 \
+            --nm tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/arm-none-eabi-nm \
+            --picotool tools/picotool/picotool/picotool
 
       - name: Upload ELF + UF2 + map
         if: always()

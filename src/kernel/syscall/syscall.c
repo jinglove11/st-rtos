@@ -11,6 +11,9 @@
 #include "mqueue.h"
 #include "event.h"
 #include "endpoint.h"
+#if FAULT_ENDPOINT
+#include "fault_endpoint.h"
+#endif
 #include "channel.h"
 #include "timer.h"
 #include "irq.h"
@@ -26,6 +29,9 @@
 
 #if CAP_ENABLE
 #include "capability.h"
+#endif
+#if CAP_RESTART_SUBSET
+#include "cap_subset.h"
 #endif
 
 #if TRACE_ENABLE
@@ -541,25 +547,27 @@ static int sys_ep_send(uint32_t a1, uint32_t a2, uint32_t a3,
                                uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a4);U(a5);U(a6);
     uint8_t msg[KERN_EP_MSG_SIZE];
-
-    if (!user_access_ok((const void *)(uintptr_t)a2, KERN_EP_MSG_SIZE, USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-    kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
-                                         sizeof(msg));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return endpoint_send_syscall((ep_id_t)((uintptr_t)obj - 1),
+    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+#else
+    ep_id_t ep_id = (ep_id_t)a1;
+#endif
+    uint16_t msg_size = endpoint_msg_size(ep_id);
+    if (msg_size == 0U) return KERN_ERR_PARAM;
+    if (!user_access_ok((const void *)(uintptr_t)a2, msg_size,
+                        USER_ACCESS_READ)) {
+        return KERN_ERR_PARAM;
+    }
+    memset(msg, 0, sizeof(msg));
+    kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
+                                         msg_size);
+    if (copy_err != KERN_OK) return copy_err;
+    return endpoint_send_syscall(ep_id,
                                  msg,
                                  (void *)(uintptr_t)a2,
                                  a3);
-#else
-    return endpoint_send_syscall((ep_id_t)a1, msg, (void *)(uintptr_t)a2, a3);
-#endif
 }
 
 static int sys_ep_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
@@ -573,12 +581,18 @@ static int sys_ep_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
     if (a4 > IPC_CAPS_MAX) {
         return KERN_ERR_PARAM;
     }
-    if (!user_access_ok((const void *)(uintptr_t)a2, KERN_EP_MSG_SIZE,
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
+    if (!obj) return KERN_ERR_CAP;
+    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    uint16_t msg_size = endpoint_msg_size(ep_id);
+    if (msg_size == 0U) return KERN_ERR_PARAM;
+    if (!user_access_ok((const void *)(uintptr_t)a2, msg_size,
                         USER_ACCESS_READ)) {
         return KERN_ERR_PARAM;
     }
+    memset(msg, 0, sizeof(msg));
     kern_err_t copy_err = copy_from_user(msg, (const void *)(uintptr_t)a2,
-                                         sizeof(msg));
+                                         msg_size);
     if (copy_err != KERN_OK) {
         return copy_err;
     }
@@ -595,9 +609,7 @@ static int sys_ep_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
         }
     }
 
-    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
-    if (!obj) return KERN_ERR_CAP;
-    return endpoint_send_caps_syscall((ep_id_t)((uintptr_t)obj - 1),
+    return endpoint_send_caps_syscall(ep_id,
                                       msg,
                                       (void *)(uintptr_t)a2,
                                       xfers,
@@ -614,40 +626,40 @@ static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
     U(a4);U(a5);U(a6);
     uint8_t msg[KERN_EP_MSG_SIZE];
 
-    if (!user_access_ok((void *)(uintptr_t)a2, KERN_EP_MSG_SIZE, USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-
-    if (a3 != 0) {
-#if CAP_ENABLE
-        void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
-        if (!obj) return KERN_ERR_CAP;
-        return endpoint_recv_syscall((ep_id_t)((uintptr_t)obj - 1),
-                                     (void *)(uintptr_t)a2, a3);
-#else
-        return endpoint_recv_syscall((ep_id_t)a1, (void *)(uintptr_t)a2, a3);
-#endif
-    }
-
-    memset(msg, 0, sizeof(msg));
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    kern_err_t ret = endpoint_recv((ep_id_t)((uintptr_t)obj - 1), msg, a3);
+    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
 #else
-    kern_err_t ret = endpoint_recv((ep_id_t)a1, msg, a3);
+    ep_id_t ep_id = (ep_id_t)a1;
 #endif
+    uint16_t msg_size = endpoint_msg_size(ep_id);
+    if (msg_size == 0U) return KERN_ERR_PARAM;
+    if (!user_access_ok((void *)(uintptr_t)a2, msg_size,
+                        USER_ACCESS_WRITE)) return KERN_ERR_PARAM;
+
+    if (a3 != 0) {
+        return endpoint_recv_syscall(ep_id, (void *)(uintptr_t)a2, a3);
+    }
+
+    memset(msg, 0, sizeof(msg));
+    kern_err_t ret = endpoint_recv(ep_id, msg, a3);
     if (ret != KERN_OK) {
         return ret;
     }
-    return copy_to_user((void *)(uintptr_t)a2, msg, sizeof(msg));
+    return copy_to_user((void *)(uintptr_t)a2, msg, msg_size);
 }
 
 static int sys_ep_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a6);
 #if CAP_ENABLE
-    if (!user_access_ok((void *)(uintptr_t)a2, KERN_EP_MSG_SIZE,
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    uint16_t msg_size = endpoint_msg_size(ep_id);
+    if (msg_size == 0U) return KERN_ERR_PARAM;
+    if (!user_access_ok((void *)(uintptr_t)a2, msg_size,
                         USER_ACCESS_WRITE)) {
         return KERN_ERR_PARAM;
     }
@@ -661,9 +673,7 @@ static int sys_ep_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
         return KERN_ERR_PARAM;
     }
 
-    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
-    if (!obj) return KERN_ERR_CAP;
-    return endpoint_recv_caps_syscall((ep_id_t)((uintptr_t)obj - 1),
+    return endpoint_recv_caps_syscall(ep_id,
                                       (void *)(uintptr_t)a2,
                                       (cap_id_t *)(uintptr_t)a3,
                                       (uint8_t *)(uintptr_t)a4,
@@ -1372,6 +1382,159 @@ static int sys_stat(uint32_t a1, uint32_t a2, uint32_t a3,
 
 #endif /* VFS_ENABLE */
 
+/*============================================================================
+ * Phase 2 — fault endpoint subscription
+ *============================================================================*/
+
+#if FAULT_ENDPOINT
+extern ep_id_t kern_fault_ep;  /* defined in fault_endpoint.c */
+
+/**
+ * sys_fault_subscribe — let a user-mode supervisor learn the fault ep id.
+ *
+ * No args. Returns the ep_id (>= 0) on success, or:
+ *   KERN_ERR_NOSYS  — FAULT_ENDPOINT disabled at compile time
+ *   KERN_ERR_STATE  — fault endpoint not yet initialized
+ *
+ * Security note: any user task can call this today. Phase 2 S4 will gate
+ * behind a capability so only the designated supervisor can subscribe.
+ */
+static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
+                               uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    if (kern_fault_ep == KERN_INVALID_ID) {
+        return KERN_ERR_STATE;
+    }
+    return (int)kern_fault_ep;
+}
+#else
+static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
+                               uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
+}
+#endif /* FAULT_ENDPOINT */
+
+/*============================================================================
+ * Phase 2 §2.4 — task restart with capability subset
+ *============================================================================*/
+
+#if CAP_RESTART_SUBSET && FAULT_ENDPOINT
+
+/**
+ * sys_task_restart — atomically recreate a faulted task with a reduced cap.
+ *
+ * args: name(ptr), entry(ptr), arg(ptr), priority, stack_size, cap_rights_mask
+ *
+ * Flow:
+ *   1. create the new user task (task_create_user)
+ *   2. find a parent TASK cap in the CALLER's cspace that carries CAP_GRANT
+ *      (the supervisor's self-cap, granted at spawn time)
+ *   3. cap_derive_for_restart() to install a CAP_GRANT-stripped child cap
+ *      into the new task's cspace
+ *   4. start the new task; return its TASK cap to the supervisor
+ *
+ * If no parent cap with CAP_GRANT is held, the task is still created/started
+ * but receives NO caps (degraded, but not a panic). The caller can detect
+ * missing authority via the returned rights.
+ *
+ * Returns the new task's cap id (>=0) on success, or a negative kern_err_t.
+ */
+static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
+                            uint32_t a4, uint32_t a5, uint32_t a6) {
+    char name_buf[KERN_TASK_NAME_LEN];
+    task_func_t entry = (task_func_t)(uintptr_t)a2;
+    void *arg         = (void *)(uintptr_t)a3;
+    uint8_t priority  = (uint8_t)a4;
+    uint32_t stack_sz = a5;
+    uint8_t rights_mask = (uint8_t)a6;
+
+    if (!user_access_ok((const void *)(uintptr_t)a2, 1, USER_ACCESS_READ)) {
+        return KERN_ERR_PARAM;
+    }
+    kern_err_t copy_err = strncpy_from_user(name_buf,
+                                            (const char *)(uintptr_t)a1,
+                                            sizeof(name_buf));
+    if (copy_err != KERN_OK) {
+        return copy_err;
+    }
+
+    tcb_t *caller = sched_get_current();
+    if (caller == NULL || (caller->attrs & TASK_ATTR_USER) == 0) {
+        return KERN_ERR_PERM;
+    }
+
+#if MPU_ENABLE
+    task_id_t id = task_create_user(name_buf[0] ? name_buf : NULL,
+                                    entry, arg, priority, stack_sz);
+#else
+    task_id_t id = task_create(name_buf[0] ? name_buf : NULL,
+                               entry, arg, priority, stack_sz);
+#endif
+    if (id < 0) {
+        return id;
+    }
+
+    tcb_t *new_task = task_get_tcb(id);
+
+    /* Install a reduced-rights cap into the new task. We need a parent TASK
+     * cap held by the caller with CAP_GRANT. Walk the caller's cspace. */
+    int granted = 0;
+    if (caller != NULL && (caller->attrs & TASK_ATTR_USER) != 0) {
+        for (int i = 0; i < KERN_TASK_CAP_SLOTS; i++) {
+            uint32_t bit = (uint32_t)BIT(i);
+            if ((caller->capabilities & bit) == 0) {
+                continue;
+            }
+            cap_id_t cand = caller->cap_set[i];
+            uint8_t obj_type = 0;
+            uint8_t rights = 0;
+            if (cap_get_type_for(caller, cand, &obj_type) != KERN_OK ||
+                obj_type != CAP_OBJ_TASK) {
+                continue;
+            }
+            if (cap_get_rights_for(caller, cand, &rights) != KERN_OK ||
+                (rights & CAP_GRANT) == 0) {
+                continue;
+            }
+            /* Found a derive-capable parent. Install reduced cap into new task. */
+            cap_id_t child = cap_derive_for_restart(caller, cand,
+                                                    new_task, rights_mask);
+            if (child >= 0) {
+                granted = 1;
+            }
+            break;  /* first suitable parent wins */
+        }
+    }
+    (void)granted;  /* degraded mode (no cap) is non-fatal */
+
+    /* Mint a management TASK cap for the CALLER so it can start/manage the
+     * restarted task — mirrors sys_task_create's contract. */
+    cap_id_t mgr_cap = cap_create_for(caller,
+                                      (void *)(uintptr_t)(id + 1),
+                                      CAP_OBJ_TASK, CAP_FULL);
+    if (mgr_cap < 0) {
+        task_delete(id);
+        return KERN_ERR_RESOURCE;
+    }
+
+    kern_err_t start_err = task_start(id);
+    if (start_err != KERN_OK) {
+        cap_delete(mgr_cap);
+        task_delete(id);
+        return start_err;
+    }
+
+    return (int)mgr_cap;
+}
+#else
+static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
+                            uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
+}
+#endif /* CAP_RESTART_SUBSET && FAULT_ENDPOINT */
+
 #undef U
 #undef U1
 #undef U2
@@ -1460,6 +1623,8 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_MKDIR,         sys_mkdir,         1),
     SYSDEF(SYSCALL_STAT,          sys_stat,          2),
 #endif
+    SYSDEF(SYSCALL_FAULT_SUBSCRIBE, sys_fault_subscribe, 0),
+    SYSDEF(SYSCALL_TASK_RESTART,    sys_task_restart,    6),
 };
 
 /*============================================================================

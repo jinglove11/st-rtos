@@ -431,6 +431,7 @@ static inline int sys_shm_unmap(int shm_cap) {
 /*============================================================================
  * VFS 文件操作 — 用户态内联封装
  *============================================================================*/
+#if VFS_ENABLE
 
 static inline int open(const char *path, int flags) {
     return sys_call2(SYSCALL_OPEN, (int)(uintptr_t)path, flags);
@@ -471,6 +472,61 @@ static inline int mkdir(const char *path) {
 static inline int stat(const char *path, vfs_stat_t *st) {
     return sys_call2(SYSCALL_STAT, (int)(uintptr_t)path,
                      (int)(uintptr_t)st);
+}
+
+#endif /* VFS_ENABLE */
+
+/*============================================================================
+ * Phase 2 — fault endpoint subscription
+ *============================================================================*/
+
+/**
+ * sys_fault_subscribe — return the kernel fault endpoint id.
+ *
+ * On success, returns ep_id (>= 0) that the caller can pass to
+ * sys_ep_recv() to block for fault_event_t notifications. On failure,
+ * returns a negative kern_err_t.
+ *
+ * Layout of the received message is fault_event_t (see fault_endpoint.h).
+ * The supervisor task is responsible for rate-limiting restarts and
+ * capability subset enforcement (Phase 2 S3, S4).
+ */
+static inline int sys_fault_subscribe(void) {
+    return sys_call0(SYSCALL_FAULT_SUBSCRIBE);
+}
+
+/*============================================================================
+ * Phase 2 §2.4 — task restart with capability subset
+ *============================================================================*/
+
+/**
+ * sys_task_restart — recreate a faulted task with a reduced capability set.
+ *
+ * The kernel creates a new user task from (entry, arg, priority, stack_size),
+ * derives a child capability from the caller's TASK cap with CAP_GRANT
+ * stripped (rights masked by cap_rights_mask), installs it into the new
+ * task's cspace, and starts the task.
+ *
+ * The caller must hold a TASK cap carrying CAP_GRANT (its self-cap, granted
+ * at spawn time). If it does not, the task is still created/started but
+ * receives no caps (degraded, detectable via the returned management cap).
+ *
+ * @param name            task name (copied from user)
+ * @param entry           task entry function
+ * @param arg             argument passed to entry
+ * @param priority        task priority (0..KERNEL_MAX_PRIORITIES-1)
+ * @param stack_size      stack size in bytes (clamped to [512, KERNEL_TASK_STACK_SIZE])
+ * @param cap_rights_mask desired rights for the new task's cap; CAP_GRANT bit
+ *                        is forced off regardless.
+ * @return                management cap id (>=0) on success, or negative kern_err_t.
+ */
+static inline int sys_task_restart(const char *name, void (*entry)(void *),
+                                   void *arg, int priority, int stack_size,
+                                   int cap_rights_mask) {
+    return sys_call6(SYSCALL_TASK_RESTART,
+                     (int)(uintptr_t)name, (int)(uintptr_t)entry,
+                     (int)(uintptr_t)arg, priority, stack_size,
+                     cap_rights_mask);
 }
 
 #endif /* SYSCALL_ENABLE */

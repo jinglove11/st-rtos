@@ -458,6 +458,63 @@ cap_id_t cap_derive(cap_id_t parent_cap, uint8_t subset_rights) {
     return cap_derive_for(sched_get_current(), parent_cap, subset_rights);
 }
 
+#if CAP_RESTART_SUBSET
+cap_id_t cap_derive_for_restart(tcb_t *supervisor,
+                                cap_id_t parent_cap,
+                                tcb_t *new_task,
+                                uint8_t rights) {
+    /* Defined here (not in cap_subset.c) because it depends on the static
+     * helpers cap_get_entry / cap_owner_allowed / cap_init_child_slot /
+     * cap_link_child / cap_task_add / cap_clear_slot / cap_slot_of / cap_encode.
+     * Declared publicly via cap_subset.h. */
+    cap_entry_t *parent = cap_get_entry(parent_cap);
+    if (parent == NULL || new_task == NULL || new_task->id < 0) {
+        return CAP_INVALID;
+    }
+
+    /* Supervisor must authorize the derive and hold CAP_GRANT on the parent. */
+    if (!cap_owner_allowed(supervisor, parent_cap, parent)) {
+        return CAP_INVALID;
+    }
+    if ((parent->rights & CAP_GRANT) == 0) {
+        return CAP_INVALID;
+    }
+
+    /* §2.4 core invariant: child ⊆ parent, CAP_GRANT ALWAYS dropped. */
+    uint8_t effective = (uint8_t)(rights & parent->rights & ~CAP_GRANT);
+
+    int child_slot = cap_init_child_slot(parent, effective);
+    if (child_slot < 0) {
+        return CAP_INVALID;
+    }
+
+    /* cap_init_child_slot inherits parent->owner (the supervisor). But this
+     * child is being INSTALLED into new_task's cspace and owned by new_task,
+     * so fix the owner field to match — mirroring cap_copy_to (line ~488).
+     * Otherwise cap_get_rights_for(new_task, ...) / cap_owner_allowed would
+     * reject it (owner mismatch → KERN_ERR_CAP). */
+    cap_pool[child_slot].owner = (uint8_t)new_task->id;
+
+    cap_id_t child_cap = cap_encode((uint16_t)child_slot,
+                                    cap_pool[child_slot].generation);
+    if (child_cap == CAP_INVALID) {
+        return CAP_INVALID;
+    }
+
+    cap_link_child(cap_slot_of(parent), child_slot);
+
+    /* Force-install into the NEW task's cspace. cap_task_add is a no-op for
+     * non-user tasks (kernel tasks have no per-task cspace), so a kernel-mode
+     * restart target simply won't receive the handle — which is correct. */
+    if (cap_task_add(new_task, child_cap) != KERN_OK) {
+        cap_clear_slot(child_slot);
+        return CAP_INVALID;
+    }
+
+    return child_cap;
+}
+#endif /* CAP_RESTART_SUBSET */
+
 cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights) {
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL || dst == NULL || dst->id < 0) {

@@ -1,12 +1,19 @@
 #
 # My-RTOS Configuration — TINY preset
 #
-# Goal: smallest viable image (<32KB) for tight flash (e.g. RP2040-era 2MB QTY,
-# or stripped-down RP2350 NS image). Trades observability + test hooks for size.
+# Goal: smallest viable image for tight flash. Trades observability + test
+# hooks for size. Strips test framework, shell, crash dump, deadlock detect.
+#
+# NOTE: many kernel subsystems (irq, ipc/event, ipc/channel) have call sites
+# that reference trace_record/TRACE_* without #if guards. Until that gating
+# debt is paid, this preset must keep TRACE_ENABLE=y and the core IPC
+# primitives enabled. The size cost is small (~3-5KB) — the bulk of the
+# savings come from disabling TEST, SHELL, FAULT_CRASH_DUMP, and shrinking
+# pool sizes.
 #
 # Use cases:
-#   - Size budget pressure
-#   - Single-purpose firmware (one app, no shell)
+#   - Size budget pressure (sub-32KB)
+#   - Single-purpose firmware (no shell)
 #   - Quick bring-up on a new board (no test framework)
 #
 # Apply with:
@@ -14,8 +21,7 @@
 #   python3 scripts/menuconfig.py genconfig
 #   cmake --build build/rp2350-pico-sdk
 #
-# Expected footprint: ~24-32KB flash, ~4-8KB RAM
-# Excluded: test framework, shell, trace, debug, dynamic heap, all Phase 2-9 subsystems
+# Expected footprint: ~32-48KB flash, ~8-12KB RAM
 # ============================================================================
 
 PROJECT_NAME="my-rtos"
@@ -24,7 +30,7 @@ PROJECT_VERSION="1.0.0"
 # ---- Board ----
 CONFIG_BOARD_RP2350=y
 BOARD_NAME="rp2350"
-BOARD_DISPLAY_NAME="Raspberry Pi Pico 2 W (tiny)"
+BOARD_DISPLAY_NAME="Raspberry Pi Pico 2 W"
 
 # ---- Kernel (lean) ----
 KERNEL_TICK_RATE=100
@@ -40,52 +46,71 @@ KERNEL_IDLE_STACK_SIZE=128
 KERNEL_IDLE_PRIORITY=7
 KERN_DEFAULT_TIME_SLICE=10
 # KERN_TASK_STATS is not set
-# TRACE_ENABLE is not set
+TRACE_ENABLE=y
+TRACE_BUFFER_SIZE=64
 # KERNEL_WATCHDOG is not set
-# KERNEL_IDLE_SLEEP is not set
+KERNEL_IDLE_SLEEP=y
 
-# ---- Memory (static only) ----
-# MEM_DYNAMIC is not set
+# ---- Memory (heap on for kmalloc, small) ----
+MEM_DYNAMIC=y
+MEM_HEAP_SIZE=1024
 MEM_POOL_COUNT=2
 
-# ---- IPC (semaphore + mutex only — smallest set) ----
+# ---- IPC (lean but complete — primitive gating has gaps) ----
 IPC_SEMAPHORE=y
 IPC_SEMAPHORE_MAX=4
 IPC_MUTEX=y
 IPC_MUTEX_MAX=4
 # MUTEX_DEADLOCK_DETECT is not set
-# IPC_MQUEUE is not set
-# IPC_EVENT is not set
-# IPC_ENDPOINT is not set
-# IPC_CHANNEL is not set
+IPC_MQUEUE=y
+IPC_MQUEUE_MAX=2
+IPC_EVENT=y
+IPC_EVENT_MAX=2
+IPC_ENDPOINT=y
+IPC_ENDPOINT_MAX=4
+IPC_EP_MSG_SIZE=32
+IPC_EP_MAX_PENDING=2
+IPC_CHANNEL=y
+IPC_CHANNEL_MAX=2
+IPC_CH_MSG_SIZE=32
 
-# ---- Timer (none — let app use direct SysTick if needed) ----
-# TIMER_ENABLE is not set
+# ---- Timer ----
+TIMER_ENABLE=y
+TIMER_MAX=4
+TIMER_CMD_QUEUE_SIZE=2
+TIMER_TASK_PRIORITY=1
+TIMER_TASK_STACK_SIZE=256
+TIMER_NAME_LEN=8
 
 # ---- VFS (off) ----
 # VFS_ENABLE is not set
 
-# ---- Microkernel (MPU + syscall on) ----
+# ---- Microkernel ----
 MPU_ENABLE=y
 SYSCALL_ENABLE=y
-SYSCALL_TABLE_SIZE=24
+SYSCALL_TABLE_SIZE=73
 MPU_REGION_COUNT=4
 
 # ---- Interrupt (basic) ----
+# Note: IRQ_THREADED_ENABLE must stay on because irq.c references
+# _default_handler (declared under that guard). Latent gating bug.
 IRQ_ENABLE=y
 IRQ_MAX_USER=4
 IRQ_DEFAULT_PRIORITY=8
 # IRQ_BH_ENABLE is not set
-# IRQ_THREADED_ENABLE is not set
+IRQ_THREADED_ENABLE=y
+IRQ_THREADED_MAX=2
+IRQ_THREADED_STACK_SIZE=256
 
-# ---- Capability (on — microkernel essential) ----
+# ---- Capability ----
 CAP_ENABLE=y
 CAP_MAX_COUNT=32
-KERN_TASK_CAP_SLOTS=8
+KERN_TASK_CAP_SLOTS=32
 
 # ---- Fault (capture but no verbose dump) ----
 FAULT_ENABLE=y
 # FAULT_CRASH_DUMP is not set
+# FAULT_ENDPOINT is not set  # no supervisor in tiny
 
 # ---- Shell (off) ----
 # SHELL_ENABLE is not set
@@ -95,7 +120,7 @@ FAULT_ENABLE=y
 
 # ---- Debug (off) ----
 # DEBUG_ENABLE is not set
-# ASSERT_ENABLE is not set
+ASSERT_ENABLE=y
 
 # ---- Test (off) ----
 # TEST_ENABLE is not set

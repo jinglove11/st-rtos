@@ -69,9 +69,79 @@ verify: all
 		--nm $(PICO_TOOLCHAIN_PATH)/arm-none-eabi-nm \
 		--picotool $(PICOTOOL_DIR)/picotool
 
+# Rescue: clear stuck RP2350 (e.g. CM0 stuck in fault loop from prior bad
+# image). Writes RESCUE_RESTART bit via DAP — both cores restart in bootrom.
+# Idempotent: safe to run on a healthy chip. Must run in its own openocd
+# session because the *next* openocd init is what re-examines the cores
+# cleanly post-rescue.
+rescue:
+	openocd -f tools/openocd.cfg \
+		-c "rescue_reset" -c "shutdown"
+
+# flash 先做一次 rescue(对健康芯片无副作用),再用第二个 openocd session
+# 做 program/verify。这样上一帧镜像把 CM0 卡进 fault loop 时也能自救。
 flash: all
 	openocd -f tools/openocd.cfg \
+		-c "rescue_reset" -c "shutdown"
+	openocd -f tools/openocd.cfg \
 		-c "program $(PICO_TARGET) verify reset exit"
+
+#----------------------------------------------------------------------------
+# Live debug session: 后台串口 tee + openocd gdbserver
+#
+#   make debug-start         起 uart_tee + openocd(常驻 :3333)
+#   make debug-stop          停两个后台
+#   make debug-uart-log      tail /tmp/uart.log(LINES=N 改行数)
+#   make debug-probe CMD="..."  一次性 gdb 命令(halt→cmd→resume)
+#
+# Claude 用法:
+#   1) Bash: make debug-start
+#   2) Read: /tmp/uart.log
+#   3) Bash: scripts/gdb_probe.sh "info reg" "x/16i \$pc"
+#   4) Bash: make debug-stop      (flash 前必须停 openocd)
+#----------------------------------------------------------------------------
+
+DEBUG_UART_LOG := /tmp/uart.log
+DEBUG_OCD_LOG  := /tmp/openocd.log
+DEBUG_GDB_PORT := 3333
+
+debug-uart-start:
+	@pkill -f "python3 .*uart_tee\.py" 2>/dev/null || true
+	@setsid scripts/uart_tee.py 2>/tmp/uart_tee.err < /dev/null &
+	@sleep 0.4
+	@cat /tmp/uart_tee.err 2>/dev/null || true
+
+debug-uart-stop:
+	@pkill -f "python3 .*uart_tee\.py" 2>/dev/null || true
+	@echo "uart_tee stopped"
+
+debug-gdb-start:
+	@pkill -x openocd 2>/dev/null || true
+	@setsid openocd -f tools/openocd.cfg \
+		-c "gdb_port $(DEBUG_GDB_PORT)" \
+		> $(DEBUG_OCD_LOG) 2>&1 < /dev/null &
+	@sleep 1.5
+	@tail -5 $(DEBUG_OCD_LOG)
+	@echo "openocd gdbserver on :$(DEBUG_GDB_PORT) (log: $(DEBUG_OCD_LOG))"
+
+debug-gdb-stop:
+	@pkill -x openocd 2>/dev/null || true
+	@echo "openocd stopped"
+
+debug-start: debug-uart-start debug-gdb-start
+	@echo "=== debug up: uart=$(DEBUG_UART_LOG)  gdb=:$(DEBUG_GDB_PORT) ==="
+
+debug-stop: debug-uart-stop debug-gdb-stop
+	@echo "=== debug down ==="
+
+debug-uart-log:
+	@tail -n $${LINES:-40} $(DEBUG_UART_LOG)
+
+# 一次性 gdb 探针 — 用分号串多个命令:
+#   make debug-probe CMD="info reg; bt"
+# 复杂命令(含 ;/$)请直接调 scripts/gdb_probe.sh
+debug-probe:
+	@scripts/gdb_probe.sh $(foreach c,$(subst ;, ,$(CMD)),"$(c)")
 
 clean:
 	cmake -E remove_directory $(PICO_BUILD_DIR)
@@ -259,7 +329,9 @@ KERN_SOURCES += src/kernel/syscall/syscall.c
 KERN_SOURCES += src/kernel/usercopy/usercopy.c
 KERN_SOURCES += src/kernel/timer/timer.c
 KERN_SOURCES += src/kernel/cap/capability.c
+KERN_SOURCES += src/kernel/cap/cap_subset.c
 KERN_SOURCES += src/kernel/fault/fault.c
+KERN_SOURCES += src/kernel/fault/fault_endpoint.c
 KERN_SOURCES += src/kernel/vfs/inode.c
 KERN_SOURCES += src/kernel/vfs/vfs.c
 KERN_SOURCES += src/kernel/vfs/devfs.c
@@ -292,6 +364,7 @@ TEST_SOURCES += src/tests/test_mem.c
 TEST_SOURCES += src/tests/test_service_model.c
 TEST_SOURCES += src/tests/test_svc_runtime.c
 TEST_SOURCES += src/tests/test_diag.c
+TEST_SOURCES += src/tests/test_supervisor_monitor.c
 # TEST_SOURCES += src/tests/test_example.c  # 示例测试模块（取消注释启用）
 
 HAL_SOURCES  = $(HAL_SRC)
