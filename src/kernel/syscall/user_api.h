@@ -529,6 +529,18 @@ static inline int sys_task_restart(const char *name, void (*entry)(void *),
                      cap_rights_mask);
 }
 
+/**
+ * sys_get_tick — return the current scheduler tick count.
+ *
+ * USER tasks cannot read the kernel's global tick counter directly (it lives
+ * in SRAM the MPU does not map to user mode). This syscall is the safe way for
+ * a user task (e.g. the supervisor) to obtain a monotonic time reference for
+ * rate-limiting / backoff bookkeeping. KERNEL_TICK_RATE ticks per second.
+ */
+static inline int sys_get_tick(void) {
+    return sys_call0(SYSCALL_GET_TICK);
+}
+
 #endif /* SYSCALL_ENABLE */
 
 #endif /* USER_API_H */

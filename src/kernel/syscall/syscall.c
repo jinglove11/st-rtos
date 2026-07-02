@@ -1406,14 +1406,16 @@ static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
         return KERN_ERR_STATE;
     }
 #if CAP_ENABLE
-    /* Hand the caller a CAP_READ capability over the fault endpoint, so it
-     * can pass it to sys_ep_recv (which requires a cap under CAP_ENABLE).
-     * Returning the raw ep id here would leave the supervisor spinning:
-     * sys_ep_recv's cap_resolve would reject the raw id on every call. */
+    /* Hand the caller a CAP_FULL capability over the fault endpoint. The
+     * supervisor needs CAP_READ to recv fault events AND CAP_WRITE to bind a
+     * one-shot timer onto this same endpoint (the timer delivers its
+     * backoff-expiry notification here, so fault events and timer events
+     * arrive on the single ep the supervisor already recv's on — there is no
+     * multi-endpoint wait primitive). */
     tcb_t *cur = sched_get_current();
     cap_id_t cap = cap_create_for(cur,
                                   (void *)(uintptr_t)(kern_fault_ep + 1),
-                                  CAP_OBJ_ENDPOINT, CAP_READ);
+                                  CAP_OBJ_ENDPOINT, CAP_FULL);
     if (cap < 0) {
         return KERN_ERR_RESOURCE;
     }
@@ -1550,6 +1552,17 @@ static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
 }
 #endif /* CAP_RESTART_SUBSET && FAULT_ENDPOINT */
 
+/*============================================================================
+ * Time: current scheduler tick (USER-safe read of the kernel tick counter).
+ *============================================================================*/
+
+static int sys_get_tick(uint32_t a1, uint32_t a2, uint32_t a3,
+                        uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    extern uint32_t sched_get_tick_count(void);
+    return (int)sched_get_tick_count();
+}
+
 #undef U
 #undef U1
 #undef U2
@@ -1640,6 +1653,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
 #endif
     SYSDEF(SYSCALL_FAULT_SUBSCRIBE, sys_fault_subscribe, 0),
     SYSDEF(SYSCALL_TASK_RESTART,    sys_task_restart,    6),
+    SYSDEF(SYSCALL_GET_TICK,        sys_get_tick,        0),
 };
 
 /*============================================================================

@@ -107,6 +107,16 @@ CONFIG_SECURE_BOOT        depends on CONFIG_SIGNING_KEY
 
 ## §2 Phase 2 — Fault-Tolerant 基础设施(2 周)
 
+> **✅ COMPLETED (2026-07).** All four sub-sections (2.1 fault endpoint, 2.2
+> supervisor monitor, 2.3 init process, 2.4 cap subset on restart) are landed
+> and verified on Pico 2 W: 2918/2918 tests pass, a user-mode supervisor runs
+> (blocked on the fault endpoint), and a crashy_app demo task is auto-restarted
+> by the supervisor with exponential backoff. See `P5_PHASE2_COMPLETION_REPORT.md`.
+> The notes below are the original design; the implementation differs in a few
+> places (event-driven backoff via a timer bound to the fault ep instead of
+> passive rate-window-wait; supervisor owns its recipe table on its own stack
+> because USER tasks cannot access kernel SRAM).
+
 > **微内核区别于 monolithic 的核心价值。** 没有这一步,前面 2867 个测试只是"代码正确性
 > 测试",不是"系统可靠性测试"。
 

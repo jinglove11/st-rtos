@@ -45,7 +45,8 @@ PICO_UF2             = $(PICO_BUILD_DIR)/my-rtos-pico2w.uf2
 
 .PHONY: all configure clean flash verify setup-pico-sdk info help \
 	rp2350_defconfig stm32f767_defconfig menuconfig genconfig \
-	test-serial-boot test-serial-svc-runtime test-daplink
+	test-serial-boot test-serial-svc-runtime test-daplink \
+	agent agent-start agent-stop agent-status agent-test
 
 all: configure
 	cmake --build $(PICO_BUILD_DIR) -j$${JOBS:-4}
@@ -175,13 +176,47 @@ test-daplink: all
 		--openocd-config tools/openocd.cfg \
 		--elf $(PICO_TARGET)
 
+agent:
+	python3 tools/embedded-agent/embedded_agent.py daemon \
+		--config tools/embedded-agent/my-rtos.json \
+		--port $${PORT:-/dev/ttyACM0} --baud $${BAUD:-921600}
+
+agent-start:
+	@nohup python3 tools/embedded-agent/embedded_agent.py daemon \
+		--config tools/embedded-agent/my-rtos.json \
+		--port $${PORT:-/dev/ttyACM0} --baud $${BAUD:-921600} \
+		>/tmp/my-rtos-agent.out 2>&1 & echo $$! >/tmp/my-rtos-agent.pid
+	@for i in $$(seq 1 30); do \
+		test -S /tmp/my-rtos-agent.sock && break; \
+		kill -0 $$(cat /tmp/my-rtos-agent.pid) 2>/dev/null || { \
+			cat /tmp/my-rtos-agent.out; exit 1; }; \
+		sleep 0.1; \
+	done; \
+	test -S /tmp/my-rtos-agent.sock || { \
+		echo "agent socket did not become ready"; exit 1; }; \
+	echo "My-RTOS agent started (pid $$(cat /tmp/my-rtos-agent.pid))"
+
+agent-stop:
+	@if [ -f /tmp/my-rtos-agent.pid ]; then \
+		kill $$(cat /tmp/my-rtos-agent.pid) 2>/dev/null || true; \
+		rm -f /tmp/my-rtos-agent.pid; \
+	fi
+
+agent-status:
+	python3 tools/embedded-agent/embedded_agent.py ctl \
+		--config tools/embedded-agent/my-rtos.json status
+
+agent-test:
+	PYTHONPATH=tools/embedded-agent python3 -m unittest -v \
+		tools/embedded-agent/test_embedded_agent.py
+
 info:
 	@echo "My-RTOS Build Configuration"
 	@echo "  Board:      Raspberry Pi Pico 2 W"
 	@echo "  MCU:        RP2350 (Cortex-M33 secure / flat image)"
 	@echo "  SDK:        $(PICO_SDK_PATH)"
 	@echo "  Build dir:  $(PICO_BUILD_DIR)"
-	@echo "  UART:       GPIO0 TX / GPIO1 RX / 115200 8N1"
+	@echo "  UART:       GPIO0 TX / GPIO1 RX / 921600 8N1"
 
 help:
 	@echo "My-RTOS Pico 2 W build"
@@ -192,6 +227,8 @@ help:
 	@echo "  make test-serial-boot PORT=/dev/ttyUSB0"
 	@echo "  make test-daplink PORT=/dev/ttyACM0  Build, DAPLink flash, and test"
 	@echo "  make test-serial-svc-runtime PORT=/dev/ttyUSB0"
+	@echo "  make agent-start PORT=/dev/ttyACM0 BAUD=921600"
+	@echo "  make agent-status | agent-stop | agent-test"
 	@echo "  make stm32f767_defconfig && make BOARD=stm32f767"
 
 else
@@ -379,6 +416,8 @@ APP_SOURCES  += src/user/drivers/driver_runtime.c
 APP_SOURCES  += src/user/fs/fs_server.c
 APP_SOURCES  += src/user/fs/fs_runtime.c
 APP_SOURCES  += src/user/supervisor/supervisor.c
+APP_SOURCES  += src/user/init/init.c
+APP_SOURCES  += src/user/apps/crashy_app.c
 APP_SOURCES  += $(UART_SRC)
 APP_SOURCES  += $(GPIO_SRC)
 APP_SOURCES  += src/drivers/uart_dev.c

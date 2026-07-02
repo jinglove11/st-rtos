@@ -62,60 +62,74 @@ static void test_unknown_task_ignored(supervisor_runtime_t *runtime) {
     supervisor_register_recipe(runtime, "known_svc", dummy_entry, NULL, 5, 1024,
                                0x1F /* CAP_FULL */);
     fault_event_t e = make_event("totally_unknown", 100);
-    int acted = supervisor_handle_fault(runtime, &e);
-    TEST_ASSERT_EQ(0, acted, "unknown task → no action");
-
-    /* cleanup: the recipe table is static; reset by re-registering is not
-     * possible, so we leave it — other tests tolerate known_svc present. */
+    int acted = supervisor_on_fault(runtime, &e, -1);
+    TEST_ASSERT_EQ(0, acted, "unknown task → not scheduled");
 }
 
 /*============================================================================
- * Test 2: known task with a cap-less caller — restart attempt fails gracefully
- *         but the decision path runs (returns 0 from the failed restart).
+ * Test 2: a known fault schedules a (deferred) restart, not an immediate one
  *============================================================================*/
 
-static void test_known_task_runs_decision(supervisor_runtime_t *runtime) {
-    test_section("Test 2: known task decision path");
+static void test_known_task_schedules_restart(supervisor_runtime_t *runtime) {
+    test_section("Test 2: known task schedules deferred restart");
 
     supervisor_recipe_t *r = supervisor_find_recipe(runtime, "known_svc");
     TEST_ASSERT_NOT_NULL(r, "recipe registered");
     if (r == NULL) return;
 
-    /* Reset its rate-limit state for a deterministic test. */
     r->restart_count = 0;
-    r->last_restart_tick = 0;
     r->backoff_ticks = SUPERVISOR_BACKOFF_BASE_MS;
     r->killed = 0;
+    r->pending_restart = 0;
 
-    fault_event_t e = make_event("known_svc", 100);
-    int acted = supervisor_handle_fault(runtime, &e);
-    /* In kernel-mode test context sys_task_restart will fail (no usable cap),
-     * so acted should be 0 — but the function must not crash and the recipe
-     * must remain unkilled. */
+    fault_event_t e = make_event("known_svc", 1000);
+    int acted = supervisor_on_fault(runtime, &e, -1);
+    TEST_ASSERT_EQ(1, acted, "known fault schedules a restart");
+    TEST_ASSERT(r->pending_restart == 1, "recipe marked pending");
+    TEST_ASSERT(r->next_restart_tick == 1000 + SUPERVISOR_BACKOFF_BASE_MS,
+                "next_restart_tick = fault_tick + backoff");
     TEST_ASSERT(r->killed == 0, "first fault does not kill");
-    (void)acted;
+    TEST_ASSERT(r->restart_count == 0,
+                "restart_count not bumped until timer fires (deferred)");
 }
 
 /*============================================================================
- * Test 3: rate-limit window — a second fault within the window is ignored
+ * Test 3: do_restarts clears pending + bumps count when backoff elapsed
  *============================================================================*/
 
-static void test_rate_limit_window(supervisor_runtime_t *runtime) {
-    test_section("Test 3: rate-limit window");
+static void test_do_restarts_after_backoff(supervisor_runtime_t *runtime) {
+    test_section("Test 3: do_restarts fires after backoff");
 
     supervisor_recipe_t *r = supervisor_find_recipe(runtime, "known_svc");
-    TEST_ASSERT_NOT_NULL(r, "recipe for rate-limit test");
+    TEST_ASSERT_NOT_NULL(r, "recipe for do_restarts test");
     if (r == NULL) return;
-    r->restart_count = 1;
-    r->last_restart_tick = 1000;
+
+    /* Force a pending restart whose deadline is in the past relative to the
+     * current tick. Use a large fault_tick so next_restart_tick < now. */
+    r->restart_count = 0;
     r->backoff_ticks = SUPERVISOR_BACKOFF_BASE_MS;
     r->killed = 0;
+    r->pending_restart = 0;
 
-    /* Fault 1ms after a restart at tick 1000 → within the 5000ms window. */
-    fault_event_t early = make_event("known_svc", 1001);
-    int acted = supervisor_handle_fault(runtime, &early);
-    TEST_ASSERT_EQ(0, acted, "fault within rate window ignored");
-    TEST_ASSERT(r->restart_count == 1, "restart_count unchanged within window");
+    fault_event_t e = make_event("known_svc", 1);
+    (void)supervisor_on_fault(runtime, &e, -1);
+    TEST_ASSERT(r->pending_restart == 1, "pending set by on_fault");
+
+    /* Spin the scheduler forward so sched_get_tick_count() advances past the
+     * 1ms deadline that on_fault computed. */
+    for (int i = 0; i < 50; i++) {
+        task_delay(1);
+    }
+
+    /* In kernel-test context sys_task_restart will fail (caller is the
+     * privileged test_runner, which sys_task_restart rejects with KERN_ERR_PERM
+     * for non-USER callers). do_restarts then re-arms pending and retries, so
+     * restart_count stays 0 but pending_restart stays 1 (it did NOT silently
+     * drop the fault). That is the property we assert: no deadlock drop. */
+    int issued = supervisor_do_restarts(runtime, -1);
+    TEST_ASSERT(r->pending_restart == 1,
+                "failed restart keeps pending (no silent drop / deadlock)");
+    (void)issued;
 }
 
 /*============================================================================
@@ -129,18 +143,19 @@ static void test_permanent_kill_after_max(supervisor_runtime_t *runtime) {
     TEST_ASSERT_NOT_NULL(r, "recipe for kill test");
     if (r == NULL) return;
     r->restart_count = SUPERVISOR_MAX_RESTARTS;
-    r->last_restart_tick = 0;          /* long ago — past window + backoff */
     r->backoff_ticks = SUPERVISOR_BACKOFF_BASE_MS;
     r->killed = 0;
+    r->pending_restart = 0;
 
     fault_event_t e = make_event("known_svc", 100000);
-    int acted = supervisor_handle_fault(runtime, &e);
-    TEST_ASSERT_EQ(0, acted, "fault over max returns no-restart");
+    int acted = supervisor_on_fault(runtime, &e, -1);
+    TEST_ASSERT_EQ(0, acted, "fault over max returns not-scheduled");
     TEST_ASSERT(r->killed == 1, "service marked permanently killed");
+    TEST_ASSERT(r->pending_restart == 0, "killed service not pending");
 
     /* A subsequent fault on a killed service is ignored. */
     fault_event_t again = make_event("known_svc", 200000);
-    int acted2 = supervisor_handle_fault(runtime, &again);
+    int acted2 = supervisor_on_fault(runtime, &again, -1);
     TEST_ASSERT_EQ(0, acted2, "killed service ignores further faults");
 }
 
@@ -280,8 +295,8 @@ static void test_supervisor_monitor_module(void) {
     supervisor_runtime_init(&runtime);
 
     test_unknown_task_ignored(&runtime);
-    test_known_task_runs_decision(&runtime);
-    test_rate_limit_window(&runtime);
+    test_known_task_schedules_restart(&runtime);
+    test_do_restarts_after_backoff(&runtime);
     test_permanent_kill_after_max(&runtime);
     test_event_carries_task_name();
     test_user_runtime_is_stack_accessible();

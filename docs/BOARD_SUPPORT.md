@@ -25,7 +25,7 @@ top of [README.md](../README.md) and [MICROKERNEL_OS_ROADMAP.md](../MICROKERNEL_
 | **Flash tool**              | OpenOCD + CMSIS-DAP (ELF)| OpenOCD + ST-Link (ELF)   |
 | **OpenOCD config**          | `tools/openocd.cfg`      | `board/st_nucleo_f7.cfg`  |
 | **Console UART**            | uart0 @ GPIO0/GPIO1      | USART3 @ PD8/PD9          |
-| **Test baseline**           | 2867/2867 PASS           | Historical reference      |
+| **Test baseline**           | 2918/2918 PASS           | Phase 2 fault-tolerant infra landed |
 | **Active development**      | **Yes**                  | Maintenance               |
 
 ---
@@ -77,7 +77,7 @@ My-RTOS boot
 ...
 My-RTOS Test Suite v2.0
 ...
-All tests PASSED! (2867/2867)
+All tests PASSED! (2918/2918)
 
 My-RTOS Shell v1.0
 my-rtos>

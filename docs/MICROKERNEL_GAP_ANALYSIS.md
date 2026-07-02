@@ -91,7 +91,16 @@
 
 ### 1.4 没有 fault→restart 运行时闭环
 
-**现状**:
+> **✅ RESOLVED (Phase 2, 2026-07).** The runtime loop is now closed: a user-mode
+> supervisor blocks on the `kern.fault` endpoint; on a user-task fault the kernel
+> pushes a `fault_event_t` (with task_name) to it; the supervisor schedules a
+> restart with exponential backoff (event-driven via a one-shot timer bound to the
+> same fault ep, avoiding the "dead task produces no more events" deadlock) and
+> recreates the task via `sys_task_restart` with a GRANT-stripped cap subset.
+> After `SUPERVISOR_MAX_RESTARTS` the service is permanently killed. Verified on
+> Pico 2 W with the `crashy_app` smoke task. See `P5_PHASE2_COMPLETION_REPORT.md`.
+
+**现状(历史, Phase 2 之前)**:
 - `supervisor.c` 260 行有完整数据结构: `restart_policy` (AUTO/MANUAL), `max_restarts`, `record_restart`/`record_fault`/`should_auto_restart` (`supervisor.h:14-17`)。
 - `fault.c` 用户任务 fault 隔离到 `task_terminate_with_result(KERN_ERR_FAULT)` (`fault.c:294`), 改 PC→`task_fault_exit` 触发 PendSV。
 - watchdog 在 `kernel.c:51` `hal_watchdog_init` 启动。

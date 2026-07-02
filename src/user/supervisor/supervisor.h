@@ -90,11 +90,13 @@ typedef struct {
     uint32_t stack_size;       /* stack size in bytes                     */
     uint8_t cap_rights_mask;   /* rights for the restarted task's cap
                                 * (CAP_GRANT is always stripped regardless) */
-    /* rate-limit state (managed by supervisor_handle_fault) */
+    /* rate-limit state (managed by supervisor_on_fault / supervisor_do_restarts) */
     uint32_t restart_count;    /* restarts issued for this service        */
-    uint32_t last_restart_tick;
+    uint32_t last_fault_tick;  /* tick of the most recent fault           */
+    uint32_t next_restart_tick;/* earliest tick a restart may be issued   */
     uint32_t backoff_ticks;    /* exponential: 1000/2000/4000/8000 ms     */
     uint8_t  killed;           /* set once max restarts exceeded          */
+    uint8_t  pending_restart;  /* fault seen, waiting for backoff to fire */
 } supervisor_recipe_t;
 
 /** Mutable state owned by one supervisor task.
@@ -105,13 +107,18 @@ typedef struct {
 typedef struct {
     supervisor_recipe_t recipes[SUPERVISOR_SERVICE_MAX];
     uint8_t recipe_used[SUPERVISOR_SERVICE_MAX];
+    int     timer_cap;         /* one-shot timer cap (callback-less)        */
+    uint8_t timer_armed;       /* a pending_restart is waiting on the timer */
 } supervisor_runtime_t;
 
 /** Restart policy knobs. */
 #define SUPERVISOR_MAX_RESTARTS   3   /* permanent kill after this many   */
-#define SUPERVISOR_RATE_WINDOW_MS 5000 /* at most 1 restart per 5s window */
 #define SUPERVISOR_BACKOFF_BASE_MS 1000
 #define SUPERVISOR_BACKOFF_CAP_MS  8000
+
+/** Badge the supervisor's one-shot timer stamps onto its endpoint notify.
+ * Must not collide with fault_event_t.fault_type (1..4). Picked far away. */
+#define SUPERVISOR_TIMER_BADGE 0xDEADBEEFu
 
 /** Register a restart recipe. Called at boot (e.g. from init.c) before the
  *  monitor loop starts. Returns 0 on success, <0 on table-full. */
@@ -129,16 +136,25 @@ int supervisor_register_recipe(supervisor_runtime_t *runtime,
 supervisor_recipe_t *supervisor_find_recipe(supervisor_runtime_t *runtime,
                                             const char *name);
 
-/** The monitor loop entry point — run as a user task:
- *    sys_fault_subscribe() then loop on sys_ep_recv(fault_event_t).
- *    On each event, dispatches to supervisor_handle_fault(). Never returns. */
+/** The monitor loop entry point — run as a user task. Creates a one-shot
+ *  timer bound to the fault endpoint, then recv-loops forever, dispatching
+ *  fault events to supervisor_on_fault and timer notifies to
+ *  supervisor_do_restarts. Never returns. */
 void supervisor_monitor_loop(void *arg);
 
-/** Decide restart-vs-kill for one fault event and act on it.
- *  Exposed for unit testing (inject synthetic fault_event_t without a real
- *  fault). Returns 1 if a restart was issued, 0 if killed/ignored. */
-int supervisor_handle_fault(supervisor_runtime_t *runtime,
-                            const void *event);
+/** Record a fault: classify it (kill / schedule restart) and arm the backoff
+ *  timer if a restart is pending. Does NOT restart synchronously — the actual
+ *  sys_task_restart happens when the timer fires (supervisor_do_restarts).
+ *  Returns 1 if a restart was scheduled, 0 if killed/ignored. */
+int supervisor_on_fault(supervisor_runtime_t *runtime,
+                        const void *event,
+                        int fault_ep_cap);
+
+/** Walk pending recipes and restart any whose backoff has elapsed. Called
+ *  when the backoff timer fires. Restarts via sys_task_restart (reduced cap,
+ *  GRANT stripped). Returns the number of restarts issued. */
+int supervisor_do_restarts(supervisor_runtime_t *runtime,
+                           int fault_ep_cap);
 
 #endif /* SUPERVISOR && FAULT_ENDPOINT */
 
