@@ -64,15 +64,37 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge);
  * @return KERN_OK 成功, 其他失败
  *
  * @note 当前版本只能在任务上下文调用；真实 ISR 到 endpoint 的队列化
- *       mask/ack 策略后续补齐。
+ *       mask/ack 策略后续补齐。推荐用 irq_bind_event(ISR 安全)。
  */
 kern_err_t irq_notify(int16_t irq);
+
+/**
+ * @brief 将 IRQ 绑定到 event(notification)对象 —— ISR 安全通知路径
+ *
+ * 当该 IRQ 在 ISR 上下文触发时,内核直接 event_set(event, flags) 通知等待
+ * 的用户任务。这是推荐的 IRQ→用户态投递路径(irq_notify/endpoint 路径不能
+ * 在 ISR 调用,event_set 可以)。
+ *
+ * @param irq      中断号
+ * @param event_id 目标 event 对象 id
+ * @param flags    要 set 的 event flag 位(ISR 触发时写入)
+ * @return KERN_OK 成功, 其他失败
+ */
+kern_err_t irq_bind_event(int16_t irq, event_id_t event_id, uint32_t flags);
+
+/**
+ * @brief 解除 IRQ 的 event 绑定
+ * @param irq 中断号
+ * @return KERN_OK 成功, 其他失败
+ */
+kern_err_t irq_unbind_event(int16_t irq);
 
 #if CAP_ENABLE
 kern_err_t kirq_create_cap(int16_t irq, uint8_t rights, cap_id_t *out_cap);
 kern_err_t kirq_delete_cap(cap_id_t cap);
 kern_err_t kirq_get_number(cap_id_t cap, int16_t *irq);
 kern_err_t kirq_bind_endpoint(cap_id_t cap, ep_id_t ep_id, uint32_t badge);
+kern_err_t kirq_bind_event(cap_id_t cap, event_id_t event_id, uint32_t flags);
 #endif
 
 /*============================================================================

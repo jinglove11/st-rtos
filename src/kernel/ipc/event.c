@@ -158,6 +158,20 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
         return KERN_OK;
     }
 
+    /* NOWAIT (poll): return the current word immediately without blocking,
+     * regardless of whether `flags` matched. Clear only the requested bits if
+     * CLEAR is also requested. This is the seL4 "poll" equivalent. */
+    if (opt & EVENT_OPT_NOWAIT) {
+        if (received) {
+            *received = evt->flags;
+        }
+        if (opt & EVENT_OPT_CLEAR) {
+            evt->flags &= ~flags;
+        }
+        hal_exit_critical(crit);
+        return KERN_OK;
+    }
+
     if (timeout == 0) {
         hal_exit_critical(crit);
         return KERN_ERR_TIMEOUT;
@@ -208,12 +222,17 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
     kern_err_t result = current->block_result;
 
     if (result == KERN_OK) {
+        /* The signaler (event_set) already copied the matched word into
+         * `*received` and applied CLEAR before waking us (see the wake loop in
+         * event_set). Re-reading evt->flags here would yield stale/zeroed
+         * bits (CLEAR already ran), so we must NOT overwrite `*received` or
+         * re-CLEAR. The fast-path (non-blocking match above) handles its own
+         * copy+clear. Only ensure the task is unlinked from the wait queue if
+         * the signaler didn't (it normally does). */
         crit = hal_enter_critical();
-        if (received) {
-            *received = evt->flags;
-        }
-        if (opt & EVENT_OPT_CLEAR) {
-            evt->flags &= ~flags;
+        if (current->block_obj == evt) {
+            wait_queue_remove(&evt->wait_queue, current);
+            current->block_obj = NULL;
         }
         hal_exit_critical(crit);
     } else {

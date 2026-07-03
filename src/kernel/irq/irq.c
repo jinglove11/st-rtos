@@ -5,6 +5,7 @@
 
 #include "irq.h"
 #include "endpoint.h"
+#include "event.h"
 #include "hal.h"
 #include "scheduler.h"
 #include "task.h"
@@ -68,6 +69,20 @@ typedef struct {
 
 static irq_desc_t irq_descriptors[IRQ_MAX_USER];
 static irq_notify_binding_t irq_notify_bindings[IRQ_MAX_USER];
+
+/* ISR-safe event (notification) bindings: when an IRQ fires in ISR context,
+ * the kernel event_set()s the bound event so a user task wakes. Unlike
+ * irq_notify (endpoint path, task-context-only), this is safe from the ISR
+ * dispatch because event_set masks IRQs itself. */
+typedef struct {
+    uint8_t    bound;
+    int16_t    irq_num;
+    event_id_t event_id;
+    uint32_t   flags;
+} irq_event_binding_t;
+
+static irq_event_binding_t irq_event_bindings[IRQ_MAX_USER];
+
 #if CAP_ENABLE
 static irq_cap_object_t irq_cap_objects[IRQ_MAX_USER];
 #endif
@@ -399,6 +414,62 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
     return KERN_OK;
 }
 
+/* Fire any event binding for `irq` from ISR context. Called by the ISR
+ * dispatch path. event_set is ISR-safe (masks IRQs). */
+static void irq_event_fire(int16_t irq) {
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_event_bindings[i].bound &&
+            irq_event_bindings[i].irq_num == irq) {
+            (void)event_set(irq_event_bindings[i].event_id,
+                            irq_event_bindings[i].flags);
+            return;
+        }
+    }
+}
+
+kern_err_t irq_bind_event(int16_t irq, event_id_t event_id, uint32_t flags) {
+    if (irq < 0 || irq >= IRQ_COUNT_MAX) {
+        return KERN_ERR_PARAM;
+    }
+    uint32_t crit = hal_enter_critical();
+    int slot = -1;
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_event_bindings[i].bound &&
+            irq_event_bindings[i].irq_num == irq) {
+            slot = i;  /* refresh existing */
+            break;
+        }
+        if (slot < 0 && !irq_event_bindings[i].bound) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        hal_exit_critical(crit);
+        return KERN_ERR_RESOURCE;
+    }
+    irq_event_bindings[slot].bound   = 1;
+    irq_event_bindings[slot].irq_num = irq;
+    irq_event_bindings[slot].event_id = event_id;
+    irq_event_bindings[slot].flags   = flags;
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+kern_err_t irq_unbind_event(int16_t irq) {
+    uint32_t crit = hal_enter_critical();
+    for (int i = 0; i < IRQ_MAX_USER; i++) {
+        if (irq_event_bindings[i].bound &&
+            irq_event_bindings[i].irq_num == irq) {
+            irq_event_bindings[i].bound = 0;
+            irq_event_bindings[i].irq_num = KERN_INVALID_ID;
+            irq_event_bindings[i].event_id = KERN_INVALID_ID;
+            irq_event_bindings[i].flags = 0;
+        }
+    }
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
 kern_err_t irq_notify(int16_t irq) {
     if (hal_irq_get_active() >= 0) {
         return KERN_ERR_ISR;
@@ -523,6 +594,16 @@ kern_err_t kirq_bind_endpoint(cap_id_t cap, ep_id_t ep_id, uint32_t badge) {
     }
     return err;
 }
+
+kern_err_t kirq_bind_event(cap_id_t cap, event_id_t event_id, uint32_t flags) {
+    irq_cap_register_hooks();
+
+    irq_cap_object_t *obj = cap_resolve(cap, CAP_OBJ_IRQ, CAP_WRITE);
+    if (obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+    return irq_bind_event(obj->irq_num, event_id, flags);
+}
 #endif
 
 /*============================================================================
@@ -561,6 +642,10 @@ static void _threaded_isr_dispatch(void) {
 
     hal_irq_disable_irq((uint32_t)irq);
     hal_irq_clear_pending((uint32_t)irq);
+
+    /* ISR-safe event notification path: if this IRQ has an event (notification)
+     * binding, signal the waiting user task now (event_set masks IRQs). */
+    irq_event_fire((int16_t)irq);
 
     for (int i = 0; i < IRQ_THREADED_MAX; i++) {
         irq_thread_t *it = &irq_threads[i];

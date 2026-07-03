@@ -495,6 +495,14 @@ config TEST_MODULE_BLOCK
       擦写 100 sector 读回校验 + 边界检查。
       ⚠️ 会擦写 flash FS 区(固件区不动),测试期间系统卡顿几秒。
 
+config TEST_MODULE_NOTIFICATION
+    bool "Notification (event) object tests"
+    depends on TEST_ENABLE && IPC_EVENT
+    default y
+    help
+      Notification 测试:event NOWAIT poll 语义、event_set ISR 安全性、
+      irq_bind_event 绑定生命周期。
+
 endmenu
 
 #=============================================================================
