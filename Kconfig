@@ -486,6 +486,15 @@ config TEST_MODULE_STATS
       启用 CPU 使用率统计测试模块。
       (基本功能、多任务竞争、idle 合理性)
 
+config TEST_MODULE_BLOCK
+    bool "Block device (flash) tests"
+    depends on TEST_ENABLE && BLOCK_DEVICE
+    default y
+    help
+      Phase 3 §3.3 板载 QSPI NOR flash block device 测试。
+      擦写 100 sector 读回校验 + 边界检查。
+      ⚠️ 会擦写 flash FS 区(固件区不动),测试期间系统卡顿几秒。
+
 endmenu
 
 #=============================================================================
@@ -853,7 +862,7 @@ config DRIVER_SPI
 config BLOCK_DEVICE
     bool "Block device abstraction"
     default n
-    depends on DRIVER_SPI
+    depends on DRIVER_ENABLE
     help
       块设备 API (read/write/erase sector)。前置:CONFIG_DRIVER_SPI。
       实现:Phase 3.3。

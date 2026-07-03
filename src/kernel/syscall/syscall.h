@@ -120,6 +120,7 @@
 #define SYSCALL_FAULT_SUBSCRIBE  71
 #define SYSCALL_TASK_RESTART     72
 #define SYSCALL_GET_TICK         73
+#define SYSCALL_FLASH_OP         74
 
 /*============================================================================
  * Syscall 分发

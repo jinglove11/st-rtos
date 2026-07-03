@@ -1563,6 +1563,61 @@ static int sys_get_tick(uint32_t a1, uint32_t a2, uint32_t a3,
     return (int)sched_get_tick_count();
 }
 
+/*============================================================================
+ * Phase 3 §3.3 — block device flash operations (user → kernel delegation)
+ *============================================================================*/
+
+#if BLOCK_DEVICE
+#include "flash_block.h"
+
+/* op codes for sys_flash_op */
+#define FLASH_OP_READ    0
+#define FLASH_OP_ERASE   1
+#define FLASH_OP_PROGRAM 2
+
+/**
+ * sys_flash_op — read/erase/program the FS region of onboard flash.
+ *
+ * args: op(a1), offset-within-FS(a2), buf(a3), count(a4)
+ *
+ * The erase/program primitives require IRQs disabled, which a user task
+ * cannot do, so the work is done here in handler context. buf is validated
+ * for user access; offset+count are bounds-checked against the FS region by
+ * flash_block_*.
+ */
+static int sys_flash_op(uint32_t a1, uint32_t a2, uint32_t a3,
+                        uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a5);U(a6);
+    uint32_t op    = a1;
+    uint32_t offs  = a2;
+    void *buf      = (void *)(uintptr_t)a3;
+    uint32_t count = a4;
+
+    switch (op) {
+    case FLASH_OP_READ:
+        if (!user_access_ok(buf, count, USER_ACCESS_WRITE)) {
+            return KERN_ERR_PARAM;
+        }
+        return (int)flash_block_read(offs, buf, count);
+    case FLASH_OP_ERASE:
+        return (int)flash_block_erase(offs, count);
+    case FLASH_OP_PROGRAM:
+        if (!user_access_ok(buf, count, USER_ACCESS_READ)) {
+            return KERN_ERR_PARAM;
+        }
+        return (int)flash_block_program(offs, buf, count);
+    default:
+        return KERN_ERR_PARAM;
+    }
+}
+#else
+static int sys_flash_op(uint32_t a1, uint32_t a2, uint32_t a3,
+                        uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
+}
+#endif /* BLOCK_DEVICE */
+
 #undef U
 #undef U1
 #undef U2
@@ -1654,6 +1709,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_FAULT_SUBSCRIBE, sys_fault_subscribe, 0),
     SYSDEF(SYSCALL_TASK_RESTART,    sys_task_restart,    6),
     SYSDEF(SYSCALL_GET_TICK,        sys_get_tick,        0),
+    SYSDEF(SYSCALL_FLASH_OP,        sys_flash_op,        4),
 };
 
 /*============================================================================

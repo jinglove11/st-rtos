@@ -43,6 +43,8 @@ set(MYRTOS_SOURCES
     src/drivers/chip/rp2350/uart_rp2350.c
     src/drivers/chip/rp2350/gpio_rp2350.c
     src/drivers/uart_dev.c
+    src/drivers/block/flash_block.c
+    src/drivers/block/block_dev.c
     src/board/rp2350/board.c
     src/board/rp2350/board_drivers.c
 )
@@ -86,6 +88,7 @@ target_include_directories(my-rtos-pico2w PRIVATE
     src/kernel
     src/hal
     src/drivers/include
+    src/drivers/block
     src/board/include
     src/board/rp2350
     src/user/nameserver
@@ -113,6 +116,7 @@ target_compile_options(my-rtos-pico2w PRIVATE
 target_link_libraries(my-rtos-pico2w PRIVATE
     pico_stdlib
     hardware_clocks
+    hardware_flash
 )
 
 target_link_options(my-rtos-pico2w PRIVATE

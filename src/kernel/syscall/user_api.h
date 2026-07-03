@@ -541,6 +541,29 @@ static inline int sys_get_tick(void) {
     return sys_call0(SYSCALL_GET_TICK);
 }
 
+/*============================================================================
+ * Phase 3 §3.3 — block device flash operations
+ *============================================================================*/
+
+#define SYS_FLASH_OP_READ    0
+#define SYS_FLASH_OP_ERASE   1
+#define SYS_FLASH_OP_PROGRAM 2
+
+/**
+ * sys_flash_op — read/erase/program the FS region of onboard flash.
+ * Offsets are relative to the FS partition start; bounds-checked by the kernel.
+ * Erase/program run in handler context with IRQs disabled (SDK requirement).
+ *
+ * @param op    SYS_FLASH_OP_READ / _ERASE / _PROGRAM
+ * @param offs  byte offset within the FS region
+ * @param buf   data buffer (READ: written; PROGRAM: read)
+ * @param count bytes (erase: multiple of 4KiB; program: multiple of 256B)
+ * @return KERN_OK on success, negative kern_err_t otherwise.
+ */
+static inline int sys_flash_op(int op, int offs, void *buf, int count) {
+    return sys_call4(SYSCALL_FLASH_OP, op, offs, (int)(uintptr_t)buf, count);
+}
+
 #endif /* SYSCALL_ENABLE */
 
 #endif /* USER_API_H */
