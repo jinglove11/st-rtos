@@ -42,6 +42,17 @@
 
 #include "tcb_offsets.inc"
 
+/* SIO_BASE for CPUID read (RP2350) */
+.equ SIO_BASE, 0xd0000000
+
+/* Macro: load CPU id (0 or 1) into \reg, then compute byte offset into a
+ * tcb_t* array (cpu_id * 4) into \off. */
+.macro GET_CPU_OFFSET reg, off
+    ldr     \reg, =SIO_BASE
+    ldr     \reg, [\reg]            /* sio_hw->cpuid (0 or 1) */
+    lsl     \off, \reg, #2          /* byte offset: cpu_id * sizeof(void*) */
+.endm
+
     .section .text
     .global SVC_Handler
     .global isr_svcall
@@ -74,15 +85,17 @@ SVC_Handler:
  * SVC #0: 首次任务启动
  *============================================================================*/
 .L_maybe_first_switch:
-    ldr     r1, =_current_task
-    ldr     r1, [r1]
-    cmp     r1, #0
+    GET_CPU_OFFSET r1, r2          /* r1=cpu_id, r2=byte offset */
+    ldr     r3, =_current_task
+    ldr     r3, [r3, r2]           /* _current_task[cpu_id] */
+    cmp     r3, #0
     bne     .L_bad_svc_state
     b       .L_first_switch
 
 .L_first_switch:
+    /* r2 still holds byte offset */
     ldr     r0, =_next_task
-    ldr     r0, [r0]
+    ldr     r0, [r0, r2]           /* _next_task[cpu_id] */
     ldr     r1, [r0]               /* R1 = first_task->sp */
 
     ldmia   r1!, {r4-r11}
@@ -104,10 +117,12 @@ SVC_Handler:
     msr     control, r2
     isb
 
-    ldr     r2, =_current_task
-    ldr     r3, =_next_task
-    ldr     r3, [r3]
-    str     r3, [r2]
+    /* After first switch: set _current_task[cpu] = _next_task[cpu] */
+    GET_CPU_OFFSET r2, r3           /* r2=cpu_id, r3=byte offset */
+    ldr     r1, =_current_task
+    ldr     r0, =_next_task
+    ldr     r0, [r0, r3]
+    str     r0, [r1, r3]
 
     cpsie   i
     ldr     lr, =0xFFFFFFFD
@@ -121,8 +136,9 @@ SVC_Handler:
     stmdb   r12!, {r4-r11}
     msr     psp, r12
 
-    ldr     r4, =_current_task
-    ldr     r4, [r4]
+    GET_CPU_OFFSET r4, r5           /* r4=cpu_id, r5=byte offset */
+    ldr     r3, =_current_task
+    ldr     r4, [r3, r5]           /* _current_task[cpu_id] */
     cmp     r4, #0
     beq     1f
     str     r12, [r4]              /* TCB->sp = PSP */
@@ -154,8 +170,9 @@ SVC_Handler:
 
     str     r0, [r7]               /* 返回值写入异常帧 R0 */
 
-    ldr     r4, =_current_task
-    ldr     r4, [r4]
+    GET_CPU_OFFSET r4, r5           /* r4=cpu_id, r5=byte offset */
+    ldr     r3, =_current_task
+    ldr     r4, [r3, r5]           /* _current_task[cpu_id] */
     cmp     r4, #0
     beq     2f
     ldr     r1, [r4]
@@ -197,8 +214,9 @@ SVC_Handler:
     bl      kern_pendsv_handler
     pop     {lr}
 
+    GET_CPU_OFFSET r1, r2           /* r1=cpu_id, r2=byte offset */
     ldr     r0, =_next_task
-    ldr     r0, [r0]
+    ldr     r0, [r0, r2]           /* _next_task[cpu_id] */
     cmp     r0, #0
     beq     .L_svc_halt
 

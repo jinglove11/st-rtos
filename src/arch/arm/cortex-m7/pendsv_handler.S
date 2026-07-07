@@ -29,17 +29,29 @@
 
 #include "tcb_offsets.inc"
 
+/* SIO_BASE for CPUID read (RP2350) */
+.equ SIO_BASE, 0xd0000000
+
     .section .text
     .global PendSV_Handler
     .global isr_pendsv
     .type PendSV_Handler, %function
     .align 2
 
+/* Macro: load CPU id (0 or 1) into \reg, then compute byte offset into a
+ * tcb_t* array (cpu_id * 4) into \off. */
+.macro GET_CPU_OFFSET reg, off
+    ldr     \reg, =SIO_BASE
+    ldr     \reg, [\reg]            /* sio_hw->cpuid (0 or 1) */
+    lsl     \off, \reg, #2          /* byte offset: cpu_id * sizeof(void*) */
+.endm
+
 PendSV_Handler:
     cpsid   i
 
+    GET_CPU_OFFSET r3, r2           /* r3=cpu_id, r2=byte offset */
     ldr     r0, =_current_task
-    ldr     r0, [r0]
+    ldr     r0, [r0, r2]            /* _current_task[cpu_id] */
 
     cmp     r0, #0
     beq     .L_select_next
@@ -61,8 +73,10 @@ PendSV_Handler:
     bl      kern_pendsv_handler
     pop     {lr}
 
+    /* Recompute CPU offset (r2 was clobbered by PSPLIM save above) */
+    GET_CPU_OFFSET r3, r2
     ldr     r0, =_next_task
-    ldr     r0, [r0]
+    ldr     r0, [r0, r2]            /* _next_task[cpu_id] */
     cmp     r0, #0
     beq     .L_pendsv_halt
 

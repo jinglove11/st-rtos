@@ -359,6 +359,12 @@ uint32_t hal_watchdog_reset_cause(void);
 uint32_t hal_get_tick_count(void);
 
 /**
+ * @brief 获取当前 CPU 核心 ID
+ * @return 0 (core0) 或 1 (core1),单核架构始终返回 0
+ */
+uint32_t hal_get_cpu_id(void);
+
+/**
  * @brief 设置系统滴答计数
  * @param count 新的计数值
  */

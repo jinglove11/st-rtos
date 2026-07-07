@@ -75,8 +75,10 @@ extern void kern_panic(const char *msg);
  * 这个变量由 PendSV 汇编代码直接访问：
  * - PendSV 保存上下文时，读取此指针获取当前任务的 TCB
  * - 首次启动调度器时，此值为 NULL（SVC 处理程序的特殊情况）
+ *
+ * SMP: indexed by CPU id. _current_task[hal_get_cpu_id()].
  */
-tcb_t *volatile _current_task = NULL;
+tcb_t *volatile _current_task[SMP_MAX_CPUS] = { NULL };
 
 /**
  * @brief 下一个要运行的任务 TCB 指针
@@ -84,8 +86,10 @@ tcb_t *volatile _current_task = NULL;
  * 这个变量由 PendSV 汇编代码直接访问：
  * - kern_pendsv_handler() 设置此指针
  * - PendSV 恢复上下文时，读取此指针获取下一个任务的 TCB
+ *
+ * SMP: indexed by CPU id.
  */
-tcb_t *volatile _next_task = NULL;
+tcb_t *volatile _next_task[SMP_MAX_CPUS] = { NULL };
 
 /*============================================================================
  * 内部数据结构
@@ -458,8 +462,8 @@ void sched_start(void) {
      * SVC 处理程序会检查这个值，如果是 NULL 则跳过上下文保存
      * 这是首次切换的特殊情况
      */
-    _current_task = NULL;
-    _next_task = first;
+    _current_task[0] = NULL;
+    _next_task[0] = first;
     scheduler.current_task = first;
 
     scheduler.started = 1;
@@ -901,7 +905,7 @@ void kern_pendsv_handler(void) {
     /* 清除调度标志 */
     scheduler.need_resched = 0;
 
-    tcb_t *current = _current_task;
+    tcb_t *current = _current_task[hal_get_cpu_id()];
 
     /* 内存屏障：确保读取正确的值 */
     __asm volatile("dmb");
@@ -1011,9 +1015,10 @@ void kern_pendsv_handler(void) {
     /* 内存屏障：确保写入完成 */
     __asm volatile("dmb");
 
-    /* 更新全局指针，供汇编代码使用 */
-    _current_task = next;
-    _next_task = next;
+    /* 更新全局指针，供汇编代码使用 (per-CPU indexed) */
+    uint32_t cpu = hal_get_cpu_id();
+    _current_task[cpu] = next;
+    _next_task[cpu] = next;
 
 #if KERN_TASK_STATS
     stats_task_switch(current, next);
