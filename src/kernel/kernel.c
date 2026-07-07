@@ -101,6 +101,14 @@ uint32_t kern_get_tick(void) {
 
 void kern_panic(const char *msg) {
     hal_irq_disable();
+
+#if PANIC_LOG && BLOCK_DEVICE
+    /* Persist crash_dump to flash before halting, so the next boot can
+     * report what went wrong. Best-effort: if it fails, we panic anyway. */
+    extern void panic_log_save(void);
+    panic_log_save();
+#endif
+
 #if KERN_DEBUG_ENABLE
     hal_debug_puts("\n!!! KERNEL PANIC !!!\n");
     if (msg) {

@@ -370,6 +370,7 @@ KERN_SOURCES += src/kernel/cap/capability.c
 KERN_SOURCES += src/kernel/cap/cap_subset.c
 KERN_SOURCES += src/kernel/fault/fault.c
 KERN_SOURCES += src/kernel/fault/fault_endpoint.c
+KERN_SOURCES += src/kernel/fault/panic_log.c
 KERN_SOURCES += src/kernel/vfs/inode.c
 KERN_SOURCES += src/kernel/vfs/vfs.c
 KERN_SOURCES += src/kernel/vfs/devfs.c

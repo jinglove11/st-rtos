@@ -1034,9 +1034,9 @@ config SECURE_BOOT
       实现:Phase 8.1。
 
 config PANIC_LOG
-    bool "Panic dump to /flash/panic.log"
+    bool "Panic dump to flash (crash_dump persistence)"
     default n
-    depends on FS_PERSISTENT
+    depends on BLOCK_DEVICE
     help
       panic 时把 backtrace 写到 flash 最后一个 sector。
       上电时 supervisor 检查并上报。实现:Phase 8.2。

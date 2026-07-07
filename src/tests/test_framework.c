@@ -275,6 +275,27 @@ void test_run_all_modules(void) {
 
 static void test_runner_task(void *arg) {
     (void)arg;
+
+#if PANIC_LOG && BLOCK_DEVICE
+    /* Check for a panic log from a previous boot and report it. */
+    {
+        extern kern_err_t panic_log_check(crash_dump_t *out);
+        extern kern_err_t panic_log_clear(void);
+        crash_dump_t prev;
+        if (panic_log_check(&prev) == KERN_OK) {
+            test_print("\r\n[PANIC_LOG] Previous boot panicked:\r\n");
+            test_print("  fault_type=");
+            test_print_num("", prev.fault_type);
+            test_print("  task_id=");
+            test_print_num("", (int32_t)prev.task_id);
+            test_print("  pc=0x");
+            test_print_hex("", prev.pc);
+            test_print("\r\n");
+            (void)panic_log_clear();
+        }
+    }
+#endif
+
     test_run_all_modules();
 
 #if INIT_PROCESS && CAP_ENABLE
