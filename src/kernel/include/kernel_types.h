@@ -70,6 +70,21 @@ typedef enum {
 #define TASK_ATTR_USER         0x01   // 用户任务 (非特权模式)
 
 /*============================================================================
+ * 调度策略 (RT_SCHED)
+ *============================================================================*/
+
+typedef enum {
+    SCHED_NORMAL   = 0,   // 普通时间片轮转 (默认)
+    SCHED_FIFO     = 1,   // 实时 FIFO: 同优先级不轮转, 一直跑到阻塞/被更高抢占
+    SCHED_RR       = 2,   // 实时轮转: 同优先级轮转 (RT 带时间片)
+} sched_policy_t;
+
+/* 优先级 band: 0..KERN_RT_PRIORITY_MAX = RT, 以上 = normal。
+ * RT 任务的优先级永远高于 normal (因为调度器选最高优先级, RT band
+ * 天然抢占 normal band)。这是 L4 RT/normal 分层的最小落地。 */
+#define KERN_RT_PRIORITY_MAX   15
+
+/*============================================================================
  * 任务阻塞原因
  *============================================================================*/
 
@@ -169,6 +184,7 @@ typedef struct tcb {
     // --- MPU 内存保护 (Phase 1) ---
     uint8_t     attrs;                // TASK_ATTR_PRIVILEGED / TASK_ATTR_USER
     uint8_t     syscall_blocked;      // blocked inside SVC, resume via saved frame
+    uint8_t     sched_policy;         // SCHED_NORMAL / SCHED_FIFO / SCHED_RR
     uint8_t     _pad1[2];             // 4 字节对齐
 #if MPU_ENABLE
     uint32_t    mpu_regions[8][2];   // MPU region [RBAR, RASR/RLAR] x 8

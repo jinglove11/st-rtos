@@ -519,6 +519,13 @@ config TEST_MODULE_GPIO_DRIVER
       核心补齐 #3:USER 任务通过 sys_mmio_request/map 读真实 GPIO 寄存器,
       验证用户态驱动端到端(不 fault)。
 
+config TEST_MODULE_RT_SCHED
+    bool "RT scheduling policy tests"
+    depends on TEST_ENABLE && RT_SCHED
+    default y
+    help
+      核心补齐 #4:SCHED_FIFO/RR/NORMAL 策略 + 时间片效果验证。
+
 endmenu
 
 #=============================================================================

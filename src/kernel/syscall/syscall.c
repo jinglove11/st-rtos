@@ -1564,6 +1564,21 @@ static int sys_get_tick(uint32_t a1, uint32_t a2, uint32_t a3,
 }
 
 /*============================================================================
+ * RT_SCHED — set task scheduling policy (FIFO/RR/NORMAL)
+ *============================================================================*/
+
+static int sys_task_set_policy(uint32_t a1, uint32_t a2, uint32_t a3,
+                               uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+#if RT_SCHED
+    return (int)task_set_sched_policy((task_id_t)a1, (uint8_t)a2);
+#else
+    (void)a1; (void)a2;
+    return KERN_ERR_NOSYS;
+#endif
+}
+
+/*============================================================================
  * Phase 3 §3.3 — block device flash operations (user → kernel delegation)
  *============================================================================*/
 
@@ -1809,6 +1824,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_MMIO_MAP,        sys_mmio_map,        3),
     SYSDEF(SYSCALL_MMIO_UNMAP,      sys_mmio_unmap,      1),
     SYSDEF(SYSCALL_MMIO_REQUEST,    sys_mmio_request,    3),
+    SYSDEF(SYSCALL_TASK_SET_POLICY, sys_task_set_policy, 2),
 };
 
 /*============================================================================

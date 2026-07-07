@@ -738,6 +738,46 @@ uint8_t task_get_priority(task_id_t task_id) {
     return tcb ? tcb->priority : 0xFF;
 }
 
+#if RT_SCHED
+kern_err_t task_set_sched_policy(task_id_t task_id, uint8_t policy) {
+    tcb_t *tcb = task_get_tcb(task_id);
+    if (tcb == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    if (policy > SCHED_RR) {
+        return KERN_ERR_PARAM;
+    }
+
+    uint32_t crit = hal_enter_critical();
+    tcb->sched_policy = policy;
+    /* SCHED_FIFO: disable time-slice rotation (run until blocked/preempted).
+     * SCHED_RR / SCHED_NORMAL: restore default time slice. */
+    if (policy == SCHED_FIFO) {
+        tcb->time_slice_reload = 0;
+        tcb->time_slice = 0;
+    } else {
+        tcb->time_slice_reload = KERN_DEFAULT_TIME_SLICE;
+        tcb->time_slice = KERN_DEFAULT_TIME_SLICE;
+    }
+    hal_exit_critical(crit);
+    return KERN_OK;
+}
+
+uint8_t task_get_sched_policy(task_id_t task_id) {
+    tcb_t *tcb = task_get_tcb(task_id);
+    return tcb ? tcb->sched_policy : SCHED_NORMAL;
+}
+#else
+kern_err_t task_set_sched_policy(task_id_t task_id, uint8_t policy) {
+    (void)task_id; (void)policy;
+    return KERN_ERR_NOSYS;
+}
+uint8_t task_get_sched_policy(task_id_t task_id) {
+    (void)task_id;
+    return SCHED_NORMAL;
+}
+#endif
+
 kern_err_t task_delay(uint32_t ticks) {
     if (hal_irq_get_active() >= 0) {
         return KERN_ERR_ISR;

@@ -118,6 +118,25 @@ kern_err_t task_set_priority(task_id_t task_id, uint8_t priority);
 uint8_t task_get_priority(task_id_t task_id);
 
 /*============================================================================
+ * 调度策略 (RT_SCHED)
+ *============================================================================*/
+
+/**
+ * @brief 设置任务调度策略
+ * @param task_id 任务 ID
+ * @param policy  SCHED_NORMAL(时间片轮转)/ SCHED_FIFO(RT 不轮转)/ SCHED_RR(RT 轮转)
+ * @return KERN_OK 成功
+ *
+ * SCHED_FIFO 禁用时间片 (time_slice_reload=0), 任务跑到阻塞或被更高优先级
+ * 抢占为止。SCHED_RR / SCHED_NORMAL 恢复默认时间片。
+ * RT 任务应使用 0..KERN_RT_PRIORITY_MAX 优先级 (RT band), normal 用更高数字。
+ */
+kern_err_t task_set_sched_policy(task_id_t task_id, uint8_t policy);
+
+/** 获取任务调度策略 */
+uint8_t task_get_sched_policy(task_id_t task_id);
+
+/*============================================================================
  * 任务延时
  *============================================================================*/
 

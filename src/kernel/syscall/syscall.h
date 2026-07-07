@@ -124,6 +124,7 @@
 #define SYSCALL_MMIO_MAP         75
 #define SYSCALL_MMIO_UNMAP       76
 #define SYSCALL_MMIO_REQUEST     77
+#define SYSCALL_TASK_SET_POLICY  78
 
 /*============================================================================
  * Syscall 分发

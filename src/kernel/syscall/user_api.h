@@ -599,6 +599,25 @@ static inline int sys_mmio_request(int base, int size, int width) {
     return sys_call3(SYSCALL_MMIO_REQUEST, base, size, width);
 }
 
+/*============================================================================
+ * RT_SCHED — scheduling policy (FIFO/RR/NORMAL)
+ *============================================================================*/
+
+/** Scheduling policy constants (mirror kernel sched_policy_t). */
+#define SYS_SCHED_NORMAL  0
+#define SYS_SCHED_FIFO    1
+#define SYS_SCHED_RR      2
+
+/**
+ * sys_task_set_policy — set a task's scheduling class.
+ * SCHED_FIFO disables time-slice rotation (RT: runs until blocked/preempted).
+ * SCHED_RR / SCHED_NORMAL restore round-robin. RT tasks should use priority
+ * 0..15 (RT band); normal tasks use 16..31.
+ */
+static inline int sys_task_set_policy(int task_id, int policy) {
+    return sys_call2(SYSCALL_TASK_SET_POLICY, task_id, policy);
+}
+
 #endif /* SYSCALL_ENABLE */
 
 #endif /* USER_API_H */
