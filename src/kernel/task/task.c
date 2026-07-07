@@ -13,6 +13,7 @@
 #include "capability.h"
 #include "syscall.h"
 #include "wait_queue.h"
+#include "spinlock.h"
 #include "endpoint.h"
 #include "channel.h"
 #include "vfs.h"
@@ -87,6 +88,10 @@ static tcb_t idle_task;
 
 /* 任务使用位图 */
 uint64_t task_used_bitmap = 0;
+
+/* Spinlock protecting task_pool, task_used_bitmap, and exit_retain tables.
+ * In single-core mode this is uncontended (degrades to IRQ disable). */
+static irq_spinlock_t task_lock;
 
 typedef char task_bitmap_covers_config[(KERNEL_MAX_TASKS <= 64) ? 1 : -1];
 
@@ -328,6 +333,8 @@ void task_complete_blocked_syscall(tcb_t *tcb, kern_err_t result) {
  *============================================================================*/
 
 void task_init(void) {
+    // 初始化任务池自旋锁
+    irq_spin_init(&task_lock);
     // 清零任务池
     memset(task_pool, 0, sizeof(task_pool));
     memset(task_stacks, 0, sizeof(task_stacks));
@@ -371,12 +378,12 @@ task_id_t task_create(const char   *name,
         return KERN_INVALID_ID;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
 
     // 分配任务 ID
     task_id_t id = find_free_task_id();
     if (id == KERN_INVALID_ID) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -436,7 +443,7 @@ task_id_t task_create(const char   *name,
      * SysTick/task scan 只通过 bitmap 发现任务，不能看到半初始化 TCB。
      */
     mark_task_id_used(id);
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
 
     return id;
 }
@@ -446,16 +453,16 @@ kern_err_t task_set_initial_arg(task_id_t task_id, void *arg) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
     if (!task_id_is_used(task_id)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
     tcb_t *tcb = &task_pool[task_id];
     if (tcb->state != TASK_STATE_CREATED || tcb->stack_base == NULL ||
         tcb->stack_size < 32U) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -463,7 +470,7 @@ kern_err_t task_set_initial_arg(task_id_t task_id, void *arg) {
     uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->stack_base +
                                         tcb->stack_size - 32U);
     *stacked_r0 = (uint32_t)(uintptr_t)arg;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
 }
 
@@ -472,24 +479,24 @@ kern_err_t task_start(task_id_t task_id) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
 
     if (!task_id_is_used(task_id)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
     tcb_t *tcb = &task_pool[task_id];
 
     if (tcb->state != TASK_STATE_CREATED) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_STATE;
     }
 
     // 加入就绪队列
     sched_add_ready(tcb);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
 }
 
@@ -526,20 +533,20 @@ kern_err_t task_suspend(task_id_t task_id) {
     }
 
     tcb_t *tcb = &task_pool[task_id];
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
 
     if (!task_id_is_used(task_id)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
     if (tcb->state == TASK_STATE_TERMINATED) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_STATE;
     }
 
     if (tcb->state == TASK_STATE_SUSPENDED) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_OK;
     }
 
@@ -549,7 +556,7 @@ kern_err_t task_suspend(task_id_t task_id) {
             // 当前任务挂起自己：设置状态后触发调度
             // PendSV 会检查状态，SUSPENDED 不会加入就绪队列
             tcb->state = TASK_STATE_SUSPENDED;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&task_lock, crit);
             sched_yield();  // 触发 PendSV
             break;
 
@@ -557,22 +564,22 @@ kern_err_t task_suspend(task_id_t task_id) {
             // 从就绪队列移除
             sched_remove_ready(tcb);
             tcb->state = TASK_STATE_SUSPENDED;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&task_lock, crit);
             break;
 
         case TASK_STATE_BLOCKED:
             if (task_unlink_blocked(tcb) != KERN_OK) {
-                hal_exit_critical(crit);
+                irq_spin_unlock(&task_lock, crit);
                 return KERN_ERR_BUSY;
             }
 
             // 从阻塞状态转为挂起，清除阻塞信息
             tcb->state = TASK_STATE_SUSPENDED;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&task_lock, crit);
             break;
 
         default:
-            hal_exit_critical(crit);
+            irq_spin_unlock(&task_lock, crit);
             return KERN_ERR_STATE;
     }
 
@@ -585,15 +592,15 @@ kern_err_t task_resume(task_id_t task_id) {
     }
 
     tcb_t *tcb = &task_pool[task_id];
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
 
     if (!task_id_is_used(task_id)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
     if (tcb->state != TASK_STATE_SUSPENDED) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -606,7 +613,7 @@ kern_err_t task_resume(task_id_t task_id) {
         hal_trigger_pendsv();
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
 }
 
@@ -616,30 +623,30 @@ kern_err_t task_delete(task_id_t task_id) {
     }
 
     tcb_t *tcb = &task_pool[task_id];
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
 
     if (!task_id_is_used(task_id)) {
         if (exit_retain_bitmap & (1ULL << task_id)) {
             exit_retain_result[task_id] = KERN_OK;
             exit_retain_bitmap &= ~(1ULL << task_id);
             exit_retain[task_id] = NULL;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&task_lock, crit);
             return KERN_OK;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
     // 不能删除当前任务
     if (tcb == sched_get_current()) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_STATE;
     }
 
     if (tcb->state == TASK_STATE_BLOCKED) {
         kern_err_t err = task_unlink_blocked(tcb);
         if (err != KERN_OK) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&task_lock, crit);
             return err;
         }
     }
@@ -659,7 +666,7 @@ kern_err_t task_delete(task_id_t task_id) {
     free_task_id(task_id);
     memset(tcb, 0, sizeof(tcb_t));
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
 }
 
@@ -710,10 +717,10 @@ kern_err_t task_set_priority(task_id_t task_id, uint8_t priority) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
 
     if (!task_id_is_used(task_id)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
@@ -729,7 +736,7 @@ kern_err_t task_set_priority(task_id_t task_id, uint8_t priority) {
         sched_add_ready(tcb);
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
 }
 
@@ -748,7 +755,7 @@ kern_err_t task_set_sched_policy(task_id_t task_id, uint8_t policy) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&task_lock);
     tcb->sched_policy = policy;
     /* SCHED_FIFO: disable time-slice rotation (run until blocked/preempted).
      * SCHED_RR / SCHED_NORMAL: restore default time slice. */
@@ -759,7 +766,7 @@ kern_err_t task_set_sched_policy(task_id_t task_id, uint8_t policy) {
         tcb->time_slice_reload = KERN_DEFAULT_TIME_SLICE;
         tcb->time_slice = KERN_DEFAULT_TIME_SLICE;
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
 }
 

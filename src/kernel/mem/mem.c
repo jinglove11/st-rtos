@@ -11,6 +11,7 @@
 #include "trace.h"
 #include "stats.h"
 #include "scheduler.h"
+#include "spinlock.h"
 #include "task.h"
 #include "capability.h"
 #include "mpu.h"
@@ -90,12 +91,16 @@ static void mem_record_event(const void *ptr, uint8_t action,
     (void)err;
 }
 
+/* SMP spinlock protecting the heap free-list. In single-core mode
+ * uncontended → IRQ disable only. */
+static irq_spinlock_t mem_lock;
+
 static uint32_t crit_enter(void) {
-    return hal_irq_save();
+    return irq_spin_lock(&mem_lock);
 }
 
 static void crit_exit(uint32_t primask) {
-    hal_irq_restore(primask);
+    irq_spin_unlock(&mem_lock, primask);
 }
 
 static void block_init(mem_block_t *block, size_t size, uint32_t flags) {
@@ -181,6 +186,7 @@ static void try_merge_with_next(mem_block_t *block) {
 }
 
 void mem_init(void) {
+    irq_spin_init(&mem_lock);
 #if MEM_DYNAMIC
     size_t heap_size = MEM_HEAP_SIZE;
 
