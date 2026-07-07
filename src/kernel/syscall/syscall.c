@@ -1618,6 +1618,66 @@ static int sys_flash_op(uint32_t a1, uint32_t a2, uint32_t a3,
 }
 #endif /* BLOCK_DEVICE */
 
+/*============================================================================
+ * MMIO mapping — user-mode driver peripheral access (core completion #2)
+ *============================================================================*/
+
+#if MPU_ENABLE && CAP_ENABLE
+static int sys_mmio_map(uint32_t a1, uint32_t a2, uint32_t a3,
+                        uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+    cap_id_t cap = (cap_id_t)a1;
+    uint8_t  rights = (uint8_t)a2;
+    void **out_addr = (void **)(uintptr_t)a3;
+    extern kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
+                                        uint8_t rights, void **out_addr);
+    tcb_t *cur = sched_get_current();
+    if (cur == NULL) {
+        return KERN_ERR_STATE;
+    }
+    void *mapped = NULL;
+    kern_err_t e = kmmio_map_to_task(cur, cap, rights, &mapped);
+    if (e != KERN_OK) {
+        return (int)e;
+    }
+    /* Write the mapped base back to the user's out_addr pointer. */
+    if (out_addr != NULL) {
+        if (!user_access_ok(out_addr, sizeof(mapped), USER_ACCESS_WRITE)) {
+            (void)kmmio_unmap_from_task(cur, cap);
+            return KERN_ERR_PARAM;
+        }
+        kern_err_t ce = copy_to_user(out_addr, &mapped, sizeof(mapped));
+        if (ce != KERN_OK) {
+            (void)kmmio_unmap_from_task(cur, cap);
+            return (int)ce;
+        }
+    }
+    return KERN_OK;
+}
+
+static int sys_mmio_unmap(uint32_t a1, uint32_t a2, uint32_t a3,
+                          uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+    extern kern_err_t kmmio_unmap_from_task(tcb_t *task, cap_id_t cap);
+    tcb_t *cur = sched_get_current();
+    if (cur == NULL) {
+        return KERN_ERR_STATE;
+    }
+    return (int)kmmio_unmap_from_task(cur, (cap_id_t)a1);
+}
+#else
+static int sys_mmio_map(uint32_t a1, uint32_t a2, uint32_t a3,
+                        uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
+}
+static int sys_mmio_unmap(uint32_t a1, uint32_t a2, uint32_t a3,
+                          uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
+}
+#endif /* MPU_ENABLE && CAP_ENABLE */
+
 #undef U
 #undef U1
 #undef U2
@@ -1710,6 +1770,8 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_TASK_RESTART,    sys_task_restart,    6),
     SYSDEF(SYSCALL_GET_TICK,        sys_get_tick,        0),
     SYSDEF(SYSCALL_FLASH_OP,        sys_flash_op,        4),
+    SYSDEF(SYSCALL_MMIO_MAP,        sys_mmio_map,        3),
+    SYSDEF(SYSCALL_MMIO_UNMAP,      sys_mmio_unmap,      1),
 };
 
 /*============================================================================

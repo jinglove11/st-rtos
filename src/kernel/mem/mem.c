@@ -910,4 +910,141 @@ void kshm_unmap_all_for_task(tcb_t *task) {
 #endif
 }
 
+/*============================================================================
+ * MMIO mapping — user-mode driver peripheral access
+ *============================================================================*/
+
+/* MMIO mappings don't have a per-task tracking table like shm_maps (TCB has no
+ * mmio_maps field). We track the occupied region by cap id stored in a small
+ * side table keyed by task id, so unmap can find which region to clear.
+ * Region 3..7 are shared with shm — a task can mix shm + mmio mappings as long
+ * as the total stays within the 5 free regions. */
+#define TASK_MMIO_MAP_MAX 4
+typedef struct {
+    uint8_t  in_use;
+    uint8_t  region;
+    cap_id_t cap;
+} mmio_map_t;
+static mmio_map_t task_mmio_maps[KERNEL_MAX_TASKS][TASK_MMIO_MAP_MAX];
+
+kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
+                             uint8_t rights, void **out_addr) {
+#if MPU_ENABLE
+    if (task == NULL || out_addr == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    *out_addr = NULL;
+    if (rights != CAP_READ && rights != (CAP_READ | CAP_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+    if (task->id < 0 || task->id >= KERNEL_MAX_TASKS) {
+        return KERN_ERR_PARAM;
+    }
+
+    kmmio_object_t *mmio = cap_lookup_for(task, cap, CAP_OBJ_MMIO, rights);
+    if (!mmio) {
+        return KERN_ERR_CAP;
+    }
+    if (!kshm_is_mpu_compliant(mmio->size) ||
+        ((mmio->base & 0x1FU) != 0U)) {
+        return KERN_ERR_PARAM;
+    }
+
+    /* Already mapped? */
+    for (uint32_t i = 0; i < TASK_MMIO_MAP_MAX; i++) {
+        if (task_mmio_maps[task->id][i].in_use &&
+            task_mmio_maps[task->id][i].cap == cap) {
+            return KERN_ERR_BUSY;
+        }
+    }
+
+    int map_slot = -1;
+    for (uint32_t i = 0; i < TASK_MMIO_MAP_MAX; i++) {
+        if (!task_mmio_maps[task->id][i].in_use) {
+            map_slot = (int)i;
+            break;
+        }
+    }
+    if (map_slot < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+
+    int region = -1;
+    for (uint32_t r = 3; r < 8; r++) {
+        if ((task->mpu_regions[r][1] & RASR_ENABLE) == 0) {
+            region = (int)r;
+            break;
+        }
+    }
+    if (region < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+
+    uint32_t ap = (rights & CAP_WRITE) ? AP_FULL : AP_PRW_URO;
+    /* Device memory: ATTR_DEVICE (strongly-ordered, no cache). XN off — MMIO
+     * is data, never executed. */
+    mpu_region_encode((uint32_t)region, (uint32_t)mmio->base,
+                      (uint32_t)mmio->size,
+                      RASR_ENABLE | ap | ATTR_DEVICE | XN_ENABLE,
+                      &task->mpu_regions[region][0],
+                      &task->mpu_regions[region][1]);
+
+    task_mmio_maps[task->id][map_slot].in_use = 1U;
+    task_mmio_maps[task->id][map_slot].region = (uint8_t)region;
+    task_mmio_maps[task->id][map_slot].cap = cap;
+
+    *out_addr = (void *)(uintptr_t)mmio->base;
+    return KERN_OK;
+#else
+    (void)task; (void)cap; (void)rights; (void)out_addr;
+    return KERN_ERR_STATE;
+#endif
+}
+
+kern_err_t kmmio_unmap_from_task(tcb_t *task, cap_id_t cap) {
+#if MPU_ENABLE
+    if (task == NULL || task->id < 0 || task->id >= KERNEL_MAX_TASKS) {
+        return KERN_ERR_PARAM;
+    }
+    for (uint32_t i = 0; i < TASK_MMIO_MAP_MAX; i++) {
+        if (task_mmio_maps[task->id][i].in_use &&
+            task_mmio_maps[task->id][i].cap == cap) {
+            uint8_t region = task_mmio_maps[task->id][i].region;
+            if (region < 8) {
+                task->mpu_regions[region][0] = 0;
+                task->mpu_regions[region][1] = 0;
+            }
+            memset(&task_mmio_maps[task->id][i], 0,
+                   sizeof(task_mmio_maps[task->id][i]));
+            return KERN_OK;
+        }
+    }
+    return KERN_ERR_NOEXIST;
+#else
+    (void)task; (void)cap;
+    return KERN_ERR_STATE;
+#endif
+}
+
+void kmmio_unmap_all_for_task(tcb_t *task) {
+#if MPU_ENABLE
+    if (task == NULL || task->id < 0 || task->id >= KERNEL_MAX_TASKS) {
+        return;
+    }
+    for (uint32_t i = 0; i < TASK_MMIO_MAP_MAX; i++) {
+        if (task_mmio_maps[task->id][i].in_use) {
+            uint8_t region = task_mmio_maps[task->id][i].region;
+            if (region < 8) {
+                task->mpu_regions[region][0] = 0;
+                task->mpu_regions[region][1] = 0;
+            }
+            memset(&task_mmio_maps[task->id][i], 0,
+                   sizeof(task_mmio_maps[task->id][i]));
+        }
+    }
+#else
+    (void)task;
+#endif
+}
+
 #endif

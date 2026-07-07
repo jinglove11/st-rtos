@@ -564,6 +564,28 @@ static inline int sys_flash_op(int op, int offs, void *buf, int count) {
     return sys_call4(SYSCALL_FLASH_OP, op, offs, (int)(uintptr_t)buf, count);
 }
 
+/*============================================================================
+ * Core completion #2 — MMIO mapping (user-mode driver peripheral access)
+ *============================================================================*/
+
+/**
+ * sys_mmio_map — map a held CAP_OBJ_MMIO region into the caller's MPU as
+ * device memory, so the task can touch peripheral registers directly.
+ * @param mmio_cap   capability over the MMIO region (CAP_OBJ_MMIO)
+ * @param rights     CAP_READ and/or CAP_WRITE
+ * @param out_addr   user pointer to void*; receives the mapped base address
+ * @return KERN_OK on success, negative kern_err_t otherwise.
+ */
+static inline int sys_mmio_map(int mmio_cap, int rights, void **out_addr) {
+    return sys_call3(SYSCALL_MMIO_MAP, mmio_cap, rights,
+                     (int)(uintptr_t)out_addr);
+}
+
+/** sys_mmio_unmap — undo a prior sys_mmio_map for this cap. */
+static inline int sys_mmio_unmap(int mmio_cap) {
+    return sys_call1(SYSCALL_MMIO_UNMAP, mmio_cap);
+}
+
 #endif /* SYSCALL_ENABLE */
 
 #endif /* USER_API_H */

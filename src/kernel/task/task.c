@@ -192,6 +192,7 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
 
 #if MPU_ENABLE && CAP_ENABLE
     kshm_unmap_all_for_task(tcb);
+    kmmio_unmap_all_for_task(tcb);
 #endif
 
 #if CAP_ENABLE

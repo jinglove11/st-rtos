@@ -121,6 +121,8 @@
 #define SYSCALL_TASK_RESTART     72
 #define SYSCALL_GET_TICK         73
 #define SYSCALL_FLASH_OP         74
+#define SYSCALL_MMIO_MAP         75
+#define SYSCALL_MMIO_UNMAP       76
 
 /*============================================================================
  * Syscall 分发

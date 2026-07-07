@@ -503,6 +503,14 @@ config TEST_MODULE_NOTIFICATION
       Notification 测试:event NOWAIT poll 语义、event_set ISR 安全性、
       irq_bind_event 绑定生命周期。
 
+config TEST_MODULE_MMIO
+    bool "MMIO mapping tests"
+    depends on TEST_ENABLE && MPU_ENABLE && CAP_ENABLE
+    default y
+    help
+      核心补齐 #2:MMIO cap→MPU 映射测试(region 编程、unmap 清除、
+      权限/坏 cap 拒绝)。
+
 endmenu
 
 #=============================================================================

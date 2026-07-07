@@ -405,6 +405,7 @@ TEST_SOURCES += src/tests/test_diag.c
 TEST_SOURCES += src/tests/test_supervisor_monitor.c
 TEST_SOURCES += src/tests/test_block.c
 TEST_SOURCES += src/tests/test_notification.c
+TEST_SOURCES += src/tests/test_mmio.c
 # TEST_SOURCES += src/tests/test_example.c  # 示例测试模块（取消注释启用）
 
 HAL_SOURCES  = $(HAL_SRC)

@@ -61,6 +61,15 @@ kern_err_t kshm_map_to_task(tcb_t *task, cap_id_t cap,
 kern_err_t kshm_unmap_from_task(tcb_t *task, cap_id_t cap);
 void kshm_unmap_cap_from_all_tasks(cap_id_t cap);
 void kshm_unmap_all_for_task(tcb_t *task);
+
+/* MMIO mapping: map a CAP_OBJ_MMIO region into a task's MPU as device memory
+ * (ATTR_DEVICE), so a user-mode driver can touch peripheral registers. The
+ * task must already hold the cap with the requested rights. Mirrors
+ * kshm_map_to_task but uses ATTR_DEVICE and CAP_OBJ_MMIO. */
+kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
+                             uint8_t rights, void **out_addr);
+kern_err_t kmmio_unmap_from_task(tcb_t *task, cap_id_t cap);
+void kmmio_unmap_all_for_task(tcb_t *task);
 #endif
 
 #endif
