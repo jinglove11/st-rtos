@@ -159,6 +159,7 @@ target_link_libraries(my-rtos-pico2w PRIVATE
     pico_stdlib
     hardware_clocks
     hardware_flash
+    pico_multicore
 )
 
 target_link_options(my-rtos-pico2w PRIVATE

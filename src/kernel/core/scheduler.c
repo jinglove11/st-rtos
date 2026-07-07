@@ -47,6 +47,7 @@
 #include "kernel_types.h"
 #include "task.h"
 #include "hal.h"
+#include "spinlock.h"
 #include <string.h>
 
 #if TRACE_ENABLE
@@ -114,13 +115,18 @@ typedef struct {
  * 包含调度器运行所需的所有状态信息。
  */
 static struct {
-    tcb_t *current_task;                        /**< 当前运行的任务 */
-    ready_list_t ready_list[KERNEL_MAX_PRIORITIES]; /**< 每个优先级的就绪队列 */
+    tcb_t *current_task;                        /**< 当前运行的任务 (shadow of _current_task) */
+    ready_list_t ready_list[KERNEL_MAX_PRIORITIES]; /**< 每个优先级的就绪队列 (共享) */
     volatile uint32_t ready_bitmap[4];          /**< 优先级位图（128级优先级） */
-    volatile uint32_t tick_count;               /**< 系统滴答计数 */
-    volatile int need_resched;                  /**< 是否需要重新调度 */
+    volatile uint32_t tick_count;               /**< 系统滴答计数 (共享) */
+    volatile int need_resched[SMP_MAX_CPUS];    /**< per-CPU 重调度标志 */
     int started;                                /**< 调度器是否已启动 */
 } scheduler;
+
+/* Spinlock protecting the shared ready_list / ready_bitmap / tick_count.
+ * In single-core mode this degrades to IRQ disable (irq_spin_lock does
+ * PRIMASK save + spinlock, but spinlock is uncontended). */
+static irq_spinlock_t sched_lock;
 
 /*============================================================================
  * 位图操作 - 快速查找最高优先级
@@ -387,7 +393,7 @@ static tcb_t *ready_list_get_head(uint8_t prio) {
  * @note 必须在创建任何任务之前调用
  */
 void sched_init(void) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sched_lock);
 
     /* 清空所有优先级的就绪队列 */
     for (int i = 0; i < KERNEL_MAX_PRIORITIES; i++) {
@@ -401,10 +407,10 @@ void sched_init(void) {
         scheduler.ready_bitmap[i] = 0;
     }
     scheduler.tick_count = 0;
-    scheduler.need_resched = 0;
+    irq_spin_init(&sched_lock); scheduler.need_resched[hal_get_cpu_id()] = 0;
     scheduler.started = 0;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sched_lock, crit);
 }
 
 /**
@@ -421,7 +427,7 @@ void sched_init(void) {
  * @note 必须在调用 kern_init() 和创建至少一个任务后调用
  */
 void sched_start(void) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sched_lock);
 
     /* 检查是否有任务可运行 */
     int has_task = 0;
@@ -433,7 +439,7 @@ void sched_start(void) {
     }
 
     if (!has_task) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sched_lock, crit);
         hal_debug_puts("[SCHED] No task to run!\r\n");
         /* 没有任务，进入低功耗模式 */
         while (1) {
@@ -444,7 +450,7 @@ void sched_start(void) {
     /* 获取第一个要运行的任务 */
     tcb_t *first = sched_get_highest_ready();
     if (first == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sched_lock, crit);
         hal_debug_puts("[SCHED] get_highest_ready returned NULL!\r\n");
         while (1) {
             hal_enter_lowpower();
@@ -468,7 +474,7 @@ void sched_start(void) {
 
     scheduler.started = 1;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sched_lock, crit);
 
     /* 启动 SysTick 定时器 */
     hal_systick_init(KERNEL_TICK_RATE);
@@ -506,7 +512,7 @@ void sched_start(void) {
  * @note 当前任务会被放回就绪队列尾部
  */
 void sched_yield(void) {
-    scheduler.need_resched = 1;
+    scheduler.need_resched[hal_get_cpu_id()] = 1;
     hal_trigger_pendsv();
 }
 
@@ -523,12 +529,12 @@ void sched_yield(void) {
  * @note 如果任务优先级高于当前运行任务，会触发调度
  */
 void sched_add_ready(tcb_t *tcb) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sched_lock);
 
     /* 已经在就绪队列中则不重复添加 */
     if (ready_list_contains_any_internal(tcb)) {
         tcb->state = TASK_STATE_READY;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sched_lock, crit);
         return;
     }
 
@@ -544,11 +550,11 @@ void sched_add_ready(tcb_t *tcb) {
     if (scheduler.started &&
         scheduler.current_task &&
         tcb->priority < scheduler.current_task->priority) {
-        scheduler.need_resched = 1;
+        scheduler.need_resched[hal_get_cpu_id()] = 1;
         hal_trigger_pendsv();
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sched_lock, crit);
 }
 
 /**
@@ -561,15 +567,15 @@ void sched_add_ready(tcb_t *tcb) {
  * @param tcb 任务控制块指针
  */
 void sched_remove_ready(tcb_t *tcb) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sched_lock);
 
     if (!ready_list_contains_any_internal(tcb)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sched_lock, crit);
         return;
     }
 
     ready_list_remove_internal(tcb);
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sched_lock, crit);
 }
 
 /**
@@ -622,7 +628,7 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
         return KERN_ERR_STATE;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sched_lock);
 
     /* 从就绪队列移除 */
     if (current->state == TASK_STATE_READY) {
@@ -642,14 +648,14 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    scheduler.need_resched = 1;
+    scheduler.need_resched[hal_get_cpu_id()] = 1;
 
     /*
      * 解锁并触发 PendSV
      * 注意顺序：先解锁，再触发 PendSV
      * 这样 PendSV 可以在临界区外执行
      */
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sched_lock, crit);
     hal_trigger_pendsv();
 
     /*
@@ -670,11 +676,11 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
  * @note 如果唤醒的任务优先级高于当前任务，会触发调度
  */
 void sched_wakeup(tcb_t *tcb, kern_err_t result) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sched_lock);
 
     /* 确保任务处于阻塞状态 */
     if (tcb->state != TASK_STATE_BLOCKED) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sched_lock, crit);
         return;
     }
 
@@ -694,11 +700,11 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
      */
     tcb_t *current = scheduler.current_task;
     if (current && tcb->priority < current->priority) {
-        scheduler.need_resched = 1;
+        scheduler.need_resched[hal_get_cpu_id()] = 1;
         hal_trigger_pendsv();
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sched_lock, crit);
 }
 
 /*============================================================================
@@ -769,7 +775,7 @@ tcb_t *sched_get_highest_ready(void) {
  * @return 1 表示需要调度，0 表示不需要
  */
 int sched_need_switch(void) {
-    return scheduler.need_resched;
+    return scheduler.need_resched[hal_get_cpu_id()];
 }
 
 /**
@@ -813,7 +819,7 @@ void sched_tick_handler(void) {
             current->time_slice--;
 
             if (current->time_slice == 0) {
-                scheduler.need_resched = 1;
+                scheduler.need_resched[hal_get_cpu_id()] = 1;
                 hal_trigger_pendsv();
             }
         }
@@ -903,7 +909,7 @@ uint32_t sched_get_cpu_usage(tcb_t *tcb) {
  */
 void kern_pendsv_handler(void) {
     /* 清除调度标志 */
-    scheduler.need_resched = 0;
+    scheduler.need_resched[hal_get_cpu_id()] = 0;
 
     tcb_t *current = _current_task[hal_get_cpu_id()];
 
