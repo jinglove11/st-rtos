@@ -610,6 +610,44 @@ kern_err_t kmmio_create_cap(uintptr_t base, size_t size, uint8_t width,
     return KERN_OK;
 }
 
+kern_err_t kmmio_create_cap_for(tcb_t *owner, uintptr_t base, size_t size,
+                                uint8_t width, uint8_t rights,
+                                cap_id_t *out_cap) {
+    if (out_cap == NULL || size == 0 || !kmmio_width_valid(width)) {
+        return KERN_ERR_PARAM;
+    }
+    *out_cap = KERN_INVALID_ID;
+
+    if ((base & ((uintptr_t)width - 1U)) != 0U) {
+        return KERN_ERR_PARAM;
+    }
+    if (!kmem_range_in_region(base, size, KMMIO_PERIPH_BASE, KMMIO_PERIPH_SIZE)) {
+        return KERN_ERR_PERM;
+    }
+
+    if (rights == 0) {
+        rights = CAP_READ | CAP_WRITE | CAP_MANAGE;
+    }
+
+    kmmio_object_t *mmio = kmmio_alloc_object();
+    if (!mmio) {
+        return KERN_ERR_RESOURCE;
+    }
+    mmio->base = base;
+    mmio->size = size;
+    mmio->width = width;
+
+    (void)cap_register_cleanup(CAP_OBJ_MMIO, kmem_cap_cleanup);
+    cap_id_t cap = cap_create_for(owner, mmio, CAP_OBJ_MMIO, rights);
+    if (cap == KERN_INVALID_ID) {
+        kmmio_free_object(mmio);
+        return KERN_ERR_RESOURCE;
+    }
+
+    *out_cap = cap;
+    return KERN_OK;
+}
+
 kern_err_t kmmio_delete_cap(cap_id_t cap) {
     kmmio_object_t *mmio = cap_resolve(cap, CAP_OBJ_MMIO, CAP_MANAGE);
     if (!mmio) {
@@ -992,6 +1030,17 @@ kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
     task_mmio_maps[task->id][map_slot].in_use = 1U;
     task_mmio_maps[task->id][map_slot].region = (uint8_t)region;
     task_mmio_maps[task->id][map_slot].cap = cap;
+
+    /* If the task is mapping into itself (the common case: a driver task
+     * calls sys_mmio_map from its own context), the new MPU region won't take
+     * effect until the next context switch. Reload immediately so the caller
+     * can access the region right after map returns. */
+    {
+        extern tcb_t *sched_get_current(void);
+        if (task == sched_get_current()) {
+            mpu_load_task_regions(task);
+        }
+    }
 
     *out_addr = (void *)(uintptr_t)mmio->base;
     return KERN_OK;

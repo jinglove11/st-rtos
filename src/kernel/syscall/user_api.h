@@ -586,6 +586,19 @@ static inline int sys_mmio_unmap(int mmio_cap) {
     return sys_call1(SYSCALL_MMIO_UNMAP, mmio_cap);
 }
 
+/**
+ * sys_mmio_request — obtain an MMIO capability for a peripheral region.
+ * The kernel validates the address is in the peripheral window and installs
+ * the cap into the caller's cspace. Caller then sys_mmio_map()s it.
+ * @param base   peripheral base address (0x40000000 window)
+ * @param size   region size in bytes (MPU-compliant: power of 2, >= 32)
+ * @param width  access width 1/2/4
+ * @return cap id (>= 0) on success, negative kern_err_t otherwise.
+ */
+static inline int sys_mmio_request(int base, int size, int width) {
+    return sys_call3(SYSCALL_MMIO_REQUEST, base, size, width);
+}
+
 #endif /* SYSCALL_ENABLE */
 
 #endif /* USER_API_H */

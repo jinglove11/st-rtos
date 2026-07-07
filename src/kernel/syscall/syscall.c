@@ -1665,6 +1665,37 @@ static int sys_mmio_unmap(uint32_t a1, uint32_t a2, uint32_t a3,
     }
     return (int)kmmio_unmap_from_task(cur, (cap_id_t)a1);
 }
+
+/* sys_mmio_request — obtain a CAP_OBJ_MMIO capability for a peripheral region,
+ * installed into the caller's cspace. The kernel validates the address is in
+ * the peripheral window (0x40000000..0x60000000) and width is 1/2/4. Returns
+ * the cap id (>= 0) or a negative kern_err_t.
+ *
+ * SECURITY NOTE: today any user task can request any in-range MMIO. Phase 3.1
+ * will gate this behind a policy (only a designated driver server may request
+ * a given region). This is the minimal path to validate the MMIO mapping
+ * end to end. */
+static int sys_mmio_request(uint32_t a1, uint32_t a2, uint32_t a3,
+                            uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+    uintptr_t base = (uintptr_t)a1;
+    uint32_t  size = a2;
+    uint8_t   width = (uint8_t)a3;
+    extern kern_err_t kmmio_create_cap_for(tcb_t *owner, uintptr_t base,
+                                           size_t size, uint8_t width,
+                                           uint8_t rights, cap_id_t *out_cap);
+    tcb_t *cur = sched_get_current();
+    if (cur == NULL) {
+        return KERN_ERR_STATE;
+    }
+    cap_id_t cap = KERN_INVALID_ID;
+    kern_err_t e = kmmio_create_cap_for(cur, base, size, width,
+                                        CAP_READ | CAP_WRITE, &cap);
+    if (e != KERN_OK) {
+        return (int)e;
+    }
+    return (int)cap;
+}
 #else
 static int sys_mmio_map(uint32_t a1, uint32_t a2, uint32_t a3,
                         uint32_t a4, uint32_t a5, uint32_t a6) {
@@ -1673,6 +1704,11 @@ static int sys_mmio_map(uint32_t a1, uint32_t a2, uint32_t a3,
 }
 static int sys_mmio_unmap(uint32_t a1, uint32_t a2, uint32_t a3,
                           uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
+}
+static int sys_mmio_request(uint32_t a1, uint32_t a2, uint32_t a3,
+                            uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
     return KERN_ERR_NOSYS;
 }
@@ -1772,6 +1808,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_FLASH_OP,        sys_flash_op,        4),
     SYSDEF(SYSCALL_MMIO_MAP,        sys_mmio_map,        3),
     SYSDEF(SYSCALL_MMIO_UNMAP,      sys_mmio_unmap,      1),
+    SYSDEF(SYSCALL_MMIO_REQUEST,    sys_mmio_request,    3),
 };
 
 /*============================================================================

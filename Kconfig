@@ -511,6 +511,14 @@ config TEST_MODULE_MMIO
       核心补齐 #2:MMIO cap→MPU 映射测试(region 编程、unmap 清除、
       权限/坏 cap 拒绝)。
 
+config TEST_MODULE_GPIO_DRIVER
+    bool "GPIO driver (user-mode MMIO) tests"
+    depends on TEST_ENABLE && MPU_ENABLE && CAP_ENABLE
+    default y
+    help
+      核心补齐 #3:USER 任务通过 sys_mmio_request/map 读真实 GPIO 寄存器,
+      验证用户态驱动端到端(不 fault)。
+
 endmenu
 
 #=============================================================================

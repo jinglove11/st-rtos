@@ -47,6 +47,9 @@ kern_err_t kmem_get_range(cap_id_t cap, uint8_t required_rights,
                           size_t offset, size_t len, void **ptr);
 kern_err_t kmmio_create_cap(uintptr_t base, size_t size, uint8_t width,
                             uint8_t rights, cap_id_t *out_cap);
+kern_err_t kmmio_create_cap_for(tcb_t *owner, uintptr_t base, size_t size,
+                                uint8_t width, uint8_t rights,
+                                cap_id_t *out_cap);
 kern_err_t kmmio_delete_cap(cap_id_t cap);
 kern_err_t kmmio_get_bounds(cap_id_t cap, uintptr_t *base, size_t *size,
                             uint8_t *width);
