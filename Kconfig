@@ -526,6 +526,14 @@ config TEST_MODULE_RT_SCHED
     help
       核心补齐 #4:SCHED_FIFO/RR/NORMAL 策略 + 时间片效果验证。
 
+config TEST_MODULE_ELF
+    bool "ELF loader tests"
+    depends on TEST_ENABLE && ELF_LOADER
+    default y
+    help
+      核心补齐 #6:ELF 进程加载 + 执行 + join 验证。
+      嵌入一个 freestanding 测试 ELF,elf_load 解析 + 创建 user 任务执行。
+
 endmenu
 
 #=============================================================================
@@ -942,7 +950,7 @@ config USER_LIBC
 config ELF_LOADER
     bool "ELF loader (sys_proc_exec)"
     default n
-    depends on USER_LIBC && FS_PERSISTENT
+    depends on MPU_ENABLE && CAP_ENABLE
     help
       从 /flash/apps/<name>.elf 加载 ELF,解析 PT_LOAD + relocations。
       RP2350 NS 约束:同物理地址空间,MPU 隔代码/数据区。

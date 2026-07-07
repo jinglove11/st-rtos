@@ -24,6 +24,10 @@ file(GLOB_RECURSE MYRTOS_KERNEL_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_LIST_DIR}/src/kernel/*.c")
 file(GLOB_RECURSE MYRTOS_USER_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_LIST_DIR}/src/user/*.c")
+# test_elf_app.c is compiled separately as a freestanding ELF (see custom
+# command below), NOT linked into the kernel image.
+list(REMOVE_ITEM MYRTOS_USER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.c")
 file(GLOB MYRTOS_TEST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/*.c")
 list(REMOVE_ITEM MYRTOS_TEST_SOURCES
@@ -45,11 +49,43 @@ set(MYRTOS_SOURCES
     src/drivers/uart_dev.c
     src/drivers/block/flash_block.c
     src/drivers/block/block_dev.c
+    src/kernel/loader/elf_loader.c
     src/board/rp2350/board.c
     src/board/rp2350/board_drivers.c
 )
 
 add_executable(my-rtos-pico2w ${MYRTOS_SOURCES})
+
+# ---- Build the test ELF app (freestanding, separate from the kernel) ----
+# The test ELF is a tiny program linked to the flash FS region. It's embedded
+# into the firmware via .incbin so elf_load() can parse+execute it.
+set(TEST_ELF_DIR ${CMAKE_CURRENT_LIST_DIR}/build/test_elf)
+set(TEST_ELF_PATH ${TEST_ELF_DIR}/test_elf.elf)
+set(TOOLCHAIN_BIN ${CMAKE_CURRENT_LIST_DIR}/tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin)
+add_custom_command(
+    OUTPUT ${TEST_ELF_PATH}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${TEST_ELF_DIR}
+    COMMAND ${TOOLCHAIN_BIN}/arm-none-eabi-gcc
+        -mcpu=cortex-m33 -mthumb -ffreestanding -nostdlib -Os
+        -c ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.c
+        -o ${TEST_ELF_DIR}/test_elf_app.o
+    COMMAND ${TOOLCHAIN_BIN}/arm-none-eabi-ld
+        -T ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.ld
+        ${TEST_ELF_DIR}/test_elf_app.o
+        -o ${TEST_ELF_PATH}
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.c
+            ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.ld
+    COMMENT "Building test ELF app"
+)
+add_custom_target(test_elf_blob DEPENDS ${TEST_ELF_PATH})
+
+# Always add the blob source; the #if ELF_LOADER guard in the file handles
+# enable/disable. Kconfig defines ELF_LOADER in kernel_config.h, not CMake.
+target_compile_definitions(my-rtos-pico2w PRIVATE
+    TEST_ELF_PATH=${TEST_ELF_PATH})
+target_sources(my-rtos-pico2w PRIVATE
+    src/kernel/loader/test_elf_blob.c)
+add_dependencies(my-rtos-pico2w test_elf_blob)
 
 # Generate TCB field offsets for assembly (PendSV/SVC/first_switch).
 # Tracks kernel_types.h automatically; the .S files .include the result.
@@ -89,6 +125,7 @@ target_include_directories(my-rtos-pico2w PRIVATE
     src/hal
     src/drivers/include
     src/drivers/block
+    src/kernel/loader
     src/board/include
     src/board/rp2350
     src/user/nameserver

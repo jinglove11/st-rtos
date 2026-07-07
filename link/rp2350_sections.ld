@@ -8,6 +8,13 @@ SECTIONS
         __test_modules_end = .;
         . = ALIGN(4);
     }
+
+    .elf_payload :
+    {
+        . = ALIGN(4);
+        KEEP(*(.elf_payload))
+        . = ALIGN(4);
+    }
 }
 INSERT AFTER .rodata;
 

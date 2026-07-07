@@ -135,6 +135,8 @@ TEST_MODULE_NOTIFICATION=y
 TEST_MODULE_MMIO=y
 TEST_MODULE_GPIO_DRIVER=y
 TEST_MODULE_RT_SCHED=y
+ELF_LOADER=y
+TEST_MODULE_ELF=y
 
 # ============================================================================
 # Phase 2-9 subsystems — opt-in EVERYWHERE dependencies allow
