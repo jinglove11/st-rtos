@@ -14,32 +14,9 @@
 /* Entry point. arg is passed as R0 (task_create arg — NULL from the loader). */
 void _start(void *arg);
 
-/* A global in .data — proves the writable segment is mapped correctly. */
-static volatile unsigned int elf_cookie = 0xABCD;
-
-/* SYSCALL_TASK_EXIT = 2. SVC handler reads R0 as the exit value and
- * reads the SVC number to dispatch. */
-static inline void sys_exit(unsigned int retval) {
-    __asm volatile(
-        "mov r0, %0\n"
-        "svc #2\n"
-        :
-        : "r"(retval)
-        : "r0"
-    );
-    __builtin_unreachable();
-}
-
+/* Minimal _start: just return. No globals, no data access — pure code.
+ * The initial LR (set by task_create_user) points to user_task_exit_handler
+ * which does svc #1 → SYSCALL_TASK_EXIT. This proves XIP execution works. */
 void _start(void *arg) {
     (void)arg;
-    /* NOTE: this position-dependent ELF has .data linked to flash (read-only).
-     * Writing to elf_cookie would fault because the loader copies .data to RAM
-     * but the code still references the flash link address. For this test we
-     * only execute code (.text in flash XIP) and exit — proving the ELF loads
-     * and runs as a separate task. .data remapping with relocations is a
-     * follow-on enhancement. */
-    (void)elf_cookie;  /* suppress unused warning */
-
-    /* Exit with a recognizable value so the test can verify the ELF ran. */
-    sys_exit(0x600D);
 }

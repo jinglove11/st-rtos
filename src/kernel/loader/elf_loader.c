@@ -56,26 +56,26 @@ kern_err_t elf_load(const void *image, const char *name,
     /* The ELF was linked to a flash address (e.g. 0x10100000) but is actually
      * embedded in the firmware at a different flash address (the .incbin
      * location). We must adjust the entry point by the delta between the
-     * link address and the actual embedded address. The first PT_LOAD
-     * segment's p_vaddr tells us where the linker thought .text would be. */
+     * link address and the actual embedded address. The executable PT_LOAD
+     * segment's p_vaddr tells us where the linker thought .text would be,
+     * and p_offset tells us where .text actually is in the ELF file. */
     uint32_t text_link_addr = 0;
+    uint32_t text_file_offset = 0;
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         const Elf32_Phdr *ph = (const Elf32_Phdr *)
             (base + eh->e_phoff + (uint32_t)i * eh->e_phentsize);
         if (ph->p_type == PT_LOAD && (ph->p_flags & PF_X)) {
             text_link_addr = ph->p_vaddr;
+            text_file_offset = ph->p_offset;
             break;
         }
     }
 
-    /* Actual entry = embedded_base + (entry_link_offset from .text start).
-     * entry_link_offset = e_entry - text_link_addr.
-     * actual_text_base = (uint32_t)base + p_offset_of_text (but we don't
-     * track that here; instead use the simpler delta approach):
-     * delta = (uint32_t)base - text_link_addr  (if base is the file start
-     * and text is at offset 0, which is the case for our simple linker script).
-     * Then actual_entry = e_entry + delta. */
-    uint32_t delta = (uint32_t)(uintptr_t)base - text_link_addr;
+    /* actual_text_addr_in_memory = embedded_base + text_file_offset
+     * delta = actual_text_addr - text_link_addr
+     * adjusted_entry = e_entry + delta */
+    uint32_t actual_text_addr = (uint32_t)(uintptr_t)base + text_file_offset;
+    uint32_t delta = actual_text_addr - text_link_addr;
     uint32_t entry = eh->e_entry + delta;
 
     /* First pass: find the writable (.data/.bss) segment and allocate RAM.

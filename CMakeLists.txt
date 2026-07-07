@@ -81,8 +81,13 @@ add_custom_target(test_elf_blob DEPENDS ${TEST_ELF_PATH})
 
 # Always add the blob source; the #if ELF_LOADER guard in the file handles
 # enable/disable. Kconfig defines ELF_LOADER in kernel_config.h, not CMake.
+# CRITICAL: set the blob .c file's OBJECT_DEPENDS on the test ELF, so CMake
+# recompiles test_elf_blob.c whenever the embedded ELF changes. Without this,
+# .incbin embeds stale data (CMake doesn't track .incbin file dependencies).
 target_compile_definitions(my-rtos-pico2w PRIVATE
     TEST_ELF_PATH=${TEST_ELF_PATH})
+set_source_files_properties(src/kernel/loader/test_elf_blob.c PROPERTIES
+    OBJECT_DEPENDS ${TEST_ELF_PATH})
 target_sources(my-rtos-pico2w PRIVATE
     src/kernel/loader/test_elf_blob.c)
 add_dependencies(my-rtos-pico2w test_elf_blob)
