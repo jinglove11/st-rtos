@@ -1,0 +1,15 @@
+{
+  "name": "embedded-agent",
+  "version": "1.0.0",
+  "description": "My-RTOS 嵌入式硬件代理：UART 读取、板卡命令、编译/烧录/复位，通过后台 daemon 暴露给 ZCode。",
+  "mcpServers": {
+    "embedded-board": {
+      "command": "python3",
+      "args": [
+        "/home/five/my-rtos/tools/embedded-agent/embedded_mcp_server.py",
+        "--config",
+        "/home/five/my-rtos/tools/embedded-agent/my-rtos.json"
+      ]
+    }
+  }
+}

@@ -4,7 +4,7 @@ This document captures what works on each supported board, so new contributors
 can pick the right target and so the dual-track build system stays honest.
 
 For the strategic rationale (why two boards, why dual-track build), see the
-top of [README.md](../README.md) and [MICROKERNEL_OS_ROADMAP.md](../MICROKERNEL_OS_ROADMAP.md).
+top of [README.md](../README.md) and [../planning/MICROKERNEL_OS_ROADMAP.md](../../planning/MICROKERNEL_OS_ROADMAP.md).
 
 ---
 

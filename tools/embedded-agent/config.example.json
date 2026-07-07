@@ -1,0 +1,14 @@
+{
+  "socket": "/tmp/embedded-agent.sock",
+  "port": "/dev/ttyUSB0",
+  "baud": 115200,
+  "log": "/tmp/embedded-uart.log",
+  "ring_bytes": 1048576,
+  "prompt": "(?:>|#|\\$)\\s*$",
+  "working_directory": "/absolute/path/to/your/project",
+  "actions": {
+    "verify": ["make", "verify"],
+    "flash": ["make", "flash"],
+    "reset": ["make", "reset"]
+  }
+}

@@ -111,7 +111,7 @@ CONFIG_SECURE_BOOT        depends on CONFIG_SIGNING_KEY
 > supervisor monitor, 2.3 init process, 2.4 cap subset on restart) are landed
 > and verified on Pico 2 W: 2918/2918 tests pass, a user-mode supervisor runs
 > (blocked on the fault endpoint), and a crashy_app demo task is auto-restarted
-> by the supervisor with exponential backoff. See `P5_PHASE2_COMPLETION_REPORT.md`.
+> by the supervisor with exponential backoff. See `../reports/P5_PHASE2_COMPLETION_REPORT.md`.
 > The notes below are the original design; the implementation differs in a few
 > places (event-driven backoff via a timer bound to the fault ep instead of
 > passive rate-window-wait; supervisor owns its recipe table on its own stack

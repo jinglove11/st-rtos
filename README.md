@@ -6,7 +6,7 @@ My-RTOS 是一个面向 ARM Cortex-M 的自研微内核实验系统。当前主�
 
 目标不是只实现一个最小调度器，而是逐步把 RTOS 推向具备用户/内核隔离、系统调用、
 capability 权限、IPC request/reply、VFS、驱动模型、fault 隔离和诊断能力的微内核
-风格操作系统。完整路线图见 [`MICROKERNEL_OS_ROADMAP.md`](MICROKERNEL_OS_ROADMAP.md)
+风格操作系统。完整路线图见 [`docs/planning/MICROKERNEL_OS_ROADMAP.md`](docs/planning/MICROKERNEL_OS_ROADMAP.md)
 （9 个 Phase / ~6 个月）。
 
 当前状态可以概括为：**具备微内核核心机制的 RTOS 原型**。调度、任务生命周期、
@@ -419,12 +419,12 @@ make genconfig     # 仅生成头文件
 
 仓库中保留了阶段设计和演进文档：
 
-- `P0_OPTIMIZATION_PLAN.md`
-- `P1_MICROKERNEL_CORE_PLAN.md`
-- `P2_SERVICE_ENGINEERING_PLAN.md`
-- `P2_COMPLETION_REPORT.md`
-- `P3_MICROKERNEL_SERVICE_PLAN.md`
-- `MICROKERNEL_MIGRATION_PLAN.md`
+- `docs/planning/P0_OPTIMIZATION_PLAN.md`
+- `docs/planning/P1_MICROKERNEL_CORE_PLAN.md`
+- `docs/planning/P2_SERVICE_ENGINEERING_PLAN.md`
+- `docs/reports/P2_COMPLETION_REPORT.md`
+- `docs/planning/P3_MICROKERNEL_SERVICE_PLAN.md`
+- `docs/planning/MICROKERNEL_MIGRATION_PLAN.md`
 - `docs/MICROKERNEL_ROADMAP.md`
 - `docs/IRQ_DESIGN.md`
 - `docs/TIMER_DESIGN.md`

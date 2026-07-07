@@ -555,7 +555,7 @@ void print_cpu_usage(void) {
 
 ## 参考资料
 
-- [SCHEDULER_DESIGN.md](./SCHEDULER_DESIGN.md) - 调度器设计文档
+- [../design/SCHEDULER_DESIGN.md](./../design/SCHEDULER_DESIGN.md) - 调度器设计文档
 - [SCHEDULER_DEBUG_NOTES.md](./SCHEDULER_DEBUG_NOTES.md) - 调试问题与解决方案
 - [kernel_types.h](../src/kernel/include/kernel_types.h) - 类型定义
 - [scheduler.h](../src/kernel/core/scheduler.h) - API 声明

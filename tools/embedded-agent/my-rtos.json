@@ -1,0 +1,14 @@
+{
+  "socket": "/tmp/my-rtos-agent.sock",
+  "port": "/dev/ttyACM0",
+  "baud": 921600,
+  "log": "/tmp/my-rtos-uart.log",
+  "ring_bytes": 1048576,
+  "prompt": "my-rtos>\\s*$",
+  "working_directory": "../..",
+  "actions": {
+    "verify": ["make", "verify"],
+    "flash": ["make", "flash"],
+    "reset": ["bash", "tools/embedded-agent/my_rtos_reset.sh"]
+  }
+}
