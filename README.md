@@ -180,7 +180,7 @@ my-rtos/
 ├── scripts/                    # menuconfig / genconfig
 ├── src/
 │   ├── app/                    # shell 和入口应用
-│   ├── arch/arm/cortex-m7/     # PendSV, SVC, first switch, HAL
+│   ├── arch/arm/cortex-m/      # PendSV, SVC, first switch, HAL (M7/M33 共享)
 │   ├── board/stm32f767/        # STM32F767 board support
 │   ├── drivers/                # UART/GPIO 和设备驱动适配
 │   ├── hal/                    # HAL interface

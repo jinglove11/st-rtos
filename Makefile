@@ -249,10 +249,10 @@ ifeq ($(BOARD),stm32f767)
     SYSTEM_C        = src/startup/arm/cortex-m7/system.c
     UART_SRC        = src/drivers/chip/stm32f7/uart_stm32.c
     GPIO_SRC        = src/drivers/chip/stm32f7/gpio_stm32.c
-    HAL_SRC         = src/arch/arm/cortex-m7/hal.c
-    HAL_ASM         = src/arch/arm/cortex-m7/pendsv_handler.S
-    HAL_ASM         += src/arch/arm/cortex-m7/svc_handler.S
-    HAL_ASM         += src/arch/arm/cortex-m7/first_switch.S
+    HAL_SRC         = src/arch/arm/cortex-m/hal.c
+    HAL_ASM         = src/arch/arm/cortex-m/pendsv_handler.S
+    HAL_ASM         += src/arch/arm/cortex-m/svc_handler.S
+    HAL_ASM         += src/arch/arm/cortex-m/first_switch.S
     FLASH_CMD       = openocd -f board/st_nucleo_f7.cfg -c "program $(TARGET) verify reset exit"
 
 else
@@ -310,7 +310,7 @@ CFLAGS      += -I$(SRC_DIR)/user/nameserver
 CFLAGS      += -I$(SRC_DIR)/user/drivers
 CFLAGS      += -I$(SRC_DIR)/user/fs
 CFLAGS      += -I$(SRC_DIR)/user/supervisor
-CFLAGS      += -I$(SRC_DIR)/arch/arm/cortex-m7
+CFLAGS      += -I$(SRC_DIR)/arch/arm/cortex-m
 CFLAGS      += -I$(SRC_DIR)/tests
 CFLAGS      += -I$(SRC_DIR)/app
 CFLAGS      += -DTARGET_BOARD=$(BOARD_DEFINE)
@@ -320,7 +320,7 @@ ASFLAGS     += -Wall -g
 ASFLAGS     += -x assembler-with-cpp
 ASFLAGS     += -MMD -MP
 ASFLAGS     += -Iinclude/kernel
-ASFLAGS     += -I$(SRC_DIR)/arch/arm/cortex-m7
+ASFLAGS     += -I$(SRC_DIR)/arch/arm/cortex-m
 
 LDFLAGS     = $(CPU)
 LDFLAGS     += -T$(LINK_SCRIPT)

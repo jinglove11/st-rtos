@@ -39,10 +39,10 @@ set(MYRTOS_SOURCES
     ${MYRTOS_TEST_SOURCES}
     src/app/main.c
     src/app/shell.c
-    src/arch/arm/cortex-m7/hal.c
-    src/arch/arm/cortex-m7/pendsv_handler.S
-    src/arch/arm/cortex-m7/svc_handler.S
-    src/arch/arm/cortex-m7/first_switch.S
+    src/arch/arm/cortex-m/hal.c
+    src/arch/arm/cortex-m/pendsv_handler.S
+    src/arch/arm/cortex-m/svc_handler.S
+    src/arch/arm/cortex-m/first_switch.S
     src/startup/arm/cortex-m7/fault_handlers.S
     src/drivers/chip/rp2350/uart_rp2350.c
     src/drivers/chip/rp2350/gpio_rp2350.c
@@ -122,7 +122,7 @@ target_include_directories(my-rtos-pico2w PRIVATE
     src/user/drivers
     src/user/fs
     src/user/supervisor
-    src/arch/arm/cortex-m7
+    src/arch/arm/cortex-m
     src/tests
     src/app
 )
