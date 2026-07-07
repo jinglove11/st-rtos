@@ -296,18 +296,18 @@ static void test_runner_task(void *arg) {
     }
 #endif
 
-    test_run_all_modules();
-
 #if SMP
-    /* Launch core1 after the test suite passes (so tests are single-core
-     * deterministic). Core1 enters the scheduler and picks from the shared
-     * ready_list. */
+    /* Launch core1 BEFORE the test suite so SMP tests can verify dual-core
+     * operation. Core1 enters the scheduler and picks from the shared
+     * ready_list. Non-SMP tests are unaffected (core1 runs idle). */
     {
         extern void smp_init_core1(void);
         smp_init_core1();
         task_delay(10);  /* let core1 initialize */
     }
 #endif
+
+    test_run_all_modules();
 
 #if INIT_PROCESS && CAP_ENABLE
     /* Phase 2 §2.3: after the suite passes (so init/supervisor never disturb
