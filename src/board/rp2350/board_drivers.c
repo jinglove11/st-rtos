@@ -3,7 +3,7 @@
 
 #if DRIVER_ENABLE
 #include "device.h"
-#include "vfs/devfs.h"
+#include "devfs.h"
 
 extern device_t *uart_dev_register(void);
 

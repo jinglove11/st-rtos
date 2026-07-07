@@ -11,7 +11,7 @@
 #if VFS_ENABLE
 
 #if DRIVER_ENABLE
-#include "dev/device.h"
+#include "device.h"
 #endif
 
 void      devfs_init(inode_t *dev_dir);

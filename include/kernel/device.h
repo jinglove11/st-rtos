@@ -11,7 +11,7 @@
 
 #if DRIVER_ENABLE
 
-#include "vfs/inode.h"   /* dev_ops_t */
+#include "inode.h"   /* dev_ops_t */
 
 /*============================================================================
  * 常量

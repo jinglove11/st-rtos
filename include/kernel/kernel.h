@@ -15,7 +15,7 @@
 #include "syscall.h"
 #include "capability.h"
 #include "fault.h"
-#include "vfs/vfs.h"
+#include "vfs.h"
 
 /*============================================================================
  * 内核控制

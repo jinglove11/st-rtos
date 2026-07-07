@@ -95,43 +95,28 @@ add_dependencies(my-rtos-pico2w test_elf_blob)
 # Generate TCB field offsets for assembly (PendSV/SVC/first_switch).
 # Tracks kernel_types.h automatically; the .S files .include the result.
 add_custom_command(
-    OUTPUT  ${CMAKE_CURRENT_LIST_DIR}/src/kernel/include/tcb_offsets.inc
+    OUTPUT  ${CMAKE_CURRENT_LIST_DIR}/include/kernel/tcb_offsets.inc
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_LIST_DIR}/scripts/gen_tcb_offsets.py
             --cc ${CMAKE_C_COMPILER}
-            --include ${CMAKE_CURRENT_LIST_DIR}/src/kernel/include
+            --include ${CMAKE_CURRENT_LIST_DIR}/include/kernel
     DEPENDS ${CMAKE_CURRENT_LIST_DIR}/tools/gen_tcb_offsets.c
-            ${CMAKE_CURRENT_LIST_DIR}/src/kernel/include/kernel_types.h
+            ${CMAKE_CURRENT_LIST_DIR}/include/kernel/kernel_types.h
             ${CMAKE_CURRENT_LIST_DIR}/scripts/gen_tcb_offsets.py
     VERBATIM
 )
 add_custom_target(gen_tcb_offsets
-    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/src/kernel/include/tcb_offsets.inc)
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/include/kernel/tcb_offsets.inc)
 add_dependencies(my-rtos-pico2w gen_tcb_offsets)
 
 target_include_directories(my-rtos-pico2w PRIVATE
-    src/kernel/include
-    src/kernel/core
-    src/kernel/task
+    include/kernel
+    include/drivers
+    include/board
+    include/app
     src/kernel/ipc
-    src/kernel/timer
-    src/kernel/irq
-    src/kernel/mpu
-    src/kernel/syscall
-    src/kernel/usercopy
-    src/kernel/cap
-    src/kernel/fault
-    src/kernel/mem
     src/kernel/vfs
-    src/kernel/trace
-    src/kernel/stats
-    src/kernel/dev
     src/kernel
-    src/hal
-    src/drivers/include
-    src/drivers/block
-    src/kernel/loader
-    src/board/include
     src/board/rp2350
     src/user/nameserver
     src/user/drivers

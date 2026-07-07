@@ -5,8 +5,8 @@
 
 #include "test_framework.h"
 #include "kernel.h"
-#include "vfs/devfs.h"
-#include "vfs/ramfs.h"
+#include "devfs.h"
+#include "ramfs.h"
 #include "kernel_config.h"
 #include "user_api.h"
 #if DRIVER_ENABLE

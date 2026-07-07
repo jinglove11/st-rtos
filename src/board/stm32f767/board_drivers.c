@@ -7,7 +7,7 @@
 
 #include "kernel_config.h"
 #include "device.h"
-#include "vfs/devfs.h"
+#include "devfs.h"
 #include "uart.h"
 #include "gpio.h"
 #include "nucleo_f767.h"

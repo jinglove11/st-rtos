@@ -19,13 +19,13 @@
 #include "stats.h"
 #include "capability.h"
 #include "root_bootstrap.h"
-#include "vfs/vfs.h"
+#include "vfs.h"
 #if DRIVER_ENABLE
 #include "device.h"
 #endif
 #include "fault.h"
 #if FAULT_ENDPOINT
-#include "fault/fault_endpoint.h"
+#include "fault_endpoint.h"
 #endif
 
 void kern_init(void) {

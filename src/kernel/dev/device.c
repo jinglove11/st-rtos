@@ -7,7 +7,7 @@
 #include "trace.h"
 #include "stats.h"
 #if VFS_ENABLE
-#include "vfs/devfs.h"
+#include "devfs.h"
 #endif
 #include "hal.h"
 #include "scheduler.h"
