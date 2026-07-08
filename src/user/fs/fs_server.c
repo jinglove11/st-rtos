@@ -6,14 +6,10 @@
 #include "fs_proto.h"
 #include "user_api.h"
 #include "inode.h"
+#include "fs_store.h"
 #include <stdint.h>
 
 #if VFS_ENABLE && CAP_ENABLE
-
-typedef struct {
-    uint8_t in_use;
-    int real_fd;
-} fs_fd_entry_t;
 
 int fs_opcode_valid(uint16_t opcode) {
     return opcode >= FS_OP_PING && opcode <= FS_OP_LOOKUP;
@@ -313,32 +309,6 @@ const char *fs_error_name(int err) {
     }
 }
 
-static int fs_fd_alloc(fs_fd_entry_t *fds, int real_fd) {
-    for (uint32_t i = 0; i < FS_FD_MAX; i++) {
-        if (!fds[i].in_use) {
-            fds[i].in_use = 1U;
-            fds[i].real_fd = real_fd;
-            return (int)i + 1;
-        }
-    }
-    return KERN_ERR_RESOURCE;
-}
-
-static int fs_fd_get(fs_fd_entry_t *fds, int token) {
-    if (token <= 0 || token > (int)FS_FD_MAX ||
-        !fds[(uint32_t)token - 1U].in_use) {
-        return KERN_ERR_PARAM;
-    }
-    return fds[(uint32_t)token - 1U].real_fd;
-}
-
-static void fs_fd_free(fs_fd_entry_t *fds, int token) {
-    if (token > 0 && token <= (int)FS_FD_MAX) {
-        fds[(uint32_t)token - 1U].in_use = 0U;
-        fds[(uint32_t)token - 1U].real_fd = KERN_INVALID_ID;
-    }
-}
-
 static int fs_reply(int ep_cap, fs_msg_t *msg, int status, int result) {
     msg->status = status;
     msg->result = result;
@@ -346,16 +316,35 @@ static int fs_reply(int ep_cap, fs_msg_t *msg, int status, int result) {
 }
 
 int fs_server_run(int ep_cap, uint32_t max_requests) {
-    fs_fd_entry_t fds[FS_FD_MAX];
     fs_msg_t msg;
     int err = KERN_OK;
 
     if (ep_cap <= 0) {
         return KERN_ERR_PARAM;
     }
-    for (uint32_t i = 0; i < FS_FD_MAX; i++) {
-        fds[i].in_use = 0U;
-        fds[i].real_fd = KERN_INVALID_ID;
+
+    /* Phase B:fs_server 自管 inode 池 + ramfs。 */
+    int store_mem_cap = sys_mem_alloc(4096);
+    int init_err = KERN_OK;
+    fs_store_ctx_t *ctx = NULL;
+    void *store = NULL;
+
+    if (store_mem_cap <= 0) {
+        init_err = store_mem_cap;       /* sys_mem_alloc 错误码 */
+    } else {
+        store = sys_mem_map(store_mem_cap, CAP_READ | CAP_WRITE);
+        if ((intptr_t)store <= 0) {
+            init_err = (int)(intptr_t)store;  /* sys_mem_map 错误码 */
+            (void)sys_mem_free(store_mem_cap);
+            store_mem_cap = -1;
+        } else {
+            ctx = fs_store_init(store, 4096);
+            if (ctx == NULL) {
+                init_err = -77;         /* 标记 fs_store_init 失败 */
+                (void)sys_mem_free(store_mem_cap);
+                store_mem_cap = -1;
+            }
+        }
     }
 
     for (uint32_t round = 0;
@@ -376,114 +365,90 @@ int fs_server_run(int ep_cap, uint32_t max_requests) {
             continue;
         }
 
+        /* 初始化失败时:所有请求返回 init_err (暴露具体错误码供诊断) */
+        if (ctx == NULL) {
+            err = fs_reply(ep_cap, &msg, init_err, 0);
+            continue;
+        }
+
         if (msg.opcode == FS_OP_PING) {
             err = fs_reply(ep_cap, &msg, KERN_OK, 0);
         } else if (msg.opcode == FS_OP_OPEN) {
             if (!fs_path_valid(msg.path)) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                int real_fd = open(msg.path, msg.flags);
-                if (real_fd < 0) {
-                    err = fs_reply(ep_cap, &msg, real_fd, 0);
+                int fd = fs_store_open(ctx, msg.path, msg.flags);
+                if (fd < 0) {
+                    err = fs_reply(ep_cap, &msg, fd, 0);
                 } else {
-                    int token = fs_fd_alloc(fds, real_fd);
-                    if (token < 0) {
-                        (void)close(real_fd);
-                        err = fs_reply(ep_cap, &msg, token, 0);
-                    } else {
-                        err = fs_reply(ep_cap, &msg, KERN_OK, token);
-                    }
+                    err = fs_reply(ep_cap, &msg, KERN_OK, fd);
                 }
             }
         } else if (msg.opcode == FS_OP_CLOSE) {
-            int real_fd = fs_fd_get(fds, msg.fd);
-            if (real_fd < 0) {
-                err = fs_reply(ep_cap, &msg, real_fd, 0);
-            } else {
-                int close_err = close(real_fd);
-                if (close_err == KERN_OK) {
-                    fs_fd_free(fds, msg.fd);
-                }
-                err = fs_reply(ep_cap, &msg, close_err, 0);
-            }
+            int close_err = fs_store_close(ctx, msg.fd);
+            err = fs_reply(ep_cap, &msg, close_err, 0);
         } else if (msg.opcode == FS_OP_READ) {
-            int real_fd = fs_fd_get(fds, msg.fd);
-            if (real_fd < 0 || msg.length > FS_PAYLOAD_MAX) {
-                err = fs_reply(ep_cap, &msg,
-                               real_fd < 0 ? real_fd : KERN_ERR_PARAM, 0);
+            if (msg.length > FS_PAYLOAD_MAX) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                int n = read(real_fd, msg.payload, (int)msg.length);
+                int n = fs_store_read(ctx, msg.fd, msg.payload, msg.length);
                 err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
                                n < 0 ? 0 : n);
             }
         } else if (msg.opcode == FS_OP_WRITE) {
-            int real_fd = fs_fd_get(fds, msg.fd);
-            if (real_fd < 0 || msg.length > FS_PAYLOAD_MAX) {
-                err = fs_reply(ep_cap, &msg,
-                               real_fd < 0 ? real_fd : KERN_ERR_PARAM, 0);
+            if (msg.length > FS_PAYLOAD_MAX) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                int n = write(real_fd, msg.payload, (int)msg.length);
+                int n = fs_store_write(ctx, msg.fd, msg.payload, msg.length);
                 err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
                                n < 0 ? 0 : n);
             }
         } else if (msg.opcode == FS_OP_LSEEK) {
-            int real_fd = fs_fd_get(fds, msg.fd);
-            if (real_fd < 0) {
-                err = fs_reply(ep_cap, &msg, real_fd, 0);
-            } else {
-                int pos = lseek(real_fd, msg.offset, msg.flags);
-                err = fs_reply(ep_cap, &msg, pos < 0 ? pos : KERN_OK,
-                               pos < 0 ? 0 : pos);
-            }
+            int pos = fs_store_lseek(ctx, msg.fd, msg.offset, msg.flags);
+            err = fs_reply(ep_cap, &msg, pos < 0 ? pos : KERN_OK,
+                           pos < 0 ? 0 : pos);
         } else if (msg.opcode == FS_OP_READDIR) {
-            int real_fd = fs_fd_get(fds, msg.fd);
-            if (real_fd < 0) {
-                err = fs_reply(ep_cap, &msg, real_fd, 0);
+            fs_dirent_t entry;
+            int readdir_err = fs_store_readdir(ctx, msg.fd, &entry);
+            if (readdir_err != KERN_OK) {
+                err = fs_reply(ep_cap, &msg, readdir_err, 0);
             } else {
-                dirent_t entry;
-                int readdir_err = readdir(real_fd, &entry);
-                if (readdir_err != KERN_OK) {
-                    err = fs_reply(ep_cap, &msg, readdir_err, 0);
-                } else {
-                    msg.length = entry.type;
-                    fs_copy_dirent_name(msg.path, entry.name);
-                    err = fs_reply(ep_cap, &msg, KERN_OK,
-                                   (int)entry.ino);
-                }
+                msg.length = entry.type;
+                fs_copy_dirent_name(msg.path, entry.name);
+                err = fs_reply(ep_cap, &msg, KERN_OK, (int)entry.ino);
             }
         } else if (msg.opcode == FS_OP_UNLINK) {
             if (!fs_path_valid(msg.path)) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                int unlink_err = unlink(msg.path);
+                int unlink_err = fs_store_unlink(ctx, msg.path);
                 err = fs_reply(ep_cap, &msg, unlink_err, 0);
             }
         } else if (msg.opcode == FS_OP_MKDIR) {
             if (!fs_path_valid(msg.path)) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                int mkdir_err = mkdir(msg.path);
+                int mkdir_err = fs_store_mkdir(ctx, msg.path);
                 err = fs_reply(ep_cap, &msg, mkdir_err, 0);
             }
         } else if (msg.opcode == FS_OP_STAT) {
             if (!fs_path_valid(msg.path)) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                vfs_stat_t st;
-                int stat_err = stat(msg.path, &st);
+                fs_statinfo_t st;
+                int stat_err = fs_store_stat(ctx, msg.path, &st);
                 msg.flags = st.type;
                 msg.length = st.size;
                 err = fs_reply(ep_cap, &msg, stat_err,
                                stat_err == KERN_OK ? (int)st.ino : 0);
             }
         } else if (msg.opcode == FS_OP_LOOKUP) {
-            /* LOOKUP: 路径元数据查询 (不打开 fd)。
-             * 代理式阶段转发成 vfs_stat;Phase B 走自管路径解析。 */
+            /* LOOKUP:路径元数据查询 (Phase B 走自管路径解析) */
             if (!fs_path_valid(msg.path)) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
-                vfs_stat_t st;
-                int stat_err = stat(msg.path, &st);
+                fs_statinfo_t st;
+                int stat_err = fs_store_stat(ctx, msg.path, &st);
                 msg.flags = st.type;
                 msg.length = st.size;
                 err = fs_reply(ep_cap, &msg, stat_err,
@@ -494,11 +459,9 @@ int fs_server_run(int ep_cap, uint32_t max_requests) {
         }
     }
 
-    for (uint32_t i = 0; i < FS_FD_MAX; i++) {
-        if (fds[i].in_use) {
-            (void)close(fds[i].real_fd);
-            fds[i].in_use = 0U;
-        }
+    /* fs_server 的 fd 表在 ctx 里,随 memblock 释放自动消失 */
+    if (store_mem_cap > 0) {
+        (void)sys_mem_free(store_mem_cap);
     }
     return err;
 }

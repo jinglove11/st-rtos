@@ -3038,7 +3038,7 @@ static void test_fs_server_basic_session(void) {
     if (fs_ep >= 0) {
         fs_id = task_create_user("fs_svc",
                                  fs_service_session_task,
-                                 NULL, 13, 1536);
+                                 NULL, 13, 2048);
         client_id = task_create_user("fs_client",
                                      fs_client_session_task,
                                      NULL, 14, 1024);
