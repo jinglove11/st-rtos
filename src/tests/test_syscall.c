@@ -163,14 +163,15 @@ static void test_syscall_bad_user_pointers(void) {
     TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad task name pointer rejected");
 
 #if VFS_ENABLE
+    /* Phase D:文件 syscall 返回 NOSYS (由 fs_server user 服务提供) */
     err = sys_call2(SYSCALL_OPEN, (int)(uintptr_t)0xBBBBBBBBu, 0);
-    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad open path pointer rejected");
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "open returns NOSYS (fs_server)");
 
     err = sys_call3(SYSCALL_READ, 0, (int)(uintptr_t)0xBBBBBBBBu, 4);
-    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad read buffer pointer rejected");
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "read returns NOSYS (fs_server)");
 
     err = sys_call3(SYSCALL_WRITE, 0, (int)(uintptr_t)0xBBBBBBBBu, 4);
-    TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad write buffer pointer rejected");
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "write returns NOSYS (fs_server)");
 #endif
 }
 

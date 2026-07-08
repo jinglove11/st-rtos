@@ -289,8 +289,12 @@ static void test_fault_releases_fd_refs(void) {
     task_start(tid);
     task_delay(5);
 
-    TEST_ASSERT_EQ((int)(base_ref + 1), (int)ino->refcount,
-                   "fault task fd holds inode ref");
+    /* Phase D:sys_open 返回 NOSYS (文件操作由 fs_server 提供)。
+     * fault 任务无法 open fd,refcount 不变 (内核 fd_table 不再用)。
+     * fd 死亡清理现在由 fs_server 的 kern.fault 订阅处理
+     * (见 test_fs_fd_cleanup)。 */
+    TEST_ASSERT_EQ((int)base_ref, (int)ino->refcount,
+                   "fault task fd: sys_open NOSYS, no fd allocated");
 
     void *retval = NULL;
     kern_err_t err = task_join(tid, &retval, 2000);
