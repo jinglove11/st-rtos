@@ -118,72 +118,74 @@ static void cmd_help(int argc, char **argv) {
 }
 
 /*============================================================================
- * 内置命令: ls
+ * 内置命令: ls / cat — Phase D1: 走 fs_server IPC (不再直调内核 vfs_*)
  *============================================================================*/
+
+/* shell_fs_cap:fs_server 的 service cap (cmd_fs 路径设置)。
+ * 定义在这里供 cmd_ls/cmd_cat 提前使用。 */
+static cap_id_t shell_fs_cap = KERN_INVALID_ID;
+
+/* 获取 fs_server 的 service cap。
+ * 返回 >0:可用的 ep cap;<=0:fs_server 未启动。 */
+static cap_id_t shell_get_fs_cap(void) {
+    return shell_fs_cap;
+}
 
 static void cmd_ls(int argc, char **argv) {
     const char *path = (argc > 1) ? argv[1] : "/";
+    cap_id_t fs_cap = shell_get_fs_cap();
+    if (fs_cap <= 0) {
+        sh_puts("ls: fs_server not running (use 'fs start' first)\r\n");
+        return;
+    }
 
-    inode_t *dir = vfs_lookup(path);
-    if (!dir) {
+    /* stat 判断类型 (fs_server Phase B 自管路径解析) */
+    vfs_stat_t st;
+    int err = fs_stat((int)fs_cap, path, &st, 1000);
+    if (err != KERN_OK) {
         sh_puts("ls: ");
         sh_puts(path);
         sh_puts(": No such file or directory\r\n");
         return;
     }
 
-    if (dir->type != INODE_TYPE_DIR) {
-        /* 普通文件: 直接打印 */
-        sh_putdec(dir->ino);
-        sh_puts("  ");
-        sh_puts(dir->name);
+    /* 普通文件:直接打印元数据 */
+    if (st.type != INODE_TYPE_DIR) {
+        sh_putdec(st.ino);
+        sh_puts(st.type == INODE_TYPE_CHRDEV ? "  c  " : "  -  ");
+        sh_puts(path);
         sh_puts("\r\n");
-        inode_put(dir);
         return;
     }
 
-    if (!dir->dir_ops || !dir->dir_ops->readdir) {
-        sh_puts("ls: readdir not supported\r\n");
-        inode_put(dir);
-        return;
-    }
-    inode_put(dir);
-
-    int fd = vfs_open(path, O_RDONLY);
-    if (fd < 0) {
+    /* 目录:open + readdir */
+    int fd = fs_open((int)fs_cap, path, O_RDONLY, 1000);
+    if (fd <= 0) {
         sh_puts("ls: ");
         sh_puts(path);
         sh_puts(": open failed\r\n");
         return;
     }
 
+    /* fs_readdir 把结果放进 msg.path (名字) + msg.length (type) + result (ino)。
+     * fs_readdir 客户端 API 用 dirent_t 接收。 */
     dirent_t entry;
-    while (1) {
-        if (vfs_readdir(fd, &entry) != KERN_OK)
-            break;
-
+    while (fs_readdir((int)fs_cap, fd, &entry, 1000) == KERN_OK) {
         sh_putdec_width(entry.ino, 6);
         sh_puts("  ");
-
-        /* 类型标记 */
         switch (entry.type) {
         case INODE_TYPE_DIR:   sh_putc('d'); break;
         case INODE_TYPE_FILE:  sh_putc('-'); break;
         case INODE_TYPE_CHRDEV:sh_putc('c'); break;
         default:               sh_putc('?'); break;
         }
-
         sh_puts("  ");
         sh_puts(entry.name);
         sh_puts("\r\n");
     }
 
-    vfs_close(fd);
+    fs_close((int)fs_cap, fd, 1000);
 }
-
-/*============================================================================
- * 内置命令: cat
- *============================================================================*/
 
 static void cmd_cat(int argc, char **argv) {
     if (argc < 2) {
@@ -191,23 +193,30 @@ static void cmd_cat(int argc, char **argv) {
         return;
     }
 
-    int fd = vfs_open(argv[1], O_RDONLY);
-    if (fd < 0) {
+    cap_id_t fs_cap = shell_get_fs_cap();
+    if (fs_cap <= 0) {
+        sh_puts("cat: fs_server not running (use 'fs start' first)\r\n");
+        return;
+    }
+
+    int fd = fs_open((int)fs_cap, argv[1], O_RDONLY, 1000);
+    if (fd <= 0) {
         sh_puts("cat: ");
         sh_puts(argv[1]);
         sh_puts(": Cannot open\r\n");
         return;
     }
 
-    char buf[64];
+    char buf[56];  /* FS_PAYLOAD_MAX */
     int32_t n;
-    while ((n = vfs_read(fd, buf, sizeof(buf) - 1)) > 0) {
-        buf[n] = '\0';
-        sh_puts(buf);
+    while ((n = fs_read((int)fs_cap, fd, buf, sizeof(buf), 1000)) > 0) {
+        for (int32_t i = 0; i < n; i++) {
+            sh_putc(buf[i]);
+        }
     }
     sh_puts("\r\n");
 
-    vfs_close(fd);
+    fs_close((int)fs_cap, fd, 1000);
 }
 
 /*============================================================================
@@ -2133,7 +2142,7 @@ static void cmd_driver(int argc, char **argv) {
 
 static task_id_t shell_fs_task = KERN_INVALID_ID;
 static ep_id_t shell_fs_ep = KERN_INVALID_ID;
-static cap_id_t shell_fs_cap = KERN_INVALID_ID;
+/* shell_fs_cap 定义在前面 (cmd_ls/cmd_cat 用) */
 static task_id_t shell_fs_ns_task = KERN_INVALID_ID;
 static ep_id_t shell_fs_ns_ep = KERN_INVALID_ID;
 static cap_id_t shell_fs_ns_cap = KERN_INVALID_ID;
