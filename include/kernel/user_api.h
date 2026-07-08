@@ -416,6 +416,11 @@ static inline int sys_mem_size(int mem_cap) {
     return sys_call1(SYSCALL_MEM_SIZE, mem_cap);
 }
 
+/* map memblock cap 进当前任务 MPU,返回可读写指针 (user 任务专用) */
+static inline void *sys_mem_map(int mem_cap, int rights) {
+    return (void *)(uintptr_t)sys_call2(SYSCALL_MEM_MAP, mem_cap, rights);
+}
+
 static inline int sys_shm_create(int size, int rights) {
     return sys_call2(SYSCALL_SHM_CREATE, size, rights);
 }

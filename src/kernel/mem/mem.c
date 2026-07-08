@@ -453,6 +453,9 @@ static void kmmio_free_object(kmmio_object_t *mmio) {
     }
 }
 
+/* 前向声明 (kmem_map_to_task 在前,kshm_is_mpu_compliant 定义在后) */
+static int kshm_is_mpu_compliant(size_t size);
+
 static kshm_object_t *kshm_alloc_object(void) {
     for (uint32_t i = 0; i < KSHM_OBJECT_MAX; i++) {
         if (!kshm_objects[i].in_use) {
@@ -577,6 +580,77 @@ kern_err_t kmem_get_range(cap_id_t cap, uint8_t required_rights,
 
     *ptr = (void *)((uint8_t *)mem->base + offset);
     return KERN_OK;
+}
+
+kern_err_t kmem_map_to_task(tcb_t *task, cap_id_t cap,
+                            uint8_t rights, void **out_addr) {
+#if MPU_ENABLE
+    if (task == NULL || out_addr == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    *out_addr = NULL;
+    if (rights != CAP_READ && rights != (CAP_READ | CAP_WRITE)) {
+        return KERN_ERR_PARAM;
+    }
+
+    kmem_object_t *mem = cap_lookup_for(task, cap, CAP_OBJ_MEMBLOCK, rights);
+    if (!mem) {
+        return KERN_ERR_CAP;
+    }
+    if (!kshm_is_mpu_compliant(mem->size) ||
+        (((uintptr_t)mem->base & 0x1FU) != 0U)) {
+        return KERN_ERR_PARAM;
+    }
+
+    /* 复用 shm_maps[] 记录映射 (memblock 与 shm 在 MPU region 层面等价) */
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (task->shm_maps[i].in_use && task->shm_maps[i].cap == cap) {
+            return KERN_ERR_BUSY;
+        }
+    }
+
+    int map_slot = -1;
+    for (uint32_t i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (!task->shm_maps[i].in_use) {
+            map_slot = (int)i;
+            break;
+        }
+    }
+    if (map_slot < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+
+    int region = -1;
+    for (uint32_t r = 3; r < 8; r++) {
+        if ((task->mpu_regions[r][1] & RASR_ENABLE) == 0) {
+            region = (int)r;
+            break;
+        }
+    }
+    if (region < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+
+    uint32_t ap = (rights & CAP_WRITE) ? AP_FULL : AP_PRW_URO;
+    mpu_region_encode((uint32_t)region, (uint32_t)(uintptr_t)mem->base,
+                      (uint32_t)mem->size,
+                      RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE,
+                      &task->mpu_regions[region][0],
+                      &task->mpu_regions[region][1]);
+
+    task->shm_maps[map_slot].in_use = 1U;
+    task->shm_maps[map_slot].region = (uint8_t)region;
+    task->shm_maps[map_slot].rights = rights;
+    task->shm_maps[map_slot].cap = cap;
+    task->shm_maps[map_slot].addr = mem->base;
+    task->shm_maps[map_slot].size = mem->size;
+
+    *out_addr = mem->base;
+    return KERN_OK;
+#else
+    (void)task; (void)cap; (void)rights; (void)out_addr;
+    return KERN_ERR_STATE;
+#endif
 }
 
 kern_err_t kmmio_create_cap(uintptr_t base, size_t size, uint8_t width,

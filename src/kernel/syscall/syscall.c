@@ -1035,6 +1035,29 @@ static int sys_mem_size(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+static int sys_mem_map(uint32_t a1, uint32_t a2, uint32_t a3,
+                       uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE && MPU_ENABLE
+    tcb_t *current = sched_get_current();
+    if (current == NULL || (current->attrs & TASK_ATTR_USER) == 0) {
+        return KERN_ERR_PERM;
+    }
+
+    void *addr = NULL;
+    kern_err_t err = kmem_map_to_task(current, (cap_id_t)a1,
+                                      (uint8_t)a2, &addr);
+    if (err != KERN_OK) {
+        return err;
+    }
+
+    mpu_load_task_regions(current);
+    return (int)(uintptr_t)addr;
+#else
+    return KERN_ERR_CAP;
+#endif
+}
+
 static int sys_shm_create(uint32_t a1, uint32_t a2, uint32_t a3,
                           uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
@@ -1795,6 +1818,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_MEM_ALLOC,     sys_mem_alloc,     1),
     SYSDEF(SYSCALL_MEM_FREE,      sys_mem_free,      1),
     SYSDEF(SYSCALL_MEM_SIZE,      sys_mem_size,      1),
+    SYSDEF(SYSCALL_MEM_MAP,       sys_mem_map,       2),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),

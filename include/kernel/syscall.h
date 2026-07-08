@@ -125,6 +125,7 @@
 #define SYSCALL_MMIO_UNMAP       76
 #define SYSCALL_MMIO_REQUEST     77
 #define SYSCALL_TASK_SET_POLICY  78
+#define SYSCALL_MEM_MAP          79            /* map memblock into task MPU */
 
 /*============================================================================
  * Syscall 分发
