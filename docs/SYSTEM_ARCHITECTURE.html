@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My-RTOS 系统架构与启动流程</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg-card: #161b22;
+    --bg-code: #1c2128;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --text-bright: #f0f6fc;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d29922;
+    --accent4: #f85149;
+    --accent5: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    line-height: 1.65;
+    font-size: 15px;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 24px 80px; }
+  header {
+    background: linear-gradient(135deg, #1a2233 0%, #0f1419 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 48px 24px 36px;
+    margin-bottom: 36px;
+  }
+  header .inner { max-width: 1240px; margin: 0 auto; }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 30px;
+    color: var(--text-bright);
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+  header .subtitle {
+    color: var(--accent);
+    font-size: 15px;
+    margin-bottom: 18px;
+    font-family: "SF Mono", Consolas, monospace;
+  }
+  header .meta {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    color: var(--text-dim); font-size: 13px;
+  }
+  header .meta span b { color: var(--text); font-weight: 600; }
+  h2 {
+    color: var(--text-bright);
+    font-size: 22px;
+    margin: 48px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 6px;
+    background: var(--accent); color: #0f1419;
+    font-size: 15px; font-weight: 700;
+  }
+  h3 {
+    color: var(--text-bright); font-size: 17px;
+    margin: 28px 0 12px;
+  }
+  h4 {
+    color: var(--accent); font-size: 14px;
+    margin: 18px 0 8px;
+    text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  p { margin: 8px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
+    background: var(--bg-code);
+    color: var(--accent5);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+    font-size: 13px;
+  }
+  pre code { background: none; color: var(--text); padding: 0; }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 880px) { .grid-2 { grid-template-columns: 1fr; } }
+  table {
+    width: 100%; border-collapse: collapse;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 12px 0;
+    font-size: 13.5px;
+  }
+  th {
+    background: #21262d;
+    color: var(--text-bright);
+    text-align: left;
+    padding: 10px 12px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 9px 12px;
+    border-bottom: 1px solid #21262d;
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #1c2128; }
+  td code { font-size: 12px; }
+  .tag {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: "SF Mono", monospace;
+  }
+  .tag-r { background: rgba(248,81,73,0.15); color: var(--accent4); }
+  .tag-g { background: rgba(63,185,80,0.15); color: var(--accent2); }
+  .tag-b { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag-y { background: rgba(210,153,34,0.15); color: var(--accent3); }
+  .tag-p { background: rgba(188,140,255,0.15); color: var(--accent5); }
+  .mermaid {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin: 16px 0;
+    text-align: center;
+  }
+  .mermaid svg { max-width: 100%; height: auto; }
+  .callout {
+    border-left: 3px solid var(--accent3);
+    background: rgba(210,153,34,0.06);
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 14px 0;
+    color: var(--text);
+  }
+  .callout b { color: var(--accent3); }
+  .legend {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    font-size: 12px; color: var(--text-dim);
+    margin-bottom: 12px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i {
+    width: 12px; height: 12px; border-radius: 3px;
+    display: inline-block;
+  }
+  .toc {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 28px;
+    margin: 0 0 24px;
+    columns: 2;
+    column-gap: 32px;
+    font-size: 14px;
+  }
+  .toc a { color: var(--text); display: block; padding: 2px 0; }
+  .toc a:hover { color: var(--accent); }
+  .toc .toc-title {
+    color: var(--accent); font-weight: 600;
+    columns: 1; column-span: all; margin-bottom: 8px;
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .file { color: var(--text-dim); font-size: 12px; font-family: "SF Mono", monospace; }
+  .file b { color: var(--accent2); font-weight: normal; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="inner">
+    <div class="subtitle">$ my-rtos · architecture reference</div>
+    <h1>My-RTOS 系统架构与启动流程</h1>
+    <div class="meta">
+      <span>🎯 <b>目标板</b>:RP2350 (Pico 2 W)</span>
+      <span>⚙️ <b>CPU</b>:双核 Cortex-M33 @ 150MHz</span>
+      <span>💾 <b>Flash</b>:4MB QSPI (W25Q32JV)</span>
+      <span>🧠 <b>SRAM</b>:520 KB</span>
+      <span>📊 <b>测试</b>:3016/3016 通过 · 0 panic</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="toc">
+  <div class="toc-title">目录</div>
+  <a href="#sec1">1. 系统分层架构</a>
+  <a href="#sec2">2. 内核子系统全景</a>
+  <a href="#sec3">3. 启动流程总览</a>
+  <a href="#sec4">4. 内核初始化序列(16 步)</a>
+  <a href="#sec5">5. SMP 双核启动</a>
+  <a href="#sec6">6. 任务与调度模型</a>
+  <a href="#sec7">7. IPC 机制</a>
+  <a href="#sec8">8. Capability 安全模型</a>
+  <a href="#sec9">9. 故障处理与监督重启</a>
+  <a href="#sec10">10. MPU 内存保护</a>
+  <a href="#sec11">11. 内存布局</a>
+  <a href="#sec12">12. Syscall 接口(79 个)</a>
+  <a href="#sec13">13. 构建系统双轨</a>
+  <a href="#sec14">14. 用户态进程拓扑</a>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec1"><span class="num">1</span>系统分层架构</h2>
+
+<p>My-RTOS 是一个 capability-based 微内核风格 RTOS,运行在 RP2350 双核 Cortex-M33 上。
+下面的分层架构图展示了从硬件到用户态的完整调用栈,以及 capability 如何作为"贯穿所有对象访问"的安全闸门。</p>
+
+<div class="mermaid">
+graph TB
+    subgraph USER["👥 用户态 (Unprivileged · CONTROL.nPRIV=1)"]
+        direction LR
+        INIT["init 进程<br/><small>用户任务根</small>"]
+        SUP["supervisor<br/><small>故障监控 + 重启</small>"]
+        NS["nameserver<br/><small>名字服务</small>"]
+        DRV["driver servers<br/><small>UART/GPIO 服务</small>"]
+        FS["fs server<br/><small>VFS 代理</small>"]
+        APP["user apps<br/><small>crashy_app / ELF</small>"]
+    end
+
+    subgraph SYSCALL["🚪 系统调用边界 (SVC #1 → kern_syscall_handler)"]
+        SCTBL["syscall_table[79]<br/><small>task / ipc / cap / vfs /<br/>mmio / fault / timer ...</small>"]
+    end
+
+    subgraph KERN["🧠 内核 (Privileged · CONTROL.nPRIV=0)"]
+        direction TB
+        subgraph CORE["Core 调度"]
+            SCH["Scheduler<br/><small>32 级优先级抢占 + RR</small>"]
+            TASK["Task Manager<br/><small>TCB 池 / 生命周期</small>"]
+            SMP["SMP<br/><small>共享 ready_list + sched_lock</small>"]
+        end
+        subgraph IPC["IPC 子系统"]
+            EP["Endpoint<br/><small>C/S 多对一</small>"]
+            CH["Channel<br/><small>P2P + 共享内存</small>"]
+            SYN["Semaphore/Mutex/<br/>Event/Mqueue"]
+            WQ["wait_queue<br/><small>阻塞唤醒</small>"]
+        end
+        CAP["Capability<br/><small>15 对象类型 · revoke 树</small>"]
+        FLT["Fault<br/><small>解码 + 隔离 + 通知</small>"]
+        VFS["VFS<br/><small>inode / devfs / ramfs</small>"]
+        LDR["ELF Loader<br/><small>XIP + .data 重定位</small>"]
+        MEM["Mem / MPU<br/><small>kmalloc + 区域映射</small>"]
+    end
+
+    subgraph HAL_L["🔧 HAL (src/arch/arm/cortex-m/)"]
+        HALC["hal.c<br/><small>中断/临界区/SysTick/栈</small>"]
+        PEND["PendSV.S / SVC.S<br/><small>上下文切换 + 分派</small>"]
+    end
+
+    subgraph HW["⚙️ 硬件 (RP2350 SoC)"]
+        direction LR
+        M33A["Core0 Cortex-M33"]
+        M33B["Core1 Cortex-M33"]
+        NVIC["NVIC + SCB"]
+        SYST["SysTick ×2"]
+        MPUH["PMSAv8 MPU"]
+        SIO["SIO<br/><small>cpuid / FIFO</small>"]
+        QSPI["QSPI Flash<br/><small>W25Q32JV 4MB</small>"]
+        UART["UART0"]
+        GPIO["GPIO"]
+    end
+
+    USER -->|"svc #1"| SCTBL
+    SCTBL --> CORE
+    SCTBL --> IPC
+    SCTBL --> CAP
+    SCTBL --> VFS
+    SCTBL --> FLT
+    SCTBL --> MEM
+    SCTBL --> LDR
+
+    CAP -.->|"守卫"| IPC
+    CAP -.->|"守卫"| TASK
+    CAP -.->|"守卫"| VFS
+
+    CORE --> HAL_L
+    IPC --> HAL_L
+    HAL_L --> HW
+
+    style USER fill:#1a2333,stroke:#58a6ff,color:#f0f6fc
+    style KERN fill:#1c2618,stroke:#3fb950,color:#f0f6fc
+    style HAL_L fill:#2a2218,stroke:#d29922,color:#f0f6fc
+    style HW fill:#22182a,stroke:#bc8cff,color:#f0f6fc
+    style SYSCALL fill:#331818,stroke:#f85149,color:#f0f6fc
+</div>
+
+<div class="legend">
+  <span><i style="background:#1a2333"></i> 用户态(非特权)</span>
+  <span><i style="background:#1c2618"></i> 内核(特权)</span>
+  <span><i style="background:#2a2218"></i> HAL 抽象层</span>
+  <span><i style="background:#22182a"></i> Cortex-M33 硬件</span>
+  <span><i style="background:#331818"></i> syscall 边界</span>
+</div>
+
+<div class="callout">
+  <b>设计要点:</b> 用户态与内核之间靠 <code>SVC</code> 指令过渡(软中断),MPU 强制隔离。
+  capability 是一根贯穿 IPC / Task / VFS 访问的<span style="color:var(--accent2)">安全横切线</span>——
+  任何需要内核对象的 syscall,第一步都是 <code>cap_resolve()</code> 校验权限。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec2"><span class="num">2</span>内核子系统全景</h2>
+
+<p><code>src/kernel/</code> 下 18 个子目录,各司其职。下表按 <code>kern_init()</code> 的初始化顺序列出。</p>
+
+<table>
+<thead><tr><th style="width:110px">子系统</th><th style="width:230px">核心源文件</th><th>职责</th><th style="width:240px">关键 API</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-b">cap</span></td><td><span class="file">capability.c · cap_subset.c</span></td><td>slot/generation 句柄式 capability,revoke 树</td><td><code>cap_resolve()</code><br/><code>cap_derive_for()</code><br/><code>cap_revoke_slot_tree()</code></td></tr>
+<tr><td><span class="tag tag-g">core</span></td><td><span class="file">scheduler.c · smp.c</span></td><td>优先级抢占调度 + RP2350 第二核启动</td><td><code>sched_start()</code><br/><code>kern_pendsv_handler()</code><br/><code>smp_init_core1()</code></td></tr>
+<tr><td><span class="tag tag-y">dev</span></td><td><span class="file">device.c</span></td><td>静态池式设备注册表,接 devfs</td><td><code>device_alloc()</code><br/><code>device_find()</code></td></tr>
+<tr><td><span class="tag tag-r">fault</span></td><td><span class="file">fault.c · fault_endpoint.c · panic_log.c</span></td><td>Fault 解码、用户隔离、向 supervisor 通知、flash 持久化</td><td><code>fault_handler_c()</code><br/><code>kern_fault_notify()</code><br/><code>panic_log_save()</code></td></tr>
+<tr><td><span class="tag tag-p">ipc</span></td><td><span class="file">endpoint.c · channel.c · wait_queue.c · event.c · mqueue.c · mutex.c · semaphore.c</span></td><td>endpoint (C/S)、channel (P2P)、同步原语</td><td><code>endpoint_send_common()</code><br/><code>channel_connect()</code><br/><code>wait_queue_get_highest()</code></td></tr>
+<tr><td><span class="tag tag-y">irq</span></td><td><span class="file">irq.c · bh.c</span></td><td>中断注册、线程化 IRQ、底半部</td><td><code>irq_register()</code><br/><code>bh_create()</code><br/><code>bh_service_start()</code></td></tr>
+<tr><td><span class="tag tag-g">loader</span></td><td><span class="file">elf_loader.c</span></td><td>ELF 加载(XIP 执行,.data 重定位)</td><td><code>elf_load()</code></td></tr>
+<tr><td><span class="tag tag-b">mem</span></td><td><span class="file">mem.c · mempool.c</span></td><td>kmalloc + kmem/kmmio/kshm cap 包装 + MPU 映射</td><td><code>kmalloc()</code><br/><code>kmmio_map_to_task()</code></td></tr>
+<tr><td><span class="tag tag-b">mpu</span></td><td><span class="file">mpu.c</span></td><td>PMSAv7 (M7) / PMSAv8 (M33) MPU 编程</td><td><code>mpu_init()</code><br/><code>mpu_load_task_regions()</code></td></tr>
+<tr><td><span class="tag tag-y">syscall</span></td><td><span class="file">syscall.c</span></td><td>79 个 syscall 分发表</td><td><code>kern_syscall_handler()</code></td></tr>
+<tr><td><span class="tag tag-g">task</span></td><td><span class="file">task.c</span></td><td>TCB 池、生命周期、user task MPU 初始化</td><td><code>task_create()</code><br/><code>task_create_user()</code><br/><code>task_start()</code></td></tr>
+<tr><td><span class="tag tag-y">timer</span></td><td><span class="file">timer.c</span></td><td>软件定时器(最小堆 + 服务任务)</td><td><code>timer_init()</code><br/><code>timer_service_start()</code></td></tr>
+<tr><td><span class="tag tag-b">vfs</span></td><td><span class="file">vfs.c · inode.c · ramfs.c · devfs.c</span></td><td>虚拟文件系统、inode 层</td><td><code>vfs_init()</code><br/><code>vfs_open()</code></td></tr>
+<tr><td><span class="tag tag-y">usercopy</span></td><td><span class="file">usercopy.c</span></td><td><code>copy_from_user</code> / <code>copy_to_user</code> 安全访问</td><td><code>copy_from_user()</code></td></tr>
+<tr><td><span class="tag tag-y">stats</span></td><td><span class="file">stats.c</span></td><td>上下文切换/IRQ/syscall/fault 计数</td><td><code>stats_init()</code></td></tr>
+<tr><td><span class="tag tag-y">trace</span></td><td><span class="file">trace.c</span></td><td>环形事件追踪缓冲</td><td><code>trace_event()</code></td></tr>
+<tr><td><span class="tag tag-y">lib</span></td><td><span class="file">kstring.c</span></td><td>内核内字符串工具</td><td><code>kstrlen()</code> 等</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="sec3"><span class="num">3</span>启动流程总览</h2>
+
+<p>从上电到第一个用户任务运行,完整调用链如下。RP2350 的早期启动(bootrom → SDK startup → MSP/VTOR)由 Pico SDK 提供,
+仓库代码从 <code>main()</code> 接管。</p>
+
+<div class="mermaid">
+flowchart TD
+    POW["⚡ 上电 / 复位"] --> ROM["RP2350 片内 Bootrom<br/><small>(PSM force-off, 选 boot slot)</small>"]
+    ROM --> SDK["Pico SDK 启动代码<br/><small>__vectors → Reset_Handler → runtime_init</small>"]
+    SDK --> MAIN["main()<br/><span class='file'><b>src/app/main.c:15</b></span>"]
+    MAIN --> TRS["test_runner_start()<br/><span class='file'><b>src/tests/test_framework.c:339</b></span>"]
+    TRS --> SINIT["system_init()<br/><span class='file'><b>src/kernel/system_init.c:102</b></span>"]
+    SINIT --> HWI["system_init_hardware()<br/><small>board_hardware_init() — UART/GPIO</small>"]
+    HWI --> KINIT["kern_init()<br/><span class='file'><b>src/kernel/kernel.c:31</b></span>"]
+    KINIT --> KINIT16["16 步子系统初始化<br/><small>(见 §4)</small>"]
+    KINIT16 --> TCR["task_create('test_runner', prio=10)<br/>task_start()"]
+    TCR --> KSTART["kern_start()<br/><span class='file'><b>kernel.c:64</b></span>"]
+    KSTART --> IDLEQ["idle 入队<br/>timer_service_start(prio=1)<br/>bh_service_start(prio=2)"]
+    IDLEQ --> SSTART["sched_start()<br/><span class='file'><b>scheduler.c:429</b></span>"]
+    SSTART --> PICK["选最高优先级就绪任务<br/><small>→ timer_svc (prio=1)</small>"]
+    PICK --> SYSTICK["启动 SysTick · hal_irq_enable()"]
+    SYSTICK --> SVC0["hal_trigger_first_switch() → SVC #0<br/><span class='file'><b>first_switch.S</b></span>"]
+    SVC0 --> RUNNING["🎉 调度器正式运转"]
+
+    style POW fill:#331818,stroke:#f85149,color:#fff
+    style ROM fill:#22182a,stroke:#bc8cff,color:#fff
+    style SDK fill:#22182a,stroke:#bc8cff,color:#fff
+    style KINIT16 fill:#1c2618,stroke:#3fb950,color:#fff
+    style SVC0 fill:#2a2218,stroke:#d29922,color:#fff
+    style RUNNING fill:#1a2333,stroke:#58a6ff,color:#fff
+</div>
+
+<div class="callout">
+  <b>注意:</b> <code>test_runner_start()</code> 本身<b>不</b>在调度器内运行 —— 它在 main 上下文(初始线程模式、关中断)完成初始化、
+  创建 runner 任务、然后调用 <code>kern_start()</code> 永不返回。真正的测试代码在 <code>test_runner_task</code> 任务里,
+  等 SVC 切过去之后才执行。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec4"><span class="num">4</span>内核初始化序列(16 步)</h2>
+
+<p><code>kern_init()</code> 严格按依赖顺序初始化每个子系统。下图展示了完整序列与依赖箭头。</p>
+
+<div class="mermaid">
+flowchart LR
+    direction TB
+    subgraph PHASE1["阶段 1: HAL"]
+        H1["1. hal_cpu_init()<br/><small>VTOR 重定位 + 优先级 + mpu_init</small>"]
+    end
+    subgraph PHASE2["阶段 2: 内存"]
+        M1["2. mem_init()<br/><small>16KB 堆 + free_list</small>"]
+        M2["3. mempool_init()"]
+    end
+    subgraph PHASE3["阶段 3: 任务/调度"]
+        T1["4. task_init()<br/><small>task_pool[64] + idle task</small>"]
+        S1["5. sched_init()<br/><small>ready_list[32] + ready_bitmap</small>"]
+    end
+    subgraph PHASE4["阶段 4: IPC 基础"]
+        I1["6. ipc_init()<br/><small>sem/mutex/mqueue/<br/>event/endpoint/channel</small>"]
+        I2["7. irq_init()"]
+        I3["8. bh_init()"]
+        I4["9. timer_init()"]
+        I5["10. stats_init()"]
+    end
+    subgraph PHASE5["阶段 5: 安全/VFS"]
+        C1["11. cap_init()<br/><small>cap_pool[128]</small>"]
+        C2["12. root_bootstrap_init()"]
+        V1["13. vfs_init()<br/><small>/ + /dev + /tmp</small>"]
+        V2["14. device_init()"]
+    end
+    subgraph PHASE6["阶段 6: 故障/看门狗"]
+        F1["15. kern_fault_endpoint_init()<br/><small>kern.fault endpoint + BH</small>"]
+        W1["16. hal_watchdog_init()"]
+    end
+
+    H1 --> M1 --> M2 --> T1 --> S1
+    S1 --> I1 --> I2 --> I3 --> I4 --> I5
+    I5 --> C1 --> C2 --> V1 --> V2
+    V2 --> F1 --> W1
+
+    style PHASE1 fill:#2a2218,stroke:#d29922
+    style PHASE2 fill:#1c2618,stroke:#3fb950
+    style PHASE3 fill:#1a2333,stroke:#58a6ff
+    style PHASE4 fill:#1c2618,stroke:#3fb950
+    style PHASE5 fill:#22182a,stroke:#bc8cff
+    style PHASE6 fill:#331818,stroke:#f85149
+</div>
+
+<h4>依赖关系说明</h4>
+<table>
+<thead><tr><th>步骤</th><th>初始化了什么</th><th>依赖</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-y">1</span> hal_cpu_init</td><td>SCB->VTOR 重定位到 RAM、SVC=0/PendSV=15/SysTick=15 优先级、mpu_init()</td><td>无(最先)</td></tr>
+<tr><td><span class="tag tag-g">2-3</span> mem/mempool</td><td>mem_heap[16KB] + free_list + irq_spinlock;pools[] 池</td><td>hal</td></tr>
+<tr><td><span class="tag tag-b">4</span> task_init</td><td>task_lock、task_pool[64]、task_used_bitmap、idle_task(id=-1, prio=31)</td><td>hal(hal_stack_init)</td></tr>
+<tr><td><span class="tag tag-b">5</span> sched_init</td><td>ready_list[32]、ready_bitmap[4]、tick_count、need_resched[2]、started=0</td><td>hal</td></tr>
+<tr><td><span class="tag tag-g">6</span> ipc_init</td><td>聚合调用 sem/mutex/mqueue/event/endpoint/channel init</td><td>task/sched(TCB owner)</td></tr>
+<tr><td><span class="tag tag-g">7-9</span> irq/bh/timer</td><td>irq_descriptors、bh_pool[16]、timer_pool[32] + timer_heap</td><td>ipc(sem/mqueue)</td></tr>
+<tr><td><span class="tag tag-p">11-12</span> cap/root_bootstrap</td><td>cap_pool[128]、root_services[4]</td><td>task</td></tr>
+<tr><td><span class="tag tag-p">13-14</span> vfs/device</td><td>inode 池、mount_table、根目录 + /dev + /tmp</td><td>mem(inode_alloc)</td></tr>
+<tr><td><span class="tag tag-r">15</span> kern_fault_endpoint_init</td><td>kern.fault endpoint、fault ring[4]、fault_bh_id</td><td><b>ipc(endpoint) + bh</b>,所以最后</td></tr>
+</tbody>
+</table>
+
+<p class="file">入口: <b>src/kernel/kernel.c:31</b> · <code>void kern_init(void)</code></p>
+
+<!-- ============================================================ -->
+<h2 id="sec5"><span class="num">5</span>SMP 双核启动</h2>
+
+<p>RP2350 是真双核 SMP:两个 Cortex-M33 共享同一份 <code>ready_list</code> 和 <code>task_pool</code>,
+用 <code>irq_spinlock_t</code> 串行化。core1 在 test_runner 任务里启动。</p>
+
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant C0 as Core0 (主)
+    participant SDK as Pico SDK
+    participant C1 as Core1
+    participant SIO as SIO 硬件
+    participant RL as 共享 ready_list
+
+    Note over C0: sched_start() 后已跑起来
+    C0->>C0: test_runner_task 执行
+    C0->>C0: smp_init_core1()
+    C0->>SDK: multicore_launch_core1(core1_entry)
+    SDK->>SIO: PSM force-off 复位 Core1
+    SDK->>SIO: 经 FIFO 发送 VTOR+SP+entry
+    SIO->>C1: Core1 bootrom 应用后跳 core1_entry
+
+    Note over C1: core1_entry() 启动
+    C1->>C1: hal_interrupt_priority_init()<br/>设自己的 SCB SHPR
+    C1->>C1: hal_systick_init(1000Hz)<br/>(banked SysTick)
+    C1->>C1: _current_task[1] = NULL<br/>_next_task[1] = NULL
+    C1->>C1: hal_irq_enable()
+    C1->>SIO: hal_trigger_pendsv()
+    C1->>RL: sched_lock 加锁<br/>取最高优先级任务
+    RL-->>C1: 返回任务 TCB
+    C1->>C1: PendSV 切换上下文<br/>装载 task MPU regions
+
+    Note over C0,C1: 🎉 双核并行运行<br/>共享同一 ready_list
+</div>
+
+<h4>SMP 共享与保护机制</h4>
+<div class="grid-2">
+<div class="card">
+<h4 style="margin-top:0">共享数据(单份)</h4>
+<ul style="margin:0">
+<li><code>scheduler</code> 结构(ready_list[32] / ready_bitmap / tick_count)</li>
+<li><code>task_pool[64]</code> + <code>task_used_bitmap</code></li>
+<li><code>cap_pool[128]</code> / <code>ep_pool[32]</code> / <code>ch_pool[8]</code></li>
+<li>堆 <code>mem_heap[]</code></li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0">per-CPU 数据(各一份)</h4>
+<ul style="margin:0">
+<li><code>_current_task[SMP_MAX_CPUS]</code></li>
+<li><code>_next_task[SMP_MAX_CPUS]</code></li>
+<li><code>need_resched[SMP_MAX_CPUS]</code></li>
+<li>SysTick / SCB SHPR / NVIC(banked)</li>
+</ul>
+</div>
+</div>
+
+<div class="callout">
+  <b>irq_spinlock_t 实现:</b> <code>irq_spin_lock</code> = 先 <code>cpsid i</code> 关中断 + 再 <code>spin_lock</code>(LDREX/STREX 原子自旋)。
+  双核下:关中断防本核抢占 + 自旋锁防他核同时改。单核退化为纯关中断(锁无竞争)。
+  <br/><span class="file">实现: <b>include/kernel/spinlock.h:94-104</b></span>
+</div>
+
+<h4>调度器选下一任务的 SMP 安全路径</h4>
+<div class="mermaid">
+flowchart LR
+    A["PendSV 触发<br/><small>kern_pendsv_handler</small>"] --> B["irq_spin_lock(sched_lock)"]
+    B --> C["sched_get_highest_ready()<br/><small>读 ready_bitmap 找最高优先级</small>"]
+    C --> D["从 ready_list 摘除任务<br/><small>避免两核选同一任务</small>"]
+    D --> E["_next_task[cpu_id] = chosen"]
+    E --> F["irq_spin_unlock(sched_lock)"]
+    F --> G["保存 PSPLIM + R4-R11<br/>装载下个任务 MPU regions"]
+    G --> H["写 PSP → 中断返回"]
+
+    style B fill:#331818,stroke:#f85149
+    style F fill:#331818,stroke:#f85149
+    style C fill:#1c2618,stroke:#3fb950
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec6"><span class="num">6</span>任务与调度模型</h2>
+
+<h3>任务状态机</h3>
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> CREATED: task_create()
+    CREATED --> READY: task_start() → sched_add_ready
+    READY --> RUNNING: 被 sched_get_highest_ready 选中
+    RUNNING --> READY: 时间片用完 / task_yield<br/>PendSV 重载时间片
+    RUNNING --> BLOCKED: 等 IPC / sem / sleep<br/>sched_block
+    BLOCKED --> READY: 被唤醒 sched_wakeup(result)
+    RUNNING --> SUSPENDED: task_suspend()
+    SUSPENDED --> READY: task_resume()
+    RUNNING --> TERMINATED: task_exit / fault / delete
+    READY --> TERMINATED: task_delete
+    TERMINATED --> [*]: task_reclaim (回收 TCB+栈)
+    note right of RUNNING
+        优先级抢占:
+        任何时刻取 ready_bitmap 最高优先级
+        RT band (≤15) 天然抢占 normal
+    end note
+</div>
+
+<h3>调度算法细节</h3>
+<div class="grid-2">
+<div class="card">
+<h4 style="margin-top:0">优先级抢占</h4>
+<ul style="margin:0">
+<li><b>0 最高,31 最低</b>(idle 在 31)</li>
+<li>O(1) 位图:<code>ready_bitmap[4]</code> × 32 = 128 级,用 <code>__builtin_ctz</code></li>
+<li>每优先级一条双向链表,插入/删除 O(1)</li>
+<li><b>RT band</b>: prio ≤ 15(<code>KERN_RT_PRIORITY_MAX</code>)</li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0">时间片</h4>
+<ul style="margin:0">
+<li>默认 <code>KERN_DEFAULT_TIME_SLICE=5</code> tick</li>
+<li>SysTick 每 tick 把 <code>time_slice--</code></li>
+<li>到 0 → <code>need_resched=1</code> → 触发 PendSV</li>
+<li>支持 3 策略:<code>SCHED_FIFO</code>(不轮转) / <code>SCHED_RR</code> / <code>SCHED_NORMAL</code></li>
+</ul>
+</div>
+</div>
+
+<h3>TCB 结构体关键字段</h3>
+<p class="file">定义: <b>include/kernel/kernel_types.h:143-213</b></p>
+<table>
+<thead><tr><th>字段组</th><th>字段</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td>上下文</td><td><code>sp</code></td><td>栈指针(汇编访问,必须在结构体最前)</td></tr>
+<tr><td>基本</td><td><code>id / priority / base_priority / state / name</code></td><td>id/优先级/状态/名字(base_priority 优先级继承恢复)</td></tr>
+<tr><td>栈保护</td><td><code>stack_base / sp_limit</code></td><td><code>sp_limit</code> 装载 <b>PSPLIM</b> 做 M33 栈溢出硬件保护</td></tr>
+<tr><td>调度</td><td><code>time_slice / time_slice_reload / wake_tick</code></td><td>时间片轮转 + 延时唤醒</td></tr>
+<tr><td>阻塞</td><td><code>block_reason / block_obj / block_result</code></td><td>记录为什么阻塞 + 唤醒结果</td></tr>
+<tr><td>属性</td><td><code>attrs</code> (PRIVILEGED/USER)</td><td>CONTROL.nPRIV 设置依据</td></tr>
+<tr><td>MPU</td><td><code>mpu_regions[8][2]</code></td><td>8 个区(每个 RBAR/RASR/RLAR 对)</td></tr>
+<tr><td>Capability</td><td><code>capabilities</code> 位图 + <code>cap_set[32]</code></td><td>该任务的 cspace(最多 32 个 cap slot)</td></tr>
+<tr><td>链表</td><td><code>next/prev</code> / <code>wait_next/wait_prev</code></td><td>就绪队列 / 等待队列</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="sec7"><span class="num">7</span>IPC 机制</h2>
+
+<p>三种 IPC 原语,共用 <code>wait_queue</code> 阻塞唤醒基础设施。</p>
+
+<div class="grid-2">
+<div class="card">
+<h4 style="margin-top:0"><span class="tag tag-b">Endpoint</span> C/S 多对一</h4>
+<p style="margin:0">多客户端 → 单服务端。客户端 <code>send</code> 阻塞等 reply,服务端 <code>recv</code> 后 <code>reply</code> 唤醒客户端。
+带容量 <code>max_pending</code> 的环形缓冲,3 个等待队列(recv/send/reply)。<b>支持 cap 转移</b>(send_caps/recv_caps)。</p>
+</div>
+<div class="card">
+<h4 style="margin-top:0"><span class="tag tag-g">Channel</span> P2P 一对一</h4>
+<p style="margin:0">两个对等任务双向通信 + 共享内存(<code>shm[256]</code> 字节)。适合 driver↔client 紧耦合场景。<br/>与 endpoint 并列,共用 <code>ipc_transfer</code>。</p>
+</div>
+</div>
+
+<h3>Endpoint 的 send / recv / reply 时序</h3>
+<div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant Cli as 客户端
+    participant EP as Endpoint (内核)
+    participant WQ as recv_waiters
+    participant Svc as 服务端
+
+    Note over Cli,Svc: 服务端先 recv 阻塞
+    Svc->>EP: ep_recv (无消息)
+    EP->>WQ: 加入 recv_waiters
+    Svc->>Svc: sched_block
+
+    Cli->>EP: ep_send(msg)
+    EP->>EP: 写入环形槽<br/>记 sender_buf[slot]=Cli
+    EP->>WQ: 唤醒最高优先级 recv waiter
+    EP-->>Svc: 返回消息 + sender
+    Cli->>Cli: sched_block (挂入 reply_waiters)
+
+    Svc->>EP: ep_reply(sender, reply)
+    EP->>EP: memcpy 到 Cli 原 msg 缓冲
+    EP-->>Cli: sched_wakeup(KERN_OK)
+    Note over Cli: 收到回复,继续运行
+</div>
+
+<h4>同步原语</h4>
+<table>
+<thead><tr><th>原语</th><th>特性</th><th>ISR 安全?</th></tr></thead>
+<tbody>
+<tr><td>Semaphore</td><td>计数信号量,wait/post</td><td><span class="tag tag-g">post ✓</span></td></tr>
+<tr><td>Mutex</td><td>带优先级继承(base_priority 恢复)</td><td><span class="tag tag-r">✗</span></td></tr>
+<tr><td>Event</td><td>32-bit 标志组,AND/OR 匹配 + CLEAR/NOWAIT</td><td><span class="tag tag-g">set ✓</span></td></tr>
+<tr><td>Mqueue</td><td>消息队列</td><td><span class="tag tag-r">✗</span></td></tr>
+</tbody>
+</table>
+<p class="file">ISR-safe 实现靠 <code>hal_enter_critical()</code>(IRQ 屏蔽)。所有阻塞型操作检查 <code>hal_irq_get_active()</code>,在 ISR 内调用返回 <code>KERN_ERR_ISR</code>。</p>
+
+<!-- ============================================================ -->
+<h2 id="sec8"><span class="num">8</span>Capability 安全模型</h2>
+
+<p>每个内核对象(semaphore/endpoint/task/mmio…)都由 capability 句柄保护。用户任务必须持有对应权限的 cap 才能 syscall 访问。
+cap 句柄 = <code>(generation &lt;&lt; 7) | slot</code>,generation 防 stale 重用。</p>
+
+<h3>15 种对象类型</h3>
+<div class="mermaid">
+graph LR
+    subgraph T1["同步/通信"]
+        S["SEMAPHORE"]
+        M["MUTEX"]
+        Q["MQUEUE"]
+        E["EVENT"]
+        EP["ENDPOINT"]
+        CH["CHANNEL"]
+        RP["REPLY"]
+    end
+    subgraph T2["资源"]
+        T["TASK"]
+        MB["MEMBLOCK"]
+        MM["MMIO"]
+        SH["SHM"]
+        F["FILE"]
+    end
+    subgraph T3["中断/定时"]
+        IR["IRQ"]
+        BH["BH"]
+        TM["TIMER"]
+    end
+
+    style T1 fill:#1a2333,stroke:#58a6ff,color:#fff
+    style T2 fill:#22182a,stroke:#bc8cff,color:#fff
+    style T3 fill:#2a2218,stroke:#d29922,color:#fff
+</div>
+
+<h3>5 位权限 + revoke 树</h3>
+<div class="grid-2">
+<div>
+<table>
+<thead><tr><th>权限位</th><th>值</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code>CAP_READ</code></td><td>bit0</td><td>sem_wait / recv / event_wait / lock</td></tr>
+<tr><td><code>CAP_WRITE</code></td><td>bit1</td><td>sem_post / send / event_set / unlock</td></tr>
+<tr><td><code>CAP_MANAGE</code></td><td>bit2</td><td>delete / reset / stop</td></tr>
+<tr><td><code>CAP_TRANSFER</code></td><td>bit3</td><td>可转移到其他任务</td></tr>
+<tr><td><code>CAP_GRANT</code></td><td>bit4</td><td>可 derive 子能力</td></tr>
+</tbody>
+</table>
+<p>组合:<code>CAP_RW</code>, <code>CAP_FULL = READ|WRITE|MANAGE|TRANSFER|GRANT</code></p>
+</div>
+<div>
+<div class="mermaid">
+flowchart TD
+    ROOT["Root cap<br/><small>CAP_FULL</small>"] -->|"derive_for<br/>(子 ⊆ 父)"| CH1["Child A<br/><small>RW</small>"]
+    ROOT --> CH2["Child B<br/><small>R</small>"]
+    CH1 --> CH3["Grandchild<br/><small>R</small>"]
+    ROOT -->|"❌ GRANT 总被丢弃"| X["Child C<br/><small>(无 GRANT)</small>"]
+
+    ROOT -.->|"revoke_for(ROOT)"| RECL["递归回收整棵子树"]
+
+    style ROOT fill:#1c2618,stroke:#3fb950,color:#fff
+    style X fill:#331818,stroke:#f85149,color:#fff
+    style RECL fill:#331818,stroke:#f85149,color:#fff
+</div>
+</div>
+</div>
+
+<div class="callout">
+  <b>核心不变量:</b> <code>cap_derive_for</code> 强制 <code>child_rights ⊆ parent_rights</code>,
+  且 <b>CAP_GRANT 总被丢弃</b> —— 防止权限通过派生放大。
+  <code>cap_derive_for_restart</code> 在 supervisor 重启任务时用,确保被重启任务拿到的 cap 是原 cspace 的真子集。
+</div>
+
+<h3>syscall 如何被 cap 守卫</h3>
+<div class="mermaid">
+flowchart LR
+    U["用户态<br/>sys_ep_send(ep_cap, msg)"] -->|"svc #1"| D["kern_syscall_handler"]
+    D --> T["syscall_table[45].handler<br/>= sys_ep_send"]
+    T --> R["cap_resolve(ep_cap,<br/>CAP_OBJ_ENDPOINT,<br/>CAP_WRITE)"]
+    R -->|"失败"| ERR["返回 KERN_ERR_CAP"]
+    R -->|"成功"| OK["拿到 endpoint 对象指针<br/>执行实际 IPC"]
+
+    style R fill:#22182a,stroke:#bc8cff,color:#fff
+    style ERR fill:#331818,stroke:#f85149,color:#fff
+    style OK fill:#1c2618,stroke:#3fb950,color:#fff
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec9"><span class="num">9</span>故障处理与监督重启</h2>
+
+<p>用户任务崩溃时,内核不挂死,而是把故障事件异步投递给 supervisor,由 supervisor 决定重启或放弃。
+这是 Phase 2 微内核容错基础设施的核心。</p>
+
+<div class="mermaid">
+flowchart TD
+    FAULT["💥 用户任务 fault<br/><small>MemManage/Bus/Usage</small>"] --> FH["fault_handler_c()<br/><span class='file'><b>fault.c:233</b></span>"]
+    FH --> DEC["解码 CFSR/HFSR/MMFAR/BFAR<br/>反查 TCB.mpu_regions 找命中区"]
+    DEC --> JUDGE{"CONTROL.nPRIV<br/>+ EXC_RETURN<br/>= 用户态?"}
+    Judge -->|"否(内核)"| PANIC["kern_panic()<br/>→ panic_log_save()<br/>→ 持久化 crash_dump 到 flash"]
+    JUDGE -->|"是(用户)"| TERM["task_terminate_with_result<br/>(KERN_ERR_FAULT)"]
+    TERM --> NOTIFY["kern_fault_notify()<br/><span class='file'><b>fault_endpoint.c:100</b></span>"]
+
+    subgraph RING["SPSC 环形缓冲 (Handler 模式, IRQ 关)"]
+        R1["fault_ring[4]"] --> R2["写 task_id/name/pc/cfsr"]
+    end
+    NOTIFY --> RING
+
+    RING --> BH["fault_bh_handler()<br/><small>(BH 服务任务,线程模式)</small>"]
+    BH -->|"drain 整环"| EP["endpoint_notify(kern.fault_ep, ...)"]
+    EP --> SUPWAIT["supervisor 阻塞在 ep_recv"]
+
+    SUPWAIT --> SUPMON["supervisor_on_fault()<br/><span class='file'><b>supervisor.c</b></span>"]
+    SUPMON --> CLASSIFY{"分类"}
+    CLASSIFY -->|"kill"| KILL["永久放弃"]
+    CLASSIFY -->|"schedule restart"| ARM["arm backoff timer<br/><small>1000/2000/4000/8000ms</small>"]
+    ARM --> WAIT["等 timer 到期"]
+    WAIT --> RESTART["supervisor_do_restarts()<br/>sys_task_restart(...)"]
+    RESTART --> NEWT["task_create_user 重建<br/>cap_derive_for_restart<br/>(权限缩减,丢 GRANT)"]
+    NEWT --> RESUME["🎉 任务复活,继续运行"]
+
+    style FAULT fill:#331818,stroke:#f85149,color:#fff
+    style PANIC fill:#331818,stroke:#f85149,color:#fff
+    style RING fill:#2a2218,stroke:#d29922,color:#fff
+    style RESUME fill:#1c2618,stroke:#3fb950,color:#fff
+</div>
+
+<h3>三道防线</h3>
+<table>
+<thead><tr><th>层</th><th>文件</th><th>职责</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-r">解码+隔离</span></td><td><code>fault.c</code></td><td>读 SCB 故障寄存器,反查 MPU 区,判定用户/内核 fault,改异常帧 PC 指向 <code>task_fault_exit</code></td></tr>
+<tr><td><span class="tag tag-y">通知</span></td><td><code>fault_endpoint.c</code></td><td>SPSC ring 缓冲(防 IRQ 上下文丢消息),BH 线程 drain 到 <code>kern.fault</code> endpoint</td></tr>
+<tr><td><span class="tag tag-g">持久化</span></td><td><code>panic_log.c</code></td><td>内核 panic 时把 <code>crash_dump</code> 写到 flash 最后扇区,下次启动读回诊断</td></tr>
+</tbody>
+</table>
+
+<div class="callout">
+  <b>指数退避:</b> supervisor 重启同一任务时,backoff 翻倍(1s → 2s → 4s → 8s)。
+  <code>SUPERVISOR_MAX_RESTARTS=3</code> 次后永久 kill —— 防止崩溃循环卡死系统。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec10"><span class="num">10</span>MPU 内存保护</h2>
+
+<p>同一份 <code>mpu.c</code> 用 <code>BOARD_MPU_ARMV8</code> 宏分支,支持 PMSAv7(M7)和 PMSAv8(M33)。
+每个 user task 切换时都重载自己的 MPU region 表。</p>
+
+<h3>用户任务的 8 区布局</h3>
+<table>
+<thead><tr><th>Region</th><th>内容</th><th>权限</th><th>属性</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-b">0</span></td><td>Flash 代码段(整个 flash)</td><td>特权 RW / 用户 RO</td><td>可执行(XIP)</td></tr>
+<tr><td><span class="tag tag-r">1</span></td><td><b>故意禁用</b></td><td>—</td><td>避免暴露 TCB/ready_queue(老版本曾映射整个 SRAM,P0 收紧)</td></tr>
+<tr><td><span class="tag tag-g">2</span></td><td>用户栈</td><td>特权/用户 RW</td><td>WB/WA + XN,下界由 <b>PSPLIM</b> 兜底</td></tr>
+<tr><td><span class="tag tag-y">3-7</span></td><td>运行时映射</td><td>按 cap</td><td>kshm(可缓存)/kmmio(Device,XN)</td></tr>
+</tbody>
+</table>
+
+<h3>MMIO 映射流程(sys_mmio_map)</h3>
+<div class="mermaid">
+flowchart LR
+    A["用户: sys_mmio_map(cap, base, size)"] --> B["cap_resolve<br/>(CAP_OBJ_MMIO, READ)"]
+    B --> C["对齐检查<br/>kshm_is_mpu_compliant"]
+    C --> D["找空区<br/>Region 3-7 第一个未使能"]
+    D --> E["mpu_region_encode<br/>RASR_ENABLE|ap|ATTR_DEVICE|XN"]
+    E --> F["写入 task->mpu_regions[r]"]
+    F --> G{"task == current?"}
+    G -->|"是"| H["mpu_load_task_regions()<br/>立即重载"]
+    G -->|"否"| I["下次切换时加载"]
+    H --> J["✓ 用户可立即访问 MMIO"]
+
+    style B fill:#22182a,stroke:#bc8cff,color:#fff
+    style J fill:#1c2618,stroke:#3fb950,color:#fff
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec11"><span class="num">11</span>内存布局</h2>
+
+<h3>RP2350 (Pico 2 W) Flash 4MB 分区</h3>
+<div class="mermaid">
+graph LR
+    subgraph FLASH["QSPI Flash @ 0x10000000 (4 MB · W25Q32JV)"]
+        direction LR
+        FW["固件<br/>kernel + tests + user<br/><small>~390 KB (0x62000)</small>"]
+        GAP["保留间隙<br/><small>~960 KB</small>"]
+        FS["FS 区<br/>3 MB<br/><small>littlefs 挂载点</small>"]
+        PL["panic-log<br/>4 KB<br/><small>最后扇区</small>"]
+    end
+
+    FW -->|"0x100000"| FS
+    FS -->|"FS_SIZE - 4K"| PL
+
+    style FW fill:#1c2618,stroke:#3fb950,color:#fff
+    style FS fill:#1a2333,stroke:#58a6ff,color:#fff
+    style PL fill:#331818,stroke:#f85149,color:#fff
+    style GAP fill:#161b22,stroke:#30363d
+</div>
+
+<table>
+<thead><tr><th>区域</th><th>RP2350 (Pico 2 W)</th><th>STM32F767</th></tr></thead>
+<tbody>
+<tr><td>Flash 基地址</td><td><code>0x10000000</code> (XIP, 外部 QSPI)</td><td><code>0x08000000</code> (内置)</td></tr>
+<tr><td>Flash 大小</td><td><b>4 MB</b> (W25Q32JV)</td><td>2 MB</td></tr>
+<tr><td>SRAM</td><td><b>520 KB</b> (Bank0/1 512K + scratch X/Y 8K)</td><td>384 KB</td></tr>
+<tr><td>FS 区</td><td>offset <code>0x100000</code>, size <code>0x300000</code></td><td>无独立 FS 分区</td></tr>
+<tr><td>panic-log</td><td>FS 最后 4KB 扇区</td><td><code>.crash_dump</code> 段在 SRAM</td></tr>
+<tr><td>堆</td><td><code>mem_heap[16384]</code> 静态数组(BSS 内)</td><td>同</td></tr>
+<tr><td>任务栈</td><td>动态 kmalloc,默认 2048B/任务,PSPLIM 硬件保护</td><td>同</td></tr>
+</tbody>
+</table>
+
+<h3>ELF Loader 的 XIP 优化</h3>
+<p>用户进程 ELF 通过 <code>.incbin</code> 嵌入固件,运行时加载时<b>只拷 .data 到 RAM,.text 留 flash 执行</b>,极大省内存。</p>
+<div class="mermaid">
+flowchart LR
+    ELF["test_elf.elf<br/>(.incbin 嵌入)"] --> V["elf_validate<br/>magic/ET_EXEC/EM_ARM"]
+    V --> D["计算 entry delta<br/>actual_text - link_addr"]
+    D --> TX[".text 留 flash<br/>Region 0 覆盖整个 flash RO+X"]
+    D --> DA[".data/.bss<br/>kmalloc → memcpy"]
+    DA --> DM["Region 3 映射<br/>RW + XN"]
+    TX --> CR["task_create_user"]
+    DM --> CR
+    CR --> RUN["🎉 XIP 执行"]
+
+    style ELF fill:#22182a,stroke:#bc8cff,color:#fff
+    style TX fill:#1c2618,stroke:#3fb950,color:#fff
+    style RUN fill:#1a2333,stroke:#58a6ff,color:#fff
+</div>
+
+<div class="callout">
+  <b>OBJECT_DEPENDS 坑:</b> CMake 不追踪 <code>.incbin</code> 的文件依赖。
+  若不显式 <code>set_source_files_properties(... OBJECT_DEPENDS ${TEST_ELF_PATH})</code>,
+  改了 ELF 源后 <code>test_elf_blob.c</code> 不会重编,会嵌入<b>过期</b> ELF。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec12"><span class="num">12</span>Syscall 接口(79 个)</h2>
+
+<p>统一签名 <code>int handler(uint32_t a1..a6)</code>,用户态把编号放 R0,参数 a1-a3 在 R1-R3,a4-a6 在用户栈,通过 <code>svc #1</code> 触发。
+入口 <code>kern_syscall_handler</code> 校验编号后查 <code>syscall_table[]</code> 分派。</p>
+
+<div class="grid-2">
+<div>
+<table>
+<thead><tr><th>类别</th><th>编号</th><th>代表</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-b">task_*</span></td><td>0–8, 72, 78</td><td>YIELD, DELAY, EXIT, CREATE, START, SUSPEND, RESUME, DELETE, SELF, RESTART, SET_POLICY</td></tr>
+<tr><td><span class="tag tag-g">sem_*</span></td><td>9–12</td><td>CREATE, WAIT, POST, DELETE</td></tr>
+<tr><td><span class="tag tag-g">mutex_*</span></td><td>13–15, 38</td><td>CREATE, LOCK, UNLOCK, DELETE</td></tr>
+<tr><td><span class="tag tag-g">mqueue_*</span></td><td>16–18, 39</td><td>CREATE, SEND, RECV, DELETE</td></tr>
+<tr><td><span class="tag tag-g">event_*</span></td><td>19–21, 40–42</td><td>CREATE, WAIT, SET, DELETE, CLEAR, GET</td></tr>
+<tr><td><span class="tag tag-y">timer_*</span></td><td>22–23, 59</td><td>CREATE, START, BIND</td></tr>
+<tr><td><span class="tag tag-y">irq/bh</span></td><td>24–26, 66</td><td>IRQ_REGISTER, BH_CREATE, BH_SCHEDULE, IRQ_BIND</td></tr>
+</tbody>
+</table>
+</div>
+<div>
+<table>
+<thead><tr><th>类别</th><th>编号</th><th>代表</th></tr></thead>
+<tbody>
+<tr><td><span class="tag tag-b">mem</span></td><td>27–28, 60–63</td><td>ALLOC, FREE, MEM_SIZE, SHM_CREATE, SHM_MAP</td></tr>
+<tr><td><span class="tag tag-p">cap_*</span></td><td>29–31, 64–65</td><td>DERIVE, TRANSFER, REVOKE, TYPE, RIGHTS</td></tr>
+<tr><td><span class="tag tag-b">vfs</span></td><td>32–37, 67–70</td><td>OPEN, CLOSE, READ, WRITE, IOCTL, LSEEK, READDIR, UNLINK, MKDIR, STAT</td></tr>
+<tr><td><span class="tag tag-b">ep_*</span></td><td>43–47, 54–55, 58</td><td>CREATE, DELETE, SEND, RECV, REPLY, SEND_CAPS, RECV_CAPS, TAKE_REPLY</td></tr>
+<tr><td><span class="tag tag-b">ch_*</span></td><td>48–53, 56–57</td><td>CREATE, DELETE, CONNECT, SEND, RECV, GET_SHM, SEND_CAPS, RECV_CAPS</td></tr>
+<tr><td><span class="tag tag-r">fault/mmio/flash</span></td><td>71, 74–77</td><td>FAULT_SUBSCRIBE, FLASH_OP, MMIO_MAP, MMIO_UNMAP, MMIO_REQUEST</td></tr>
+<tr><td><span class="tag tag-y">misc</span></td><td>73</td><td>GET_TICK</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<p class="file">定义: <b>include/kernel/syscall.h:23-127</b> · 分发表: <b>src/kernel/syscall/syscall.c:1745-1827</b></p>
+
+<div class="callout">
+  <b>阻塞语义:</b> 用户态 IPC 用 <code>*_syscall</code> 变体,返回 <code>KERN_SYSCALL_BLOCKED</code>(-128),
+  由 SVC 汇编处理 continuation(切到下个任务,被唤醒后再恢复)。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="sec13"><span class="num">13</span>构建系统双轨</h2>
+
+<div class="grid-2">
+<div class="card">
+<h4 style="margin-top:0"><span class="tag tag-g">CMake</span> — RP2350 (主路径)</h4>
+<ul style="margin:0">
+<li><code>-mcpu=cortex-m33</code>(SDK 设)</li>
+<li>Pico SDK: <code>pico_multicore</code>, <code>hardware_flash</code></li>
+<li>启动: SDK bootrom(无仓库 vectors.S)</li>
+<li>链接: SDK <code>memmap_default.ld</code> + 追加 <code>rp2350_sections.ld</code></li>
+<li>ELF loader: custom command + <code>.incbin</code></li>
+<li>输出: <code>.uf2</code> / <code>.bin</code> / <code>.hex</code> / <code>.map</code></li>
+<li><b>烧录:</b> <code>make flash</code> (openocd + rescue_reset)</li>
+</ul>
+</div>
+<div class="card">
+<h4 style="margin-top:0"><span class="tag tag-y">Makefile</span> — STM32F767</h4>
+<ul style="margin:0">
+<li><code>-mcpu=cortex-m7 -mfloat-abi=soft</code></li>
+<li>启动: <code>vectors.S</code> + <code>reset_handler.S</code> + <code>system.c</code></li>
+<li>链接: <code>link/stm32f767.ld</code>(完整布局)</li>
+<li>无 ELF loader blob</li>
+<li>显式逐文件列举源</li>
+<li>输出: <code>.elf</code> / <code>.bin</code> / <code>.hex</code></li>
+<li><b>烧录:</b> openocd <code>st_nucleo_f7.cfg</code></li>
+</ul>
+</div>
+</div>
+
+<p class="file">Makefile 的 RP2350 分支是 CMake 的 thin wrapper(<code>make all</code> → <code>cmake --build</code>),STM32 分支才是独立 GNU Make 编译。</p>
+
+<h3>Kconfig 配置体系</h3>
+<p>单文件 <code>Kconfig</code>,由 <code>scripts/menuconfig.py</code> 解析,生成到 <code>include/kernel/kernel_config.h</code>。
+关键宏:<code>SMP=1</code>, <code>SMP_MAX_CPUS=2</code>, <code>CAP_ENABLE=1</code>, <code>FAULT_ENDPOINT=1</code>, <code>INIT_PROCESS=1</code>, <code>MPU_ENABLE=1</code>, <code>VFS_ENABLE=1</code>, <code>ELF_LOADER=1</code>, <code>KERNEL_MAX_TASKS=64</code>, <code>KERNEL_TICK_RATE=1000</code>。
+预设:<code>configs/</code> 下 <code>rp2350_defconfig</code> / <code>stm32f767_defconfig</code> / <code>default</code> / <code>release</code> / <code>tiny</code> / <code>full</code>。</p>
+
+<!-- ============================================================ -->
+<h2 id="sec14"><span class="num">14</span>用户态进程拓扑</h2>
+
+<div class="mermaid">
+flowchart TD
+    KERN["内核 (root_bootstrap)"]
+
+    KERN -->|"root_bootstrap_create<br/>装 root cap"| INIT["init 进程<br/><span class='file'>src/user/init/init.c:39</span><br/><small>极简: spawn supervisor 后退出</small>"]
+
+    INIT -->|"sys_task_create"| SUP["supervisor<br/><span class='file'>src/user/supervisor/supervisor.c:456</span><br/><small>prio=2, fault monitor loop</small>"]
+
+    SUP -->|"sys_fault_subscribe<br/>(拿 kern.fault CAP_FULL)"| FE["kern.fault endpoint"]
+
+    SUP -->|"sys_task_restart"| CHILD["被监控任务<br/><small>(recipe 注册)</small>"]
+
+    CHILD --> APP1["crashy_app<br/><span class='file'>apps/crashy_app.c</span><br/><small>故意写 0xBBBBBBBB 触发 fault</small>"]
+    CHILD --> NS["nameserver<br/><span class='file'>nameserver.c:270</span><br/><small>作为服务循环嵌入任务</small>"]
+    CHILD --> DRV["driver servers<br/><span class='file'>uart_server.c 等</span>"]
+    CHILD --> FS["fs server<br/><span class='file'>fs_server.c</span>"]
+
+    SUP -.->|"监听"| FE
+    FE -.->|"fault 事件"| SUP
+
+    style KERN fill:#1c2618,stroke:#3fb950,color:#fff
+    style INIT fill:#1a2333,stroke:#58a6ff,color:#fff
+    style SUP fill:#22182a,stroke:#bc8cff,color:#fff
+    style APP1 fill:#331818,stroke:#f85149,color:#fff
+</div>
+
+<h4>用户进程清单</h4>
+<table>
+<thead><tr><th>进程</th><th>文件</th><th>职责</th><th>启动方式</th></tr></thead>
+<tbody>
+<tr><td>init</td><td><code>init/init.c</code></td><td>第一个用户任务,spawn supervisor 后退出</td><td><code>root_bootstrap_create</code></td></tr>
+<tr><td>supervisor</td><td><code>supervisor/supervisor.c</code></td><td>故障监控 + 指数退避重启</td><td>init 调 <code>sys_task_create</code></td></tr>
+<tr><td>nameserver</td><td><code>nameserver/nameserver.c</code></td><td>名字服务(REGISTER/LOOKUP/UNREG/PING)</td><td>嵌入任务作服务循环</td></tr>
+<tr><td>driver servers</td><td><code>drivers/uart_server.c</code> 等</td><td>用户态驱动服务框架</td><td>任务体</td></tr>
+<tr><td>fs server</td><td><code>fs/fs_server.c</code></td><td>VFS 代理(经 endpoint IPC)</td><td>任务体</td></tr>
+<tr><td>crashy_app</td><td><code>apps/crashy_app.c</code></td><td>故意崩溃,验证 supervisor 重启</td><td>supervisor spawn</td></tr>
+<tr><td>test_elf_app</td><td><code>apps/test_elf_app.c</code></td><td>ELF loader 演示(XIP 执行)</td><td><code>.incbin</code> 嵌入,<code>elf_load</code> 加载</td></tr>
+</tbody>
+</table>
+
+<hr/>
+
+<div class="callout">
+  <b>架构总结:</b> 这是一个 capability-based 微内核,核心三件套 = <span style="color:var(--accent2)">优先级抢占调度</span>
+  + <span style="color:var(--accent)">endpoint/channel IPC</span>
+  + <span style="color:var(--accent5)">capability 安全闸门</span>。
+  容错路径(fault → endpoint → supervisor → restart)是 Phase 2 的精华。
+  当前在 RP2350 双核 M33 上 3016/3016 测试通过,0 panic。
+</div>
+
+<p style="text-align:center; color:var(--text-dim); margin-top:48px; font-size:12px;">
+文档生成自代码静态分析 · 所有引用均带 <code>file:line</code> · 与 commit
+<code style="font-size:11px">$(git rev-parse --short HEAD 2>/dev/null)</code> 同步
+</p>
+
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#1a2333',
+    primaryTextColor: '#f0f6fc',
+    primaryBorderColor: '#58a6ff',
+    lineColor: '#8b949e',
+    secondaryColor: '#1c2618',
+    tertiaryColor: '#161b22',
+    fontSize: '14px',
+    nodeBorder: '#30363d',
+    edgeLabelBackground: '#0f1419'
+  },
+  flowchart: { curve: 'basis', htmlLabels: true },
+  sequence: { actorMargin: 60, boxMargin: 8 }
+});
+</script>
+</body>
+</html>
