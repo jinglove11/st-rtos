@@ -16,7 +16,7 @@ typedef struct {
 } fs_fd_entry_t;
 
 int fs_opcode_valid(uint16_t opcode) {
-    return opcode >= FS_OP_PING && opcode <= FS_OP_STAT;
+    return opcode >= FS_OP_PING && opcode <= FS_OP_LOOKUP;
 }
 
 void fs_msg_init(fs_msg_t *msg, uint16_t opcode, uint32_t seq) {
@@ -273,6 +273,13 @@ int fs_stat(int ep_cap, const char *path, vfs_stat_t *st, uint32_t timeout) {
     return KERN_OK;
 }
 
+int fs_lookup(int ep_cap, const char *path, vfs_stat_t *st, uint32_t timeout) {
+    /* LOOKUP 与 STAT 在语义上一致 (返回路径元数据,不打开 fd)。
+     * 当前代理式 fs_server 把它转发成 vfs_stat。
+     * Phase B 服务化后,fs_server 自管 inode 树,LOOKUP 走自己的路径解析。 */
+    return fs_stat(ep_cap, path, st, timeout);
+}
+
 const char *fs_error_name(int err) {
     switch (err) {
     case KERN_OK:
@@ -459,6 +466,19 @@ int fs_server_run(int ep_cap, uint32_t max_requests) {
                 err = fs_reply(ep_cap, &msg, mkdir_err, 0);
             }
         } else if (msg.opcode == FS_OP_STAT) {
+            if (!fs_path_valid(msg.path)) {
+                err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
+            } else {
+                vfs_stat_t st;
+                int stat_err = stat(msg.path, &st);
+                msg.flags = st.type;
+                msg.length = st.size;
+                err = fs_reply(ep_cap, &msg, stat_err,
+                               stat_err == KERN_OK ? (int)st.ino : 0);
+            }
+        } else if (msg.opcode == FS_OP_LOOKUP) {
+            /* LOOKUP: 路径元数据查询 (不打开 fd)。
+             * 代理式阶段转发成 vfs_stat;Phase B 走自管路径解析。 */
             if (!fs_path_valid(msg.path)) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
