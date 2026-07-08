@@ -1255,175 +1255,67 @@ static int sys_cap_rights(uint32_t a1, uint32_t a2, uint32_t a3,
 #if VFS_ENABLE
 #include "vfs.h"
 
+/* Phase D2:内核 VFS 已移除,文件操作改由 user 态 fs_server 提供。
+ * 这些 syscall 保留编号 (user_api.h 的 inline 封装仍可调),但内核侧
+ * 不再实现 —— 返回 NOSYS。user 任务应改用 fs_* IPC 走 fs_server。 */
 static int sys_open(uint32_t a1, uint32_t a2, uint32_t a3,
                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a3);U(a4);U(a5);U(a6);
-    char path[SYSCALL_PATH_MAX];
-    kern_err_t copy_err = strncpy_from_user(path,
-                                            (const char *)(uintptr_t)a1,
-                                            sizeof(path));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
-    return vfs_open(path, a2);
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_close(uint32_t a1, uint32_t a2, uint32_t a3,
                              uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a2);U(a3);U(a4);U(a5);U(a6);
-    return (kern_err_t)vfs_close((int)a1);
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_read(uint32_t a1, uint32_t a2, uint32_t a3,
                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a4);U(a5);U(a6);
-    uint8_t bounce[SYSCALL_IO_CHUNK];
-    uint8_t *user_buf = (uint8_t *)(uintptr_t)a2;
-    uint32_t total = 0;
-
-    if (!user_access_ok(user_buf, a3, USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-
-    while (total < a3) {
-        uint32_t chunk = a3 - total;
-        if (chunk > sizeof(bounce)) {
-            chunk = sizeof(bounce);
-        }
-
-        int n = vfs_read((int)a1, bounce, chunk);
-        if (n <= 0) {
-            return total ? (int)total : n;
-        }
-
-        kern_err_t err = copy_to_user(user_buf + total, bounce, (uint32_t)n);
-        if (err != KERN_OK) {
-            return total ? (int)total : err;
-        }
-
-        total += (uint32_t)n;
-        if ((uint32_t)n < chunk) {
-            break;
-        }
-    }
-
-    return (int)total;
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_write(uint32_t a1, uint32_t a2, uint32_t a3,
                              uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a4);U(a5);U(a6);
-    uint8_t bounce[SYSCALL_IO_CHUNK];
-    const uint8_t *user_buf = (const uint8_t *)(uintptr_t)a2;
-    uint32_t total = 0;
-
-    if (!user_access_ok(user_buf, a3, USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-
-    while (total < a3) {
-        uint32_t chunk = a3 - total;
-        if (chunk > sizeof(bounce)) {
-            chunk = sizeof(bounce);
-        }
-
-        kern_err_t err = copy_from_user(bounce, user_buf + total, chunk);
-        if (err != KERN_OK) {
-            return total ? (int)total : err;
-        }
-
-        int n = vfs_write((int)a1, bounce, chunk);
-        if (n <= 0) {
-            return total ? (int)total : n;
-        }
-
-        total += (uint32_t)n;
-        if ((uint32_t)n < chunk) {
-            break;
-        }
-    }
-
-    return (int)total;
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_ioctl(uint32_t a1, uint32_t a2, uint32_t a3,
                              uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a4);U(a5);U(a6);
-    return (kern_err_t)vfs_ioctl((int)a1, a2, (void *)a3);
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_lseek(uint32_t a1, uint32_t a2, uint32_t a3,
                              uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a4);U(a5);U(a6);
-    return vfs_lseek((int)a1, (int32_t)a2, (int)a3);
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_readdir(uint32_t a1, uint32_t a2, uint32_t a3,
                                uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a3);U(a4);U(a5);U(a6);
-    dirent_t entry;
-    void *user_entry = (void *)(uintptr_t)a2;
-
-    if (!user_access_ok(user_entry, sizeof(entry), USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-
-    kern_err_t err = vfs_readdir((int)a1, &entry);
-    if (err != KERN_OK) {
-        return err;
-    }
-    return copy_to_user(user_entry, &entry, sizeof(entry));
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_unlink(uint32_t a1, uint32_t a2, uint32_t a3,
                               uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a2);U(a3);U(a4);U(a5);U(a6);
-    char path[SYSCALL_PATH_MAX];
-    kern_err_t copy_err = strncpy_from_user(path,
-                                            (const char *)(uintptr_t)a1,
-                                            sizeof(path));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
-    return vfs_unlink(path);
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_mkdir(uint32_t a1, uint32_t a2, uint32_t a3,
                              uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a2);U(a3);U(a4);U(a5);U(a6);
-    char path[SYSCALL_PATH_MAX];
-    kern_err_t copy_err = strncpy_from_user(path,
-                                            (const char *)(uintptr_t)a1,
-                                            sizeof(path));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
-    return vfs_mkdir(path);
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 static int sys_stat(uint32_t a1, uint32_t a2, uint32_t a3,
                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a3);U(a4);U(a5);U(a6);
-    char path[SYSCALL_PATH_MAX];
-    vfs_stat_t st;
-    void *user_st = (void *)(uintptr_t)a2;
-
-    if (!user_access_ok(user_st, sizeof(st), USER_ACCESS_WRITE)) {
-        return KERN_ERR_PARAM;
-    }
-
-    kern_err_t copy_err = strncpy_from_user(path,
-                                            (const char *)(uintptr_t)a1,
-                                            sizeof(path));
-    if (copy_err != KERN_OK) {
-        return copy_err;
-    }
-
-    kern_err_t err = vfs_stat(path, &st);
-    if (err != KERN_OK) {
-        return err;
-    }
-    return copy_to_user(user_st, &st, sizeof(st));
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return KERN_ERR_NOSYS;
 }
 
 #endif /* VFS_ENABLE */
