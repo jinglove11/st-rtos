@@ -329,10 +329,7 @@ int fs_store_open(fs_store_ctx_t *ctx, const char *path, uint32_t flags) {
         }
     }
 
-    if (inode->type == FS_INODE_DIR) {
-        fs_inode_put(inode);
-        return -14;
-    }
+    /* 目录可以 open (用于 readdir),但不能 O_TRUNC/O_CREAT 已有目录 */
     if ((flags & FS_O_TRUNC) && inode->type == FS_INODE_FILE) {
         inode->size = 0;
     }
@@ -344,15 +341,15 @@ int fs_store_open(fs_store_ctx_t *ctx, const char *path, uint32_t flags) {
 
 int fs_store_close(fs_store_ctx_t *ctx, int fd) {
     fs_fd_t *f = fs_fd_get(ctx, fd);
-    if (f == NULL) return -7;
+    if (f == NULL) return -2;
     fs_fd_free(ctx, fd);
     return 0;
 }
 
 int32_t fs_store_read(fs_store_ctx_t *ctx, int fd, void *buf, uint32_t len) {
     fs_fd_t *f = fs_fd_get(ctx, fd);
-    if (f == NULL) return -7;
-    if (f->inode->type == FS_INODE_DIR) return -13;
+    if (f == NULL) return -2;
+    if (f->inode->type == FS_INODE_DIR) return -14;  /* ISDIR */
 
     if (f->inode->type == FS_INODE_FILE) {
         int32_t n = fs_ramfs_read(f->inode, buf, f->offset, len);
@@ -364,7 +361,7 @@ int32_t fs_store_read(fs_store_ctx_t *ctx, int fd, void *buf, uint32_t len) {
 
 int32_t fs_store_write(fs_store_ctx_t *ctx, int fd, const void *buf, uint32_t len) {
     fs_fd_t *f = fs_fd_get(ctx, fd);
-    if (f == NULL) return -7;
+    if (f == NULL) return -2;
     if (f->inode->type == FS_INODE_DIR) return -14;
 
     if (f->inode->type == FS_INODE_FILE) {
@@ -377,7 +374,7 @@ int32_t fs_store_write(fs_store_ctx_t *ctx, int fd, const void *buf, uint32_t le
 
 int fs_store_lseek(fs_store_ctx_t *ctx, int fd, int32_t offset, uint32_t whence) {
     fs_fd_t *f = fs_fd_get(ctx, fd);
-    if (f == NULL) return -7;
+    if (f == NULL) return -2;
     int32_t newpos = 0;
     if (whence == FS_SEEK_SET) newpos = offset;
     else if (whence == FS_SEEK_CUR) newpos = (int32_t)f->offset + offset;
@@ -390,7 +387,7 @@ int fs_store_lseek(fs_store_ctx_t *ctx, int fd, int32_t offset, uint32_t whence)
 
 int fs_store_readdir(fs_store_ctx_t *ctx, int fd, fs_dirent_t *entry) {
     fs_fd_t *f = fs_fd_get(ctx, fd);
-    if (f == NULL) return -7;
+    if (f == NULL) return -2;
     if (f->inode->type != FS_INODE_DIR) return -13;
     int err = fs_dir_readdir(f->inode, f->offset, entry);
     if (err == 0) f->offset++;

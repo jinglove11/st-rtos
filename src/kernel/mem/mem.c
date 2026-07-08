@@ -393,6 +393,7 @@ uint32_t mem_get_fail_count(void) {
 typedef struct {
     void  *base;
     size_t size;
+    uint8_t aligned;   /* base 是否用 kmalloc_aligned 分配 (map 需 32 对齐) */
 } kmem_object_t;
 
 typedef struct {
@@ -477,7 +478,11 @@ static void kmem_cap_cleanup(void *object, uint8_t obj_type) {
     if (obj_type == CAP_OBJ_MEMBLOCK && object != NULL) {
         kmem_object_t *mem = (kmem_object_t *)object;
         if (mem->base != NULL) {
-            kfree(mem->base);
+            if (mem->aligned) {
+                kfree_aligned(mem->base);
+            } else {
+                kfree(mem->base);
+            }
             mem->base = NULL;
         }
         kfree(mem);
@@ -515,12 +520,15 @@ cap_id_t kmem_alloc_cap(size_t size, uint8_t rights) {
     }
     memset(mem, 0, sizeof(*mem));
 
-    mem->base = kmalloc(size);
+    /* 用 kmalloc_aligned(32):sys_mem_map 要求 base 32 对齐 (MPU region)。
+     * 与 kshm_create_aligned_cap 一致。 */
+    mem->base = kmalloc_aligned(size, 32);
     if (!mem->base) {
         kfree(mem);
         return KERN_INVALID_ID;
     }
     mem->size = size;
+    mem->aligned = 1U;
 
     (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, kmem_cap_cleanup);
     cap_id_t cap = cap_create(mem, CAP_OBJ_MEMBLOCK, rights, 0);

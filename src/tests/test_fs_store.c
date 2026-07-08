@@ -75,14 +75,17 @@ static void test_fs_store_basic(void) {
     TEST_ASSERT_EQ((int)FS_INODE_FILE, (int)st.type, "type FILE");
     TEST_ASSERT_EQ(5, (int)st.size, "size 5");
 
-    /* readdir /tmp */
+    /* readdir /tmp:目录可以 open (用于 readdir) */
     fd = fs_store_open(ctx, "/tmp", FS_O_RDONLY);
-    /* /tmp 是目录,open 应该失败 (ISDIR) */
-    TEST_ASSERT(fd < 0, "open directory rejected");
-
-    /* 用 opendir 语义:fs_store 对目录 open 应允许 readdir */
-    /* 当前实现:目录 open 返回 -14 (ISDIR)。readdir 需要 fd。
-     * 这是设计问题 —— 测试先确认基本 ramfs 工作。 */
+    TEST_ASSERT(fd > 0, "open directory for readdir");
+    if (fd > 0) {
+        fs_dirent_t entry;
+        /* readdir index 0 = "." */
+        int rerr = fs_store_readdir(ctx, fd, &entry);
+        TEST_ASSERT_EQ((int)KERN_OK, rerr, "readdir /tmp [0]='.' OK");
+        TEST_ASSERT_EQ('.', (int)entry.name[0], "readdir returns '.'");
+        fs_store_close(ctx, fd);
+    }
 
     /* unlink */
     err = fs_store_unlink(ctx, "/tmp/testfile");

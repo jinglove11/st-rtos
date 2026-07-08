@@ -330,17 +330,17 @@ int fs_server_run(int ep_cap, uint32_t max_requests) {
     void *store = NULL;
 
     if (store_mem_cap <= 0) {
-        init_err = store_mem_cap;       /* sys_mem_alloc 错误码 */
+        init_err = store_mem_cap;
     } else {
         store = sys_mem_map(store_mem_cap, CAP_READ | CAP_WRITE);
         if ((intptr_t)store <= 0) {
-            init_err = (int)(intptr_t)store;  /* sys_mem_map 错误码 */
+            init_err = (int)(intptr_t)store;
             (void)sys_mem_free(store_mem_cap);
             store_mem_cap = -1;
         } else {
             ctx = fs_store_init(store, 4096);
             if (ctx == NULL) {
-                init_err = -77;         /* 标记 fs_store_init 失败 */
+                init_err = -77;
                 (void)sys_mem_free(store_mem_cap);
                 store_mem_cap = -1;
             }
