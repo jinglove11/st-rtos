@@ -1441,4 +1441,18 @@ kern_err_t endpoint_reply_cap(void *reply_obj, const void *msg) {
 }
 #endif
 
+/* 返回当前任务在指定 endpoint 上最近一次 recv 的 sender task id。
+ * fs_server 用它记录"谁打开了这个 fd",客户端死亡时精确清理。 */
+task_id_t endpoint_last_sender(ep_id_t ep_id) {
+    tcb_t *current = sched_get_current();
+    if (current == NULL || ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS) {
+        return KERN_INVALID_ID;
+    }
+    tcb_t *sender = ep_server_sender[ep_id][current->id];
+    if (sender == NULL) {
+        return KERN_INVALID_ID;
+    }
+    return sender->id;
+}
+
 #endif /* IPC_ENDPOINT */

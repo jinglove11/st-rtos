@@ -126,6 +126,8 @@
 #define SYSCALL_MMIO_REQUEST     77
 #define SYSCALL_TASK_SET_POLICY  78
 #define SYSCALL_MEM_MAP          79            /* map memblock into task MPU */
+#define SYSCALL_CAP_TRANSFER_TO  80            /* transfer cap to task (via task cap) */
+#define SYSCALL_EP_SENDER        81            /* get last IPC sender task id */
 
 /*============================================================================
  * Syscall 分发

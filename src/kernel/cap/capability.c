@@ -592,6 +592,26 @@ kern_err_t cap_transfer(cap_id_t cap, uint8_t target_task) {
     return cap_move_to(current, cap, target, NULL);
 }
 
+/* 通过 task cap 找到目标任务,把 cap 转移过去 (user 态编排用)。
+ * task_cap 是调用者持有的目标任务的 TASK cap。 */
+kern_err_t cap_transfer_to_task_cap(cap_id_t cap, cap_id_t task_cap) {
+    tcb_t *current = sched_get_current();
+    if (current == NULL) {
+        return KERN_ERR_STATE;
+    }
+    /* 解析 task cap 拿到目标 TCB */
+    void *obj = cap_lookup_for(current, task_cap, CAP_OBJ_TASK, CAP_MANAGE);
+    if (obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+    task_id_t tid = (task_id_t)((uintptr_t)obj - 1);
+    tcb_t *target = task_get_tcb(tid);
+    if (target == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    return cap_move_to(current, cap, target, NULL);
+}
+
 kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap) {
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL) {

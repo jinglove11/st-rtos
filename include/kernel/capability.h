@@ -80,6 +80,7 @@ void    *cap_resolve(cap_id_t cap, uint8_t obj_type, uint8_t required_rights);
 void     cap_revoke_all(uint8_t owner);
 cap_id_t cap_derive(cap_id_t cap, uint8_t subset_rights);
 kern_err_t cap_transfer(cap_id_t cap, uint8_t target_task);
+kern_err_t cap_transfer_to_task_cap(cap_id_t cap, cap_id_t task_cap);
 kern_err_t cap_revoke(cap_id_t cap);
 
 cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t rights);

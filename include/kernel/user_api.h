@@ -348,6 +348,20 @@ static inline int sys_cap_revoke(int cap) {
     return sys_call1(SYSCALL_CAP_REVOKE, cap);
 }
 
+static inline int sys_cap_derive(int cap, int rights) {
+    return sys_call2(SYSCALL_CAP_DERIVE, cap, rights);
+}
+
+/* 把 cap 转移给另一个任务 (通过 task cap 指定目标) */
+static inline int sys_cap_transfer_to(int cap, int task_cap) {
+    return sys_call2(SYSCALL_CAP_TRANSFER_TO, cap, task_cap);
+}
+
+/* 返回当前 endpoint 上最近 recv 的 sender task id */
+static inline int sys_ep_sender(int ep_cap) {
+    return sys_call1(SYSCALL_EP_SENDER, ep_cap);
+}
+
 static inline int sys_cap_type(int cap) {
     return sys_call1(SYSCALL_CAP_TYPE, cap);
 }

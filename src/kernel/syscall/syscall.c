@@ -1201,6 +1201,29 @@ static int sys_cap_transfer(uint32_t a1, uint32_t a2, uint32_t a3,
     return cap_transfer((cap_id_t)a1, (uint8_t)a2);
 }
 
+/* 把 cap 转移给另一个任务 (通过 task cap 指定目标)。
+ * 让 user 态 init/编排器能给子服务装 cap。 */
+static int sys_cap_transfer_to(uint32_t a1, uint32_t a2, uint32_t a3,
+                                       uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+    return cap_transfer_to_task_cap((cap_id_t)a1, (cap_id_t)a2);
+}
+
+/* 返回当前任务在指定 endpoint 上最近 recv 的 sender task id。
+ * fs_server 用它记录 fd 归属,客户端死亡时精确清理。 */
+static int sys_ep_sender(uint32_t a1, uint32_t a2, uint32_t a3,
+                                 uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    return (int)endpoint_last_sender(ep_id);
+#else
+    return (int)endpoint_last_sender((ep_id_t)a1);
+#endif
+}
+
 static int sys_cap_revoke(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
@@ -1819,6 +1842,8 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_MEM_FREE,      sys_mem_free,      1),
     SYSDEF(SYSCALL_MEM_SIZE,      sys_mem_size,      1),
     SYSDEF(SYSCALL_MEM_MAP,       sys_mem_map,       2),
+    SYSDEF(SYSCALL_CAP_TRANSFER_TO, sys_cap_transfer_to, 2),
+    SYSDEF(SYSCALL_EP_SENDER,     sys_ep_sender,     1),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),
