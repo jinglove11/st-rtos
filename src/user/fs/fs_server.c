@@ -7,6 +7,7 @@
 #include "user_api.h"
 #include "inode.h"
 #include "fs_store.h"
+#include "driver_proto.h"
 #include <stdint.h>
 
 #if VFS_ENABLE && CAP_ENABLE
@@ -316,6 +317,11 @@ static int fs_reply(int ep_cap, fs_msg_t *msg, int status, int result) {
 }
 
 int fs_server_run(int ep_cap, uint32_t max_requests) {
+    return fs_server_run_with_dev(ep_cap, max_requests, 0, NULL);
+}
+
+int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
+                           int dev_ep_cap, const char *dev_name) {
     fs_msg_t msg;
     int err = KERN_OK;
 
@@ -343,6 +349,12 @@ int fs_server_run(int ep_cap, uint32_t max_requests) {
                 init_err = -77;
                 (void)sys_mem_free(store_mem_cap);
                 store_mem_cap = -1;
+            } else if (dev_ep_cap > 0 && dev_name != NULL) {
+                /* 注册 devfs 设备节点 /dev/<dev_name> → driver server */
+                int reg_err = fs_store_register_dev(ctx, dev_name, dev_ep_cap);
+                if (reg_err != KERN_OK) {
+                    init_err = reg_err;
+                }
             }
         }
     }
@@ -392,16 +404,44 @@ int fs_server_run(int ep_cap, uint32_t max_requests) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
                 int n = fs_store_read(ctx, msg.fd, msg.payload, msg.length);
-                err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
-                               n < 0 ? 0 : n);
+                if (n == -16) {
+                    /* CHRDEV:转发给 driver server */
+                    int dev_ep = fs_store_fd_dev_ep(ctx, msg.fd);
+                    if (dev_ep <= 0) {
+                        err = fs_reply(ep_cap, &msg, KERN_ERR_STATE, 0);
+                    } else {
+                        int rn = driver_read(dev_ep, msg.payload,
+                                             msg.length, 1000);
+                        err = fs_reply(ep_cap, &msg,
+                                       rn < 0 ? rn : KERN_OK,
+                                       rn < 0 ? 0 : rn);
+                    }
+                } else {
+                    err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
+                                   n < 0 ? 0 : n);
+                }
             }
         } else if (msg.opcode == FS_OP_WRITE) {
             if (msg.length > FS_PAYLOAD_MAX) {
                 err = fs_reply(ep_cap, &msg, KERN_ERR_PARAM, 0);
             } else {
                 int n = fs_store_write(ctx, msg.fd, msg.payload, msg.length);
-                err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
-                               n < 0 ? 0 : n);
+                if (n == -16) {
+                    /* CHRDEV:转发给 driver server */
+                    int dev_ep = fs_store_fd_dev_ep(ctx, msg.fd);
+                    if (dev_ep <= 0) {
+                        err = fs_reply(ep_cap, &msg, KERN_ERR_STATE, 0);
+                    } else {
+                        int wn = driver_write(dev_ep, msg.payload,
+                                              msg.length, 1000);
+                        err = fs_reply(ep_cap, &msg,
+                                       wn < 0 ? wn : KERN_OK,
+                                       wn < 0 ? 0 : wn);
+                    }
+                } else {
+                    err = fs_reply(ep_cap, &msg, n < 0 ? n : KERN_OK,
+                                   n < 0 ? 0 : n);
+                }
             }
         } else if (msg.opcode == FS_OP_LSEEK) {
             int pos = fs_store_lseek(ctx, msg.fd, msg.offset, msg.flags);

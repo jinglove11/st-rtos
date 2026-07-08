@@ -443,6 +443,13 @@ int fs_store_stat(fs_store_ctx_t *ctx, const char *path, fs_statinfo_t *st) {
     return 0;
 }
 
+int fs_store_fd_dev_ep(fs_store_ctx_t *ctx, int fd) {
+    fs_fd_t *f = fs_fd_get(ctx, fd);
+    if (f == NULL) return -2;
+    if (f->inode->type != FS_INODE_CHRDEV) return -16;  /* NOSYS:不是设备 */
+    return f->inode->dev_ep_cap;
+}
+
 /*============================================================================
  * devfs
  *============================================================================*/

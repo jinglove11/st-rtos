@@ -101,6 +101,10 @@ int32_t fs_store_write(fs_store_ctx_t *ctx, int fd, const void *buf, uint32_t le
 int fs_store_lseek(fs_store_ctx_t *ctx, int fd, int32_t offset, uint32_t whence);
 int fs_store_readdir(fs_store_ctx_t *ctx, int fd, fs_dirent_t *entry);
 
+/* 查询 fd 对应的设备 endpoint cap (CHRDEV 用)。
+ * 返回 >0:dev_ep_cap;<=0:不是 CHRDEV 或无效 fd。 */
+int fs_store_fd_dev_ep(fs_store_ctx_t *ctx, int fd);
+
 int fs_store_mkdir(fs_store_ctx_t *ctx, const char *path);
 int fs_store_unlink(fs_store_ctx_t *ctx, const char *path);
 int fs_store_stat(fs_store_ctx_t *ctx, const char *path, fs_statinfo_t *st);

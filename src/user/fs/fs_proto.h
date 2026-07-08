@@ -67,5 +67,8 @@ int fs_lookup(int ep_cap, const char *path, vfs_stat_t *st, uint32_t timeout);
 const char *fs_error_name(int err);
 
 int fs_server_run(int ep_cap, uint32_t max_requests);
+/* 带 devfs 设备注册的版本:dev_ep_cap>0 时注册 /dev/<dev_name> 指向该 driver */
+int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
+                           int dev_ep_cap, const char *dev_name);
 
 #endif /* FS_PROTO_H */
