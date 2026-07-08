@@ -289,6 +289,7 @@ static int fs_fd_alloc(fs_store_ctx_t *ctx, fs_inode_t *inode) {
             ctx->fds[i].in_use = 1;
             ctx->fds[i].inode = inode;
             ctx->fds[i].offset = 0;
+            ctx->fds[i].client_id = -1;  /* 由 fs_store_fd_set_client 设 */
             fs_inode_get(inode);
             return i + 1;  /* 1-based token */
         }
@@ -304,6 +305,7 @@ static void fs_fd_free(fs_store_ctx_t *ctx, int fd) {
         ctx->fds[idx].in_use = 0;
         ctx->fds[idx].inode = NULL;
         ctx->fds[idx].offset = 0;
+        ctx->fds[idx].client_id = -1;
     }
 }
 
@@ -448,6 +450,23 @@ int fs_store_fd_dev_ep(fs_store_ctx_t *ctx, int fd) {
     if (f == NULL) return -2;
     if (f->inode->type != FS_INODE_CHRDEV) return -16;  /* NOSYS:不是设备 */
     return f->inode->dev_ep_cap;
+}
+
+void fs_store_fd_set_client(fs_store_ctx_t *ctx, int fd, int client_id) {
+    fs_fd_t *f = fs_fd_get(ctx, fd);
+    if (f == NULL) return;
+    f->client_id = client_id;
+}
+
+int fs_store_close_client_fds(fs_store_ctx_t *ctx, int client_id) {
+    int closed = 0;
+    for (int i = 0; i < FS_STORE_MAX_FDS; i++) {
+        if (ctx->fds[i].in_use && ctx->fds[i].client_id == client_id) {
+            fs_fd_free(ctx, i + 1);  /* fd 是 1-based */
+            closed++;
+        }
+    }
+    return closed;
 }
 
 /*============================================================================

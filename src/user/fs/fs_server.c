@@ -8,6 +8,7 @@
 #include "inode.h"
 #include "fs_store.h"
 #include "driver_proto.h"
+#include "fault_endpoint.h"
 #include <stdint.h>
 
 #if VFS_ENABLE && CAP_ENABLE
@@ -324,6 +325,7 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
                            int dev_ep_cap, const char *dev_name) {
     fs_msg_t msg;
     int err = KERN_OK;
+    int fault_ep_cap = -1;   /* kern.fault endpoint cap (客户端死亡清理) */
 
     if (ep_cap <= 0) {
         return KERN_ERR_PARAM;
@@ -359,9 +361,27 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
         }
     }
 
+    /* 订阅 kern.fault:客户端崩溃时按 task_id 清理它的 fd。
+     * sys_fault_subscribe 返回 kern.fault endpoint cap。失败则跳过
+     * (fs_server 仍工作,但无客户端死亡清理)。 */
+    if (ctx != NULL) {
+        fault_ep_cap = sys_fault_subscribe();
+    }
+
     for (uint32_t round = 0;
          (max_requests == 0U || round < max_requests) && err == KERN_OK;
          round++) {
+        /* Phase C3:poll kern.fault,清理崩溃客户端的 fd (精确清理)。
+         * timeout=0 非阻塞:有事件就处理,无事件立即返回。 */
+        if (ctx != NULL && fault_ep_cap > 0) {
+            fault_event_t fevt;
+            int ferr = sys_ep_recv(fault_ep_cap, &fevt, 0);
+            if (ferr == KERN_OK) {
+                /* 客户端崩溃:按 task_id 关闭它所有 fd */
+                (void)fs_store_close_client_fds(ctx, (int)fevt.task_id);
+            }
+        }
+
         fs_msg_init(&msg, 0, 0);
         err = sys_ep_recv(ep_cap, &msg, 1000);
         if (err == KERN_ERR_TIMEOUT && max_requests == 0U) {
@@ -393,6 +413,9 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
                 if (fd < 0) {
                     err = fs_reply(ep_cap, &msg, fd, 0);
                 } else {
+                    /* 记录 fd 归属:谁打开的 (客户端死亡时清理) */
+                    int sender = sys_ep_sender(ep_cap);
+                    fs_store_fd_set_client(ctx, fd, sender);
                     err = fs_reply(ep_cap, &msg, KERN_OK, fd);
                 }
             }

@@ -64,6 +64,7 @@ typedef struct {
     uint8_t   in_use;
     fs_inode_t *inode;
     uint32_t  offset;
+    int       client_id;   /* 打开此 fd 的客户端 task id (死亡时清理) */
 } fs_fd_t;
 
 /* fs_store 上下文 (放在 memblock 里,所有状态集中于此) */
@@ -104,6 +105,13 @@ int fs_store_readdir(fs_store_ctx_t *ctx, int fd, fs_dirent_t *entry);
 /* 查询 fd 对应的设备 endpoint cap (CHRDEV 用)。
  * 返回 >0:dev_ep_cap;<=0:不是 CHRDEV 或无效 fd。 */
 int fs_store_fd_dev_ep(fs_store_ctx_t *ctx, int fd);
+
+/* 设置 fd 的客户端归属 (open 时调,记录谁打开的) */
+void fs_store_fd_set_client(fs_store_ctx_t *ctx, int fd, int client_id);
+
+/* 关闭指定客户端的所有 fd (客户端死亡时调,精确清理)。
+ * 返回关闭的 fd 数量。 */
+int fs_store_close_client_fds(fs_store_ctx_t *ctx, int client_id);
 
 int fs_store_mkdir(fs_store_ctx_t *ctx, const char *path);
 int fs_store_unlink(fs_store_ctx_t *ctx, const char *path);
