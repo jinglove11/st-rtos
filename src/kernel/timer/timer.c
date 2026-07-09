@@ -580,7 +580,9 @@ static void process_expired_timers(void) {
             (void)endpoint_notify(timer->notify_ep, notify_msg);
         }
 
-        /* 执行回调 */
+        /* 回调执行 (内核测试用,user 任务被 sys_timer_create 拒绝)。
+         * Phase H2:timer_svc 保留内核特权 (需响应 SysTick + 回调),
+         * 和 bh_svc/irq_N 同为内核 TCB 一部分。 */
         if (timer->callback) {
             timer->callback(timer->arg);
         }
