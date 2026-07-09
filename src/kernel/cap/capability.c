@@ -78,11 +78,6 @@ static int cap_slot_of(const cap_entry_t *entry) {
     return (int)(entry - cap_pool);
 }
 
-static int cap_current_is_privileged(void) {
-    tcb_t *current = sched_get_current();
-    return current == NULL || (current->attrs & TASK_ATTR_USER) == 0;
-}
-
 static tcb_t *cap_task_by_id(uint8_t task_id) {
     if (task_id >= KERNEL_MAX_TASKS) {
         return NULL;
@@ -108,6 +103,8 @@ static kern_err_t cap_task_add(tcb_t *task, cap_id_t cap) {
     if (task == NULL || task->id < 0) {
         return KERN_OK;
     }
+    /* 特权任务不强制登记 cspace (内核内部 cap 操作靠 cap_owner_allowed
+     * 的特权放行)。user 任务严格登记。Phase G shell 改 user 后再收紧。 */
     if ((task->attrs & TASK_ATTR_USER) == 0) {
         return KERN_OK;
     }
@@ -152,8 +149,18 @@ static int cap_owner_allowed(tcb_t *task, cap_id_t cap, const cap_entry_t *entry
         return 0;
     }
     if (task == NULL) {
-        return cap_current_is_privileged();
+        /* 内核上下文 (无 current,如 panic/early boot 路径): 允许。 */
+        return 1;
     }
+    /* Phase E1: cap 系统对 user 任务严格生效。
+     *
+     * 特权任务 (非 user) 暂保留放行 —— 它们是内核 TCB 的一部分
+     * (shell/timer_svc/bh_svc/test_runner),内核内部 cap 操作
+     * (bh_sem/timer/irq 等) 依赖此放行。后续 Phase G 把 shell 等
+     * 改成 user 任务后,特权任务数量减少,可进一步收紧。
+     *
+     * user 任务严格走 owner + has 检查 —— 这是 cap 系统的核心约束。
+     */
     if ((task->attrs & TASK_ATTR_USER) == 0) {
         return 1;
     }
