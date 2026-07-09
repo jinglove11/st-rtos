@@ -15,7 +15,7 @@
 #include "syscall.h"
 #include "capability.h"
 #include "fault.h"
-#include "vfs.h"
+/* Phase #23: vfs.h 移除 (内核 VFS 已删) */
 
 /*============================================================================
  * 内核控制

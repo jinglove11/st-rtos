@@ -105,25 +105,6 @@ typedef enum {
 } block_reason_t;
 
 /*============================================================================
- * VFS 类型 (前置声明)
- *============================================================================*/
-
-#if VFS_ENABLE
-
-/* 前向声明 */
-struct inode;
-
-/** 文件描述符条目 — 嵌入 TCB */
-typedef struct {
-    struct inode *inode;        /* 指向打开的 inode */
-    uint32_t      flags;        /* O_RDONLY / O_WRONLY / O_RDWR */
-    uint32_t      offset;       /* 当前读写位置 */
-    uint8_t       in_use;       /* 槽位是否使用中 */
-} fd_entry_t;
-
-#endif /* VFS_ENABLE */
-
-/*============================================================================
  * 任务控制块 (TCB)
  *============================================================================*/
 
@@ -206,9 +187,7 @@ typedef struct tcb {
 #endif
 
     // --- 文件描述符表 ---
-#if VFS_ENABLE
-    fd_entry_t  fd_table[VFS_MAX_FDS];   // 每任务独立 fd 空间
-#endif
+    /* Phase #22: fd_table 删除 (内核 VFS 移除,fd 由 fs_server 管理) */
 
 } tcb_t;
 

@@ -5,7 +5,7 @@
 
 #include "fs_proto.h"
 #include "user_api.h"
-#include "inode.h"
+#include "fs_types.h"   /* dirent_t/vfs_stat_t (原在 inode.h) */
 #include "fs_store.h"
 #include "driver_proto.h"
 #include "fault_endpoint.h"

@@ -1252,73 +1252,15 @@ static int sys_cap_rights(uint32_t a1, uint32_t a2, uint32_t a3,
  * VFS 文件操作 (VFS_ENABLE)
  *============================================================================*/
 
-#if VFS_ENABLE
-#include "vfs.h"
-
-/* Phase D2:内核 VFS 已移除,文件操作改由 user 态 fs_server 提供。
- * 这些 syscall 保留编号 (user_api.h 的 inline 封装仍可调),但内核侧
- * 不再实现 —— 返回 NOSYS。user 任务应改用 fs_* IPC 走 fs_server。 */
-static int sys_open(uint32_t a1, uint32_t a2, uint32_t a3,
-                            uint32_t a4, uint32_t a5, uint32_t a6) {
+/* Phase #24: VFS syscall 占位 (内核 VFS 已删,返回 NOSYS)。
+ * user_api.h 的 inline 仍调这些 syscall 编号,内核统一返回 NOSYS。
+ * user 任务应改用 fs_* IPC 走 fs_server。 */
+static int __attribute__((used)) sys_nosys(uint32_t a1, uint32_t a2, uint32_t a3,
+                     uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
     return KERN_ERR_NOSYS;
 }
 
-static int sys_close(uint32_t a1, uint32_t a2, uint32_t a3,
-                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_read(uint32_t a1, uint32_t a2, uint32_t a3,
-                            uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_write(uint32_t a1, uint32_t a2, uint32_t a3,
-                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_ioctl(uint32_t a1, uint32_t a2, uint32_t a3,
-                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_lseek(uint32_t a1, uint32_t a2, uint32_t a3,
-                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_readdir(uint32_t a1, uint32_t a2, uint32_t a3,
-                               uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_unlink(uint32_t a1, uint32_t a2, uint32_t a3,
-                              uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_mkdir(uint32_t a1, uint32_t a2, uint32_t a3,
-                             uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-static int sys_stat(uint32_t a1, uint32_t a2, uint32_t a3,
-                            uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
-    return KERN_ERR_NOSYS;
-}
-
-#endif /* VFS_ENABLE */
 
 /*============================================================================
  * Phase 2 — fault endpoint subscription
@@ -1755,16 +1697,16 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_RIGHTS,    sys_cap_rights,    1),
 #endif
 #if VFS_ENABLE
-    SYSDEF(SYSCALL_OPEN,          sys_open,          2),
-    SYSDEF(SYSCALL_CLOSE,         sys_close,         1),
-    SYSDEF(SYSCALL_READ,          sys_read,          3),
-    SYSDEF(SYSCALL_WRITE,         sys_write,         3),
-    SYSDEF(SYSCALL_IOCTL,         sys_ioctl,         3),
-    SYSDEF(SYSCALL_LSEEK,         sys_lseek,         3),
-    SYSDEF(SYSCALL_READDIR,       sys_readdir,       2),
-    SYSDEF(SYSCALL_UNLINK,        sys_unlink,        1),
-    SYSDEF(SYSCALL_MKDIR,         sys_mkdir,         1),
-    SYSDEF(SYSCALL_STAT,          sys_stat,          2),
+    SYSDEF(SYSCALL_OPEN,          sys_nosys,         2),
+    SYSDEF(SYSCALL_CLOSE,         sys_nosys,         1),
+    SYSDEF(SYSCALL_READ,          sys_nosys,         3),
+    SYSDEF(SYSCALL_WRITE,         sys_nosys,         3),
+    SYSDEF(SYSCALL_IOCTL,         sys_nosys,         3),
+    SYSDEF(SYSCALL_LSEEK,        sys_nosys,         3),
+    SYSDEF(SYSCALL_READDIR,       sys_nosys,         2),
+    SYSDEF(SYSCALL_UNLINK,        sys_nosys,         1),
+    SYSDEF(SYSCALL_MKDIR,         sys_nosys,         1),
+    SYSDEF(SYSCALL_STAT,          sys_nosys,         2),
 #endif
     SYSDEF(SYSCALL_FAULT_SUBSCRIBE, sys_fault_subscribe, 0),
     SYSDEF(SYSCALL_TASK_RESTART,    sys_task_restart,    6),
