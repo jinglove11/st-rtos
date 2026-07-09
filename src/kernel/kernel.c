@@ -19,7 +19,7 @@
 #include "stats.h"
 #include "capability.h"
 #include "root_bootstrap.h"
-#include "vfs.h"
+/* Phase F4: vfs.h 移除 (内核 VFS 已删) */
 #if DRIVER_ENABLE
 #include "device.h"
 #endif
@@ -45,9 +45,7 @@ void kern_init(void) {
     cap_init();
     root_bootstrap_init();
 #endif
-#if VFS_ENABLE
-    vfs_init();
-#endif
+    /* Phase F4: vfs_init() 移除 (内核 VFS 已删,文件操作由 fs_server 提供) */
 #if DRIVER_ENABLE
     device_init();
 #endif

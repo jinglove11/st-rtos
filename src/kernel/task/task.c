@@ -16,7 +16,7 @@
 #include "spinlock.h"
 #include "endpoint.h"
 #include "channel.h"
-#include "vfs.h"
+/* Phase F4: vfs.h 移除 (内核 VFS 已删) */
 #include "mem.h"
 #include "root_bootstrap.h"
 
@@ -191,9 +191,8 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
         return;
     }
 
-#if VFS_ENABLE
-    vfs_close_task_fds(tcb);
-#endif
+    /* Phase F4: vfs_close_task_fds 移除 (内核 VFS 已删)。
+     * fd 清理由 fs_server 的 kern.fault 订阅 + fs_store_close_client_fds 承担。 */
 
 #if MPU_ENABLE && CAP_ENABLE
     kshm_unmap_all_for_task(tcb);
