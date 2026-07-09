@@ -7,7 +7,6 @@
 
 #include "kernel_config.h"
 #include "device.h"
-#include "devfs.h"
 #include "uart.h"
 #include "gpio.h"
 #include "nucleo_f767.h"
@@ -99,21 +98,18 @@ static void gpio_dev_register_all(void) {
     if (led1_dev) {
         led1_dev->ops  = &gpio_dev_ops;
         led1_dev->priv = &led1_priv;
-        devfs_register_device("led1", led1_dev);
     }
 
     led2_dev = device_alloc("led2", DEVICE_TYPE_CHAR);
     if (led2_dev) {
         led2_dev->ops  = &gpio_dev_ops;
         led2_dev->priv = &led2_priv;
-        devfs_register_device("led2", led2_dev);
     }
 
     led3_dev = device_alloc("led3", DEVICE_TYPE_CHAR);
     if (led3_dev) {
         led3_dev->ops  = &gpio_dev_ops;
         led3_dev->priv = &led3_priv;
-        devfs_register_device("led3", led3_dev);
     }
 }
 
@@ -127,7 +123,6 @@ void board_init_drivers(void) {
     /* UART */
     device_t *uart_dev = uart_dev_register();
     if (uart_dev)
-        devfs_register_device("uart0", uart_dev);
 
     /* GPIO LEDs */
     gpio_dev_register_all();

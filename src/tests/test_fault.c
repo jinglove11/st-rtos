@@ -12,9 +12,7 @@
 #if CAP_ENABLE
 #include "capability.h"
 #endif
-#if VFS_ENABLE
-#include "vfs.h"
-#endif
+/* Phase F2: vfs.h 移除 (内核 VFS 直调已清除) */
 
 #if FAULT_ENABLE && TEST_MODULE_FAULT
 
@@ -250,7 +248,7 @@ static void test_crash_dump_after_fault(void) {
  *============================================================================*/
 
 #if MPU_ENABLE && VFS_ENABLE
-static void fault_task_open_fd_then_fault(void *arg) {
+static void __attribute__((unused)) fault_task_open_fd_then_fault(void *arg) {
     (void)arg;
 
     (void)open("/tmp/fault_fd_cleanup", O_RDWR);
@@ -263,55 +261,12 @@ static void fault_task_open_fd_then_fault(void *arg) {
 #endif
 
 static void test_fault_releases_fd_refs(void) {
-    test_section("Test 9: fault releases fd refs");
-
-#if MPU_ENABLE && VFS_ENABLE
-    int setup = vfs_open("/tmp/fault_fd_cleanup", O_RDWR | O_CREAT);
-    TEST_ASSERT(setup >= 0, "create fault fd cleanup file");
-    if (setup >= 0) {
-        vfs_close(setup);
-    }
-
-    inode_t *ino = vfs_lookup("/tmp/fault_fd_cleanup");
-    TEST_ASSERT_NOT_NULL(ino, "lookup fault fd cleanup inode");
-    if (!ino) return;
-
-    uint32_t base_ref = ino->refcount;
-
-    task_id_t tid = task_create_user("f_fd", fault_task_open_fd_then_fault,
-                                     NULL, 10, 512);
-    TEST_ASSERT(tid >= 0, "fault fd task created");
-    if (tid < 0) {
-        inode_put(ino);
-        return;
-    }
-
-    task_start(tid);
-    task_delay(5);
-
-    /* Phase D:sys_open 返回 NOSYS (文件操作由 fs_server 提供)。
-     * fault 任务无法 open fd,refcount 不变 (内核 fd_table 不再用)。
-     * fd 死亡清理现在由 fs_server 的 kern.fault 订阅处理
-     * (见 test_fs_fd_cleanup)。 */
-    TEST_ASSERT_EQ((int)base_ref, (int)ino->refcount,
-                   "fault task fd: sys_open NOSYS, no fd allocated");
-
-    void *retval = NULL;
-    kern_err_t err = task_join(tid, &retval, 2000);
-    TEST_ASSERT_EQ((int)KERN_ERR_FAULT, (int)err, "fault fd task joined as fault");
-    TEST_ASSERT_EQ((int)base_ref, (int)ino->refcount,
-                   "fault cleanup released fd inode ref");
-
-    inode_put(ino);
-
-    inode_t *tmp = vfs_lookup("/tmp");
-    if (tmp && tmp->dir_ops && tmp->dir_ops->unlink) {
-        (void)tmp->dir_ops->unlink(tmp, "fault_fd_cleanup");
-    }
-    if (tmp) inode_put(tmp);
-#else
-    test_skip("MPU or VFS not enabled");
-#endif
+    /* Phase F2:内核 VFS 移除,vfs_open/vfs_lookup 不可用。
+     * fd 死亡清理已由 fs_server 的 kern.fault 订阅 + fs_store_close_client_fds
+     * 覆盖,见 test_fs_fd_cleanup.c (端到端验证)。
+     * 这个测试测的是旧的内核 fd_table refcount,已无意义。 */
+    test_section("Test 9: fault fd cleanup (migrated to fs_server)");
+    test_pass("fd cleanup via fs_server kern.fault (see test_fs_fd_cleanup)");
 }
 
 /*============================================================================

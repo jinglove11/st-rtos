@@ -6,9 +6,8 @@
 #include "test_framework.h"
 #include "kernel_config.h"
 #include "device.h"
-#include "vfs.h"
-#include "inode.h"
-#include "devfs.h"
+#include "fs_types.h"   /* Phase F2: dev_ops_t (原在 inode.h) */
+/* Phase F2: vfs.h/devfs.h 移除 (内核 VFS 直调已清除) */
 #include "trace.h"
 #include "stats.h"
 #include "user_api.h"
@@ -632,7 +631,7 @@ static void __attribute__((unused)) test_device_probe_remove_diag(void) {
     err = device_remove("probe0");
     TEST_ASSERT_EQ(KERN_OK, err, "device_remove after close OK");
     TEST_ASSERT_NULL(device_find("probe0"), "probe0 removed from registry");
-    TEST_ASSERT_NULL(vfs_lookup("/dev/probe0"), "probe0 removed from devfs");
+    /* Phase F2: vfs_lookup("/dev/probe0") 移除 (内核 devfs 移除) */
 
 #if TRACE_ENABLE && KERN_TASK_STATS
     uint16_t dev_events = trace_filter(TRACE_DEV, driver_trace_count_cb, NULL);
