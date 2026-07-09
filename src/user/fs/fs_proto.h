@@ -7,7 +7,7 @@
 #define FS_PROTO_H
 
 #include "kernel_types.h"
-#include "inode.h"
+#include "fs_types.h"   /* Phase F1: dirent_t/vfs_stat_t (原在 inode.h) */
 #include <stdint.h>
 
 #define FS_MAGIC        0x46535631U

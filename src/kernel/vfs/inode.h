@@ -15,30 +15,18 @@
 
 #include "kernel_types.h"
 #include "kernel_config.h"
+#include "fs_types.h"   /* Phase F1: 公共类型 (dev_ops_t/dirent_t/vfs_stat_t/...) */
 
 #if VFS_ENABLE
 
 /*============================================================================
- * 常量
+ * 内核 VFS 实现常量 (公共常量在 fs_types.h)
  *============================================================================*/
 
-#define INODE_NAME_LEN    32
 #define MAX_INODES        VFS_MAX_INODES
 
-/* open flags */
-#define O_RDONLY  0x01
-#define O_WRONLY  0x02
-#define O_RDWR    0x03
-#define O_CREAT   0x04
-#define O_TRUNC   0x08
-
-/* lseek whence */
-#define SEEK_SET  0
-#define SEEK_CUR  1
-#define SEEK_END  2
-
 /*============================================================================
- * 操作表类型 (前向声明所需, 全定义见各子模块)
+ * 内核 VFS 操作表类型 (只有内核 VFS 实现用)
  *============================================================================*/
 
 struct inode;
@@ -61,9 +49,6 @@ typedef struct cdev_ops {
     kern_err_t (*ioctl)(struct inode *inode, uint32_t cmd, void *arg);
 } cdev_ops_t;
 
-/* 目录条目 (前向声明, dirent_t 定义在下方) */
-typedef struct dirent dirent_t;
-
 /** 目录操作 (DIR 类型使用, 独立于 union ops_u) */
 typedef struct dir_ops {
     kern_err_t (*lookup)(struct inode *dir, const char *name, struct inode **result);
@@ -71,38 +56,6 @@ typedef struct dir_ops {
     kern_err_t (*unlink)(struct inode *dir, const char *name);
     kern_err_t (*readdir)(struct inode *dir, uint32_t index, dirent_t *entry);
 } dir_ops_t;
-
-/** 驱动操作表 — 具体驱动实现 (dev_ops_t 方法第一个参数是 void *priv) */
-typedef struct dev_ops {
-    kern_err_t (*open)(void *priv, uint32_t flags);
-    kern_err_t (*close)(void *priv);
-    int32_t    (*read)(void *priv, void *buf, uint32_t offset, uint32_t size);
-    int32_t    (*write)(void *priv, const void *buf, uint32_t offset, uint32_t size);
-    kern_err_t (*ioctl)(void *priv, uint32_t cmd, void *arg);
-} dev_ops_t;
-
-/*============================================================================
- * inode 类型
- *============================================================================*/
-
-typedef enum {
-    INODE_TYPE_FILE   = 0,   /* 普通文件 (ramfs) */
-    INODE_TYPE_DIR    = 1,   /* 目录 */
-    INODE_TYPE_CHRDEV = 2,   /* 字符设备 (devfs) */
-} inode_type_t;
-
-/** 目录条目 (readdir 返回) — 完整定义 */
-struct dirent {
-    uint32_t    ino;
-    char        name[INODE_NAME_LEN];
-    uint8_t     type;          /* inode_type_t */
-};
-
-typedef struct {
-    uint32_t ino;
-    uint32_t size;
-    uint8_t  type;             /* inode_type_t */
-} vfs_stat_t;
 
 /*============================================================================
  * inode 结构

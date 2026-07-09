@@ -11,7 +11,7 @@
 
 #if DRIVER_ENABLE
 
-#include "inode.h"   /* dev_ops_t */
+#include "fs_types.h"   /* Phase F1: dev_ops_t (原在 inode.h) */
 
 /*============================================================================
  * 常量
