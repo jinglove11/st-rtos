@@ -132,7 +132,7 @@
 #define TRACE_BUFFER_SIZE (1024)
 #define TRACE_ENABLE 1
 #define USER_LIBC 1
-#define VFS_ENABLE 1
+#define VFS_ENABLE 0   /* Phase F3: 内核 VFS 移除,文件操作由 fs_server 提供 */
 #define VFS_MAX_FDS (16)
 #define VFS_MAX_INODES (32)
 

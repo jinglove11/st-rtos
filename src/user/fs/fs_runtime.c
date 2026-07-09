@@ -7,7 +7,7 @@
 #include "capability.h"
 #include "nameserver.h"
 
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
 
 static cap_id_t fs_runtime_ns_ep_cap = KERN_INVALID_ID;
 static cap_id_t fs_runtime_inbox_ep_cap = KERN_INVALID_ID;
@@ -128,4 +128,4 @@ int fs_runtime_release_service(cap_id_t service_cap) {
     return err;
 }
 
-#endif /* VFS_ENABLE && CAP_ENABLE */
+#endif /* CAP_ENABLE */

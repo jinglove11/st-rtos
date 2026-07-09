@@ -12,7 +12,7 @@
 #include "fs_store.h"
 #include <stdint.h>
 
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
 
 /*============================================================================
  * memblock 上的 bump allocator
@@ -515,4 +515,4 @@ fs_store_ctx_t *fs_store_init(void *store_buf, uint32_t store_size) {
     return ctx;
 }
 
-#endif /* VFS_ENABLE && CAP_ENABLE */
+#endif /* CAP_ENABLE */

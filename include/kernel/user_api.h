@@ -23,7 +23,7 @@
 
 #include "syscall.h"
 #include "ipc_transfer.h"
-#include "inode.h"
+#include "fs_types.h"   /* Phase F3: dirent_t/vfs_stat_t (原在 inode.h) */
 
 #if SYSCALL_ENABLE
 
@@ -449,11 +449,12 @@ static inline int sys_shm_unmap(int shm_cap) {
 
 /*============================================================================
  * VFS 文件操作 — 用户态内联封装
+ * Phase F3: 内核 VFS 移除,这些 syscall 返回 NOSYS。
+ * 保留 inline (返回 NOSYS) 让旧代码能编译,实际文件操作走 fs_server IPC。
  *============================================================================*/
-#if VFS_ENABLE
-
 static inline int open(const char *path, int flags) {
-    return sys_call2(SYSCALL_OPEN, (int)(uintptr_t)path, flags);
+    (void)path; (void)flags;
+    return sys_call2(SYSCALL_OPEN, 0, 0);
 }
 
 static inline int close(int fd) {
@@ -461,39 +462,44 @@ static inline int close(int fd) {
 }
 
 static inline int read(int fd, void *buf, int size) {
-    return sys_call3(SYSCALL_READ, fd, (int)(uintptr_t)buf, size);
+    (void)fd; (void)buf; (void)size;
+    return sys_call3(SYSCALL_READ, 0, 0, 0);
 }
 
 static inline int write(int fd, const void *buf, int size) {
-    return sys_call3(SYSCALL_WRITE, fd, (int)(uintptr_t)buf, size);
+    (void)fd; (void)buf; (void)size;
+    return sys_call3(SYSCALL_WRITE, 0, 0, 0);
 }
 
 static inline int ioctl(int fd, int cmd, void *arg) {
-    return sys_call3(SYSCALL_IOCTL, fd, cmd, (int)(uintptr_t)arg);
+    (void)fd; (void)cmd; (void)arg;
+    return sys_call3(SYSCALL_IOCTL, 0, 0, 0);
 }
 
 static inline int lseek(int fd, int offset, int whence) {
-    return sys_call3(SYSCALL_LSEEK, fd, offset, whence);
+    (void)fd; (void)offset; (void)whence;
+    return sys_call3(SYSCALL_LSEEK, 0, 0, 0);
 }
 
 static inline int readdir(int fd, dirent_t *entry) {
-    return sys_call2(SYSCALL_READDIR, fd, (int)(uintptr_t)entry);
+    (void)fd; (void)entry;
+    return sys_call2(SYSCALL_READDIR, 0, 0);
 }
 
 static inline int unlink(const char *path) {
-    return sys_call1(SYSCALL_UNLINK, (int)(uintptr_t)path);
+    (void)path;
+    return sys_call1(SYSCALL_UNLINK, 0);
 }
 
 static inline int mkdir(const char *path) {
-    return sys_call1(SYSCALL_MKDIR, (int)(uintptr_t)path);
+    (void)path;
+    return sys_call1(SYSCALL_MKDIR, 0);
 }
 
 static inline int stat(const char *path, vfs_stat_t *st) {
-    return sys_call2(SYSCALL_STAT, (int)(uintptr_t)path,
-                     (int)(uintptr_t)st);
+    (void)path; (void)st;
+    return sys_call2(SYSCALL_STAT, 0, 0);
 }
-
-#endif /* VFS_ENABLE */
 
 /*============================================================================
  * Phase 2 — fault endpoint subscription

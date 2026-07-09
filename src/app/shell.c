@@ -2134,7 +2134,7 @@ static void cmd_driver(int argc, char **argv) {
  * 内置命令: fs
  *============================================================================*/
 
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
 
 #define FS_SHELL_PROBE_TIMEOUT 100U
 #define FS_SHELL_OWNER_BADGE   0x46530001U
@@ -3299,7 +3299,7 @@ static void cmd_fs(int argc, char **argv) {
  * 内置命令: svc
  *============================================================================*/
 
-#if DRIVER_ENABLE || (VFS_ENABLE && CAP_ENABLE)
+#if DRIVER_ENABLE || CAP_ENABLE
 
 static void cmd_svc_print_row(const supervisor_service_t *svc,
                               const char *kind,
@@ -3380,7 +3380,7 @@ static void cmd_svc_register_defaults(void) {
 #if DRIVER_ENABLE
     (void)shell_driver_supervisor_get();
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     (void)shell_fs_supervisor_get();
 #endif
 }
@@ -3528,7 +3528,7 @@ static void cmd_svc_recover(int argc, char **argv) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_recover();
@@ -3564,7 +3564,7 @@ static void cmd_svc_start(int argc, char **argv) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_up();
@@ -3600,7 +3600,7 @@ static void cmd_svc_health(int argc, char **argv) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_health();
@@ -3621,7 +3621,7 @@ static void cmd_svc_probe_service(supervisor_service_t *svc) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_probe();
@@ -3666,7 +3666,7 @@ static int cmd_svc_check_health(supervisor_service_t *svc) {
         return err;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cap_id_t service_cap = KERN_INVALID_ID;
@@ -3694,7 +3694,7 @@ static const char *cmd_svc_health_name(const supervisor_service_t *svc,
         return err == KERN_ERR_STATE ? "stopped" : driver_error_name(err);
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (svc != NULL &&
         strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
@@ -3713,7 +3713,7 @@ static void cmd_svc_restart_service(supervisor_service_t *svc) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_restart();
@@ -3793,7 +3793,7 @@ static int cmd_svc_service_has_task(const supervisor_service_t *svc) {
         return shell_driver_uart_task >= 0;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         return shell_fs_task >= 0;
@@ -4204,7 +4204,7 @@ static void cmd_svc_restart(int argc, char **argv) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_restart();
@@ -4240,7 +4240,7 @@ static void cmd_svc_down(int argc, char **argv) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_down();
@@ -4261,7 +4261,7 @@ static void cmd_svc_fault_service(supervisor_service_t *svc) {
         return;
     }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
     if (strcmp(supervisor_service_name(svc),
                FS_SHELL_SERVICE_NAME) == 0) {
         cmd_fs_fault();
@@ -4423,7 +4423,7 @@ static void cmd_svc(int argc, char **argv) {
             continue;
         }
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
         if (strcmp(supervisor_service_name(svc),
                    FS_SHELL_SERVICE_NAME) == 0) {
             cmd_svc_print_row(svc, "fs",
@@ -4438,7 +4438,7 @@ static void cmd_svc(int argc, char **argv) {
     }
 }
 
-#endif /* DRIVER_ENABLE || (VFS_ENABLE && CAP_ENABLE) */
+#endif /* DRIVER_ENABLE || CAP_ENABLE */
 
 /*============================================================================
  * 命令表
@@ -4466,10 +4466,10 @@ const shell_cmd_t cmd_table[] = {
     { "dev",      "List devices",               cmd_dev      },
     { "driver",   "[abi|status [svc]] Driver",  cmd_driver   },
 #endif
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE   /* Phase F3: fs 命令走 fs_server IPC,不依赖内核 VFS */
     { "fs",       "[up|down|probe|ls] FS",      cmd_fs       },
 #endif
-#if DRIVER_ENABLE || (VFS_ENABLE && CAP_ENABLE)
+#if DRIVER_ENABLE || CAP_ENABLE
     { "svc",      "Service supervisor",         cmd_svc      },
 #endif
     { "free",     "Memory usage",               cmd_free     },

@@ -11,7 +11,7 @@
 #include "fault_endpoint.h"
 #include <stdint.h>
 
-#if VFS_ENABLE && CAP_ENABLE
+#if CAP_ENABLE
 
 int fs_opcode_valid(uint16_t opcode) {
     return opcode >= FS_OP_PING && opcode <= FS_OP_LOOKUP;
@@ -529,4 +529,4 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
     return err;
 }
 
-#endif /* VFS_ENABLE && CAP_ENABLE */
+#endif /* CAP_ENABLE */
