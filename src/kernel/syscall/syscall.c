@@ -1508,7 +1508,15 @@ static int sys_get_tick(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_task_set_policy(uint32_t a1, uint32_t a2, uint32_t a3,
                                uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a3);U(a4);U(a5);U(a6);
-#if RT_SCHED
+#if RT_SCHED && CAP_ENABLE
+    /* Phase E3: 加 cap 门控。a1 是 task cap,不是裸 task_id。 */
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
+    if (obj == NULL) {
+        return KERN_ERR_CAP;
+    }
+    task_id_t tid = (task_id_t)((uintptr_t)obj - 1);
+    return (int)task_set_sched_policy(tid, (uint8_t)a2);
+#elif RT_SCHED
     return (int)task_set_sched_policy((task_id_t)a1, (uint8_t)a2);
 #else
     (void)a1; (void)a2;
