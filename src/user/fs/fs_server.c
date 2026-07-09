@@ -361,31 +361,27 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
         }
     }
 
-    /* 订阅 kern.fault:客户端崩溃时按 task_id 清理它的 fd。
-     * 注意:VFS_ENABLE=0 后此订阅干扰服务循环 (service_model 2 fail)，
-     * 根因待查。暂时禁用 —— fd 清理功能仍由 test_fs_fd_cleanup 验证。 */
-    /* if (ctx != NULL) {
+    /* 订阅 kern.fault:客户端崩溃时按 task_id 清理它的 fd。 */
+    if (ctx != NULL) {
         fault_ep_cap = sys_fault_subscribe();
-    } */
+    }
 
     for (uint32_t round = 0;
          (max_requests == 0U || round < max_requests) && err == KERN_OK;
          round++) {
-        /* Phase C3:poll kern.fault,清理崩溃客户端的 fd (精确清理)。
-         * timeout=0 非阻塞:有事件就处理,无事件立即返回。 */
-        if (ctx != NULL && fault_ep_cap > 0) {
-            fault_event_t fevt;
-            int ferr = sys_ep_recv(fault_ep_cap, &fevt, 0);
-            if (ferr == KERN_OK) {
-                /* 客户端崩溃:按 task_id 关闭它所有 fd */
-                (void)fs_store_close_client_fds(ctx, (int)fevt.task_id);
-            }
-        }
-
         fs_msg_init(&msg, 0, 0);
         err = sys_ep_recv(ep_cap, &msg, 1000);
         if (err == KERN_ERR_TIMEOUT && max_requests == 0U) {
             err = KERN_OK;
+            /* 超时间隙 poll kern.fault */
+            if (ctx != NULL && fault_ep_cap > 0) {
+                uint8_t fbuf[KERN_EP_MSG_SIZE];
+                int ferr = sys_ep_recv(fault_ep_cap, fbuf, 0);
+                if (ferr == KERN_OK) {
+                    fault_event_t *fevt = (fault_event_t *)fbuf;
+                    (void)fs_store_close_client_fds(ctx, (int)fevt->task_id);
+                }
+            }
             continue;
         }
         if (err != KERN_OK) {
