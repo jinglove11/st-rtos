@@ -716,7 +716,14 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
  * @return 当前任务的 TCB 指针，如果没有任务运行则返回 NULL
  */
 tcb_t *sched_get_current(void) {
+    /* Phase H4:用 per-cpu _current_task (SMP 安全)。
+     * 之前返回全局 scheduler.current_task,两核会读到同一个 current,
+     * 导致所有 cap owner 检查错乱。 */
+#if SMP
+    return _current_task[hal_get_cpu_id()];
+#else
     return scheduler.current_task;
+#endif
 }
 
 /**
