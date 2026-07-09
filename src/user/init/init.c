@@ -1,20 +1,13 @@
 /**
  * @file init.c
- * @brief Phase C4 — user-mode init as service orchestrator
+ * @brief Phase G — user-mode init as PID-1 service orchestrator
  *
- * init 现在是常驻编排器 (不再 spawn supervisor 就退出):
- *   1. sys_ep_create 创建 fs_server 的 endpoint (CAP_FULL)
- *   2. sys_task_create 创建 fs_server 用户任务,arg=ep_cap
- *   3. sys_cap_transfer_to 把 ep_cap 装进 fs_server cspace
- *   4. sys_task_start 启动 fs_server
- *   5. spawn supervisor (监控)
- *   6. init 常驻 (作为服务树根,持有各服务的 task cap)
+ * init 拉起基础服务生态:
+ *   1. nameserver (服务发现)
+ *   2. fs_server (自管 inode池+ramfs, 注册到 nameserver "fs.ramfs")
+ *   3. supervisor (故障重启)
  *
- * 关键:cap_transfer_to 保持 cap_id 不变 (cap_move_to 用原 slot+generation),
- * 所以 init 用 sys_task_create 的 arg=ep_cap,子任务 r0 收到的就是它的 ep_cap。
- *
- * 拉起位置:test_framework.c bootstrap 段 (test 后,shell 前)。
- * 生产 (TEST_ENABLE=n) 时 init 是唯一 bootstrap 拉起的任务。
+ * shell 启动时 lookup "fs.ramfs" 发现 fs_server,ls/cat 自动可用。
  */
 
 #include "kernel_config.h"
@@ -24,6 +17,7 @@
 #include "supervisor.h"
 #include "user_api.h"
 #include "fs_proto.h"
+#include "nameserver.h"
 #include <stdint.h>
 
 #if FAULT_ENDPOINT && SUPERVISOR
@@ -38,50 +32,96 @@
 #define FS_SERVER_PRIORITY    8
 #define FS_SERVER_STACK       2048
 
-/* fs_server 的任务体 (复用 fs_server.c 的 fs_server_run)。
- * arg = ep_cap (通过 r0 传入)。 */
+#define NS_PRIORITY           6
+#define NS_STACK              1536
+
+/* fs_server 的任务体:arg = ep_cap */
 static void fs_server_entry(void *arg) {
     int ep_cap = (int)(uintptr_t)arg;
-    int err = fs_server_run(ep_cap, 0);  /* 0 = 永久循环 */
+    int err = fs_server_run(ep_cap, 0);
     sys_task_exit((void *)(intptr_t)err);
+}
+
+/* nameserver 的任务体:arg = ep_cap */
+static void ns_entry(void *arg) {
+    int ep_cap = (int)(uintptr_t)arg;
+    int err = nameserver_service_run(ep_cap, 0);
+    sys_task_exit((void *)(intptr_t)err);
+}
+
+/* helper:创建 user 服务任务 + endpoint + transfer cap。
+ * 返回 init 持有的 service ep cap (derived,带 TRANSFER 用于注册)。
+ * 失败返回负数。out_task_cap 返回 task cap。 */
+static int init_spawn_service(const char *name, task_func_t entry,
+                              uint8_t prio, uint32_t stack,
+                              int *out_task_cap) {
+    /* 创建 endpoint (init 持有 CAP_FULL) */
+    int ep_cap = sys_ep_create(name, 128, 4);
+    if (ep_cap <= 0) {
+        return ep_cap;
+    }
+
+    /* derive 一份给 init 自己 (带 TRANSFER,用于注册到 nameserver) */
+    int self_cap = sys_cap_derive(ep_cap, CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    if (self_cap <= 0) {
+        return self_cap;
+    }
+
+    /* 创建服务任务,arg=ep_cap (r0 收到) */
+    int task_cap = sys_task_create(name, entry,
+                                   (void *)(uintptr_t)ep_cap,
+                                   prio, stack);
+    if (task_cap < 0) {
+        return task_cap;
+    }
+
+    /* 把原始 ep_cap 转移给服务 (cap_id 不变,r0 的 arg 就是它的 ep_cap) */
+    int xfer = sys_cap_transfer_to(ep_cap, task_cap);
+    if (xfer != KERN_OK) {
+        return xfer;
+    }
+
+    /* 启动服务 */
+    (void)sys_task_start(task_cap);
+    if (out_task_cap) {
+        *out_task_cap = task_cap;
+    }
+    return self_cap;
 }
 
 void init_main(void *arg) {
     (void)arg;
 
-    /* ---- 拉起 fs_server ---- */
-    /* 1. 创建 endpoint (init 持有 CAP_FULL ep_cap) */
-    int fs_ep_cap = sys_ep_create("fs_server", 128, 4);
-    if (fs_ep_cap <= 0) {
-        /* endpoint 创建失败,系统降级 (无 fs_server) */
-    } else {
-        /* 1b. derive 一份 ep_cap 给 init 自己 (用于 ping/管理)。
-         *    derive 的 cap_id 与父不同,transfer 用原始 fs_ep_cap。 */
-        int fs_self_cap = sys_cap_derive(fs_ep_cap,
-                                         CAP_READ | CAP_WRITE);
-        /* 2. 创建 fs_server 任务,arg=ep_cap (r0 收到 ep_cap) */
-        int fs_task_cap = sys_task_create("fs_server", fs_server_entry,
-                                          (void *)(uintptr_t)fs_ep_cap,
-                                          FS_SERVER_PRIORITY, FS_SERVER_STACK);
-        if (fs_task_cap >= 0) {
-            /* 3. 把原始 ep_cap 转移给 fs_server (保持 cap_id 不变,
-             *    fs_server r0 收到的 arg 就是它的 ep_cap) */
-            int xfer = sys_cap_transfer_to(fs_ep_cap, fs_task_cap);
-            if (xfer == KERN_OK) {
-                /* 4. 启动 fs_server */
-                (void)sys_task_start(fs_task_cap);
+    /* ---- 1. 拉起 nameserver ---- */
+    int ns_task_cap = -1;
+    int ns_self_cap = init_spawn_service("nameserver", ns_entry,
+                                         NS_PRIORITY, NS_STACK, &ns_task_cap);
+    if (ns_self_cap <= 0) {
+        /* nameserver 是基础服务,失败则降级 */
+    }
 
-                /* 4b. 等 fs_server 初始化,然后 ping 验存活 */
-                sys_task_delay(100);
-                if (fs_self_cap > 0) {
-                    (void)fs_ping(fs_self_cap, 500);
-                }
-            }
-            /* init 保留 fs_task_cap (管理) + fs_self_cap (ping) */
+    /* 等 nameserver 启动 */
+    sys_task_delay(50);
+
+    /* ---- 2. 拉起 fs_server ---- */
+    int fs_task_cap = -1;
+    int fs_self_cap = init_spawn_service("fs_server", fs_server_entry,
+                                         FS_SERVER_PRIORITY, FS_SERVER_STACK,
+                                         &fs_task_cap);
+    if (fs_self_cap <= 0) {
+        /* fs_server 失败 */
+    } else {
+        /* 等 fs_server 初始化 */
+        sys_task_delay(100);
+
+        /* 把 fs_server 注册到 nameserver "fs.ramfs" */
+        if (ns_self_cap > 0) {
+            (void)nameserver_register(ns_self_cap, "fs.ramfs",
+                                      fs_self_cap, 0x494E4954U, 1000);
         }
     }
 
-    /* ---- 拉起 supervisor ---- */
+    /* ---- 3. 拉起 supervisor ---- */
 #if INIT_HAS_SUPERVISOR
     int sup = sys_task_create("supervisor", supervisor_monitor_loop, NULL,
                               SUPERVISOR_PRIORITY, SUPERVISOR_STACK);
@@ -90,9 +130,7 @@ void init_main(void *arg) {
     }
 #endif
 
-    /* ---- init 常驻 ----
-     * init 作为服务树根,持有各服务的 task cap。
-     * 它睡在一个无限循环里 (未来可扩展为监控/管理逻辑)。 */
+    /* ---- init 常驻 ---- */
     while (1) {
         sys_task_delay(1000);
     }

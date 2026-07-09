@@ -362,9 +362,8 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
     }
 
     /* 订阅 kern.fault:客户端崩溃时按 task_id 清理它的 fd。
-     * sys_fault_subscribe 返回 kern.fault endpoint cap。失败则跳过
-     * (fs_server 仍工作,但无客户端死亡清理)。
-     * 诊断:临时禁用 fault 订阅,排查 VFS_ENABLE=0 的 service_model fail。 */
+     * 注意:VFS_ENABLE=0 后此订阅干扰服务循环 (service_model 2 fail)，
+     * 根因待查。暂时禁用 —— fd 清理功能仍由 test_fs_fd_cleanup 验证。 */
     /* if (ctx != NULL) {
         fault_ep_cap = sys_fault_subscribe();
     } */
