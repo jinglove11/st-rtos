@@ -756,6 +756,50 @@ static void test_ipc_cap_move_rollback(void) {
 }
 
 /*============================================================================
+ * Test 24b: IPC cap MOVE 成功后 dst cap 仍有效 (Phase H3 bug 修复验证)
+ *===========================================================================*/
+
+static void test_ipc_cap_move_success(void) {
+    test_section("Test 24b: IPC cap move success (dst keeps cap)");
+
+    task_id_t src_id = task_create("ipcms2", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("ipcmd2", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "create src/dst tasks");
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    TEST_ASSERT(src != NULL && dst != NULL, "get src/dst TCBs");
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int move_obj = 2001;
+    cap_id_t movable = cap_create_for(src, &move_obj, CAP_OBJ_ENDPOINT,
+                                      CAP_READ | CAP_TRANSFER);
+    TEST_ASSERT(movable != ((cap_id_t)-1), "create movable cap");
+
+    ipc_cap_xfer_t xfers[1];
+    xfers[0].src_cap = movable;
+    xfers[0].rights = CAP_READ;
+    xfers[0].flags = IPC_CAP_MOVE;
+
+    cap_id_t out[1] = { (cap_id_t)-1 };
+    kern_err_t err = ipc_transfer_caps(src, dst, xfers, 1, out);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "ipc move succeeds");
+
+    /* Phase H3 核心:dst 收到的 cap 必须仍然有效 (之前 bug 导致立即失效) */
+    void *ptr = cap_lookup_for(dst, out[0], CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(ptr == &move_obj, "dst cap valid after MOVE (H3 fix)");
+
+    /* src 不再持有 (MOVE 转移了所有权) */
+    ptr = cap_lookup_for(src, movable, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(ptr == NULL, "src lost cap after MOVE");
+
+    (void)cap_revoke_for(dst, out[0]);
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+}
+
+/*============================================================================
  * Test 25: object refcount tracks caps for the same kernel object
  *============================================================================*/
 
@@ -1016,6 +1060,7 @@ static void test_capability_module(void) {
     test_cap_move_to_task();
     test_ipc_cap_transfer_rollback();
     test_ipc_cap_move_rollback();
+    test_ipc_cap_move_success();
     test_cap_object_refcount();
     test_cap_cleanup_callback();
     test_mmio_cap_lifecycle();
