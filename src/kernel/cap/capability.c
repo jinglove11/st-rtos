@@ -7,6 +7,7 @@
 #include "scheduler.h"
 #include "task.h"
 #include "hal.h"
+#include "spinlock.h"
 #include <string.h>
 
 #if CAP_ENABLE
@@ -17,6 +18,14 @@
 #define CAP_SLOT_MASK      ((1U << CAP_SLOT_BITS) - 1U)
 #define CAP_GENERATION_MAX (0x7FFFU >> CAP_SLOT_BITS)
 #define CAP_NO_SLOT        ((int16_t)-1)
+
+/* Phase #3: cap_pool 自旋锁 (SMP 安全)。
+ * 单核下 irq_spinlock 退化为关中断 (与之前隐式行为一致)。
+ * SMP 下两核同时操作 cap_pool 互斥。
+ * 用法: uint32_t crit = CAP_LOCK(); ... CAP_UNLOCK(crit); */
+static irq_spinlock_t cap_pool_lock;
+#define CAP_LOCK()   irq_spin_lock(&cap_pool_lock)
+#define CAP_UNLOCK(crit) irq_spin_unlock(&cap_pool_lock, crit)
 
 typedef char cap_slot_bits_fit[(CAP_MAX_COUNT_VAL <= (1U << CAP_SLOT_BITS)) ? 1 : -1];
 typedef char cap_shm_type_registered[(CAP_OBJ_SHM < CAP_OBJ_TYPE_MAX) ? 1 : -1];
@@ -277,6 +286,7 @@ static void cap_revoke_slot_tree(int slot) {
 }
 
 void cap_init(void) {
+    irq_spin_init(&cap_pool_lock);
     memset(cap_pool, 0, sizeof(cap_pool));
     memset(cap_cleanup_table, 0, sizeof(cap_cleanup_table));
     memset(cap_revoke_hook_table, 0, sizeof(cap_revoke_hook_table));
@@ -293,8 +303,10 @@ cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t ri
         return CAP_INVALID;
     }
 
+    uint32_t crit = CAP_LOCK();
     int slot = cap_alloc_slot();
     if (slot < 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -305,6 +317,7 @@ cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t ri
 
     cap_id_t cap = cap_encode((uint16_t)slot, cap_pool[slot].generation);
     if (cap == CAP_INVALID) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -319,9 +332,11 @@ cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t ri
 
     if (cap_task_add(owner, cap) != KERN_OK) {
         cap_clear_slot(slot);
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
+    CAP_UNLOCK(crit);
     return cap;
 }
 
@@ -397,13 +412,16 @@ kern_err_t cap_get_rights(cap_id_t cap, uint8_t *out_rights) {
 }
 
 void cap_delete(cap_id_t cap) {
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL) {
+        CAP_UNLOCK(crit);
         return;
     }
 
     int slot = cap_slot_of(entry);
     cap_clear_slot(slot);
+    CAP_UNLOCK(crit);
 }
 
 void cap_revoke_all(uint8_t owner) {
@@ -620,15 +638,19 @@ kern_err_t cap_transfer_to_task_cap(cap_id_t cap, cap_id_t task_cap) {
 }
 
 kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap) {
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
     if (!cap_owner_allowed(owner, cap, entry)) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
 
     cap_revoke_slot_tree(cap_slot_of(entry));
+    CAP_UNLOCK(crit);
     return KERN_OK;
 }
 
