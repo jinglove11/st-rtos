@@ -35,15 +35,18 @@ void kern_init(void) {
     task_init();
     sched_init();
     ipc_init();
+#if CAP_ENABLE
+    /* cap_init 必须在 irq_init/bh_init/timer_init 之前:
+     * 它们内部创建 cap (bh_sem/timer 等),需要 cap_pool_lock 已初始化。
+     * 否则未初始化的自旋锁导致冷启动卡死。 */
+    cap_init();
+    root_bootstrap_init();
+#endif
     irq_init();
     bh_init();
     timer_init();
 #if KERN_TASK_STATS
     stats_init();
-#endif
-#if CAP_ENABLE
-    cap_init();
-    root_bootstrap_init();
 #endif
     /* Phase F4: vfs_init() 移除 (内核 VFS 已删,文件操作由 fs_server 提供) */
 #if DRIVER_ENABLE
