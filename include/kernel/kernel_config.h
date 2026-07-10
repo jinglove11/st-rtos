@@ -97,7 +97,7 @@
 #define SHELL_ENABLE 1
 #define SHELL_PRIORITY (5)
 #define SHELL_STACK_SIZE (4096)
-#define SMP 1
+#define SMP 0
 #define SMP_MAX_CPUS (2)
 #define SMP_WORK_STEALING 1
 #define SUPERVISOR 1
