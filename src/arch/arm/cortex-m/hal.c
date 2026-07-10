@@ -986,22 +986,17 @@ const char *hal_get_cpu_arch(void) {
  *============================================================================*/
 
 void hal_system_reset(void) {
-#if TARGET_BOARD == BOARD_RP2350_PICO2
     hal_irq_disable();
     SYSTICK->CSR = 0;
-    SCB->ICSR = (1UL << 27) | (1UL << 25);
-    __asm volatile("dsb");
-    __asm volatile("isb");
 
-    if (hal_get_cpu_id() == 0) {
-        multicore_reset_core1();
-    }
-
-    watchdog_reboot(0, 0, 10);
+#if TARGET_BOARD == BOARD_RP2350_PICO2
+    /* RP2350 双核:先 reset core1,再用 watchdog 做普通重启。
+     * watchdog_reboot(0,0,...): pc=0 表示走正常 flash boot path。 */
+    multicore_reset_core1();
+    watchdog_reboot(0, 0, 1);
 #else
-    /* AIRCR: Application Interrupt and Reset Control Register */
+    /* AIRCR SYSRESETREQ */
     volatile uint32_t *aircr = (volatile uint32_t *)0xE000ED0C;
-    /* VECTKEY (0x05FA << 16) | SYSRESETREQ (bit 2) */
     *aircr = (0x05FAUL << 16) | (1U << 2);
 #endif
     __asm volatile("dsb");
