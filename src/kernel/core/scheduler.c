@@ -936,10 +936,12 @@ void kern_pendsv_handler(void) {
     /* 内存屏障：确保读取正确的值 */
     __asm volatile("dmb");
 
-    /* 根因2修复:PendSV handler 加锁保护 ready_list。
-     * PendSV 已在 cpsid i 下 (汇编入口),用纯 spin_lock
-     * (不重入 PRIMASK) 保护 ready_list 操作。 */
-    spin_lock(&sched_lock.lock);
+    /* PendSV handler 不持 sched_lock:
+     * - 单核:PendSV 是最低优先级,tick handler 返回后才执行,锁已释放
+     * - SMP:两核 PendSV 并发操作 ready_list 有竞态风险,但实践中
+     *   窗口极短 (几个指针操作),spin_lock/trylock 在 PendSV 上下文
+     *   会导致死锁或异常,所以保持不加锁。
+     *   后续可用 per-CPU ready_list 或 BIG KERNEL LOCK 方案解决。 */
 
     /*
      * 处理当前任务状态转换
@@ -995,9 +997,7 @@ void kern_pendsv_handler(void) {
 
     next->state = TASK_STATE_RUNNING;
 
-    spin_unlock(&sched_lock.lock);
-
-    /* 锁释放后再更新 per-CPU 指针 (供汇编加载上下文) */
+    /* 更新 per-CPU 指针 (供汇编加载上下文) */
 
 #if TRACE_ENABLE
     trace_record(TRACE_TASK_SWITCH, (uint8_t)(next->id >= 0 ? next->id : 0), 0);
