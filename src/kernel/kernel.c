@@ -63,16 +63,12 @@ void kern_init(void) {
 }
 
 void kern_start(void) {
-    // 获取空闲任务并加入就绪队列
-    // 空闲任务作为后备，确保就绪队列永不为空
+    // 初始化当前 CPU 的空闲任务状态。空闲任务不进入共享 ready 队列；
+    // 调度器在没有普通 ready 任务时按当前 CPU 选择 per-CPU idle。
     tcb_t *idle = task_get_idle();
     idle->state = TASK_STATE_READY;
     idle->time_slice = KERN_DEFAULT_TIME_SLICE;
     idle->time_slice_reload = KERN_DEFAULT_TIME_SLICE;
-
-    // 将空闲任务加入就绪队列 (最低优先级)
-    // 这样当没有其他任务时，空闲任务会被调度
-    sched_add_ready(idle);
 
     // 启动定时器服务任务
     timer_service_start();

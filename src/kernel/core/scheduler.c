@@ -393,22 +393,15 @@ static tcb_t *ready_list_get_head(uint8_t prio) {
  * @note 必须在创建任何任务之前调用
  */
 void sched_init(void) {
+    irq_spin_init(&sched_lock);
+
     uint32_t crit = irq_spin_lock(&sched_lock);
 
-    /* 清空所有优先级的就绪队列 */
-    for (int i = 0; i < KERNEL_MAX_PRIORITIES; i++) {
-        scheduler.ready_list[i].head = NULL;
-        scheduler.ready_list[i].tail = NULL;
+    memset((void *)&scheduler, 0, sizeof(scheduler));
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; cpu++) {
+        _current_task[cpu] = NULL;
+        _next_task[cpu] = NULL;
     }
-
-    /* 初始化调度器状态 */
-    scheduler.current_task = NULL;
-    for (int i = 0; i < 4; i++) {
-        scheduler.ready_bitmap[i] = 0;
-    }
-    scheduler.tick_count = 0;
-    irq_spin_init(&sched_lock); scheduler.need_resched[hal_get_cpu_id()] = 0;
-    scheduler.started = 0;
 
     irq_spin_unlock(&sched_lock, crit);
 }
@@ -468,8 +461,9 @@ void sched_start(void) {
      * SVC 处理程序会检查这个值，如果是 NULL 则跳过上下文保存
      * 这是首次切换的特殊情况
      */
-    _current_task[0] = NULL;
-    _next_task[0] = first;
+    uint32_t cpu = hal_get_cpu_id();
+    _current_task[cpu] = NULL;
+    _next_task[cpu] = first;
     scheduler.current_task = first;
 
     scheduler.started = 1;

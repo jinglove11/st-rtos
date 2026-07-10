@@ -80,11 +80,12 @@ static uint8_t task_stacks[KERNEL_MAX_TASKS][KERNEL_TASK_STACK_SIZE]
 #define IDLE_STACK_SIZE_ACTUAL \
     ((KERNEL_IDLE_STACK_SIZE < 512) ? 512 : KERNEL_IDLE_STACK_SIZE)
 
-static uint8_t idle_stack[IDLE_STACK_SIZE_ACTUAL]
+static uint8_t idle_stacks[SMP_MAX_CPUS][IDLE_STACK_SIZE_ACTUAL]
     __attribute__((aligned(8)));
 
-/* 空闲任务 TCB */
-static tcb_t idle_task;
+/* Per-CPU idle task TCBs. Sharing one idle TCB/stack across cores corrupts
+ * the saved PSP when both cores become idle at the same time. */
+static tcb_t idle_tasks[SMP_MAX_CPUS];
 
 /* 任务使用位图 */
 uint64_t task_used_bitmap = 0;
@@ -343,27 +344,30 @@ void task_init(void) {
     memset(exit_retain_result, 0, sizeof(exit_retain_result));
     exit_retain_bitmap = 0;
 
-    /* 初始化空闲任务 */
-    memset(&idle_task, 0, sizeof(idle_task));
-    idle_task.id = -1;  /* 特殊 ID */
-    idle_task.priority = KERNEL_IDLE_PRIORITY;
-    idle_task.base_priority = KERNEL_IDLE_PRIORITY;
-    idle_task.state = TASK_STATE_READY;  /* 空闲任务始终就绪 */
-    idle_task.stack_base = idle_stack;
-    idle_task.stack_size = IDLE_STACK_SIZE_ACTUAL;
-    idle_task.time_slice = KERN_DEFAULT_TIME_SLICE;
-    idle_task.time_slice_reload = KERN_DEFAULT_TIME_SLICE;
-    idle_task.attrs = TASK_ATTR_PRIVILEGED;  /* 空闲任务运行在特权模式 */
-    strncpy(idle_task.name, "idle", KERN_TASK_NAME_LEN - 1);
+    /* 初始化 per-CPU 空闲任务 */
+    memset(idle_tasks, 0, sizeof(idle_tasks));
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; cpu++) {
+        tcb_t *idle = &idle_tasks[cpu];
+        idle->id = -1;  /* 特殊 ID */
+        idle->priority = KERNEL_IDLE_PRIORITY;
+        idle->base_priority = KERNEL_IDLE_PRIORITY;
+        idle->state = TASK_STATE_READY;  /* 空闲任务始终就绪 */
+        idle->stack_base = idle_stacks[cpu];
+        idle->stack_size = IDLE_STACK_SIZE_ACTUAL;
+        idle->time_slice = KERN_DEFAULT_TIME_SLICE;
+        idle->time_slice_reload = KERN_DEFAULT_TIME_SLICE;
+        idle->attrs = TASK_ATTR_PRIVILEGED;  /* 空闲任务运行在特权模式 */
+        strncpy(idle->name, "idle", KERN_TASK_NAME_LEN - 1);
 
-    /* 初始化空闲任务栈 */
-    idle_task.sp = hal_stack_init(
-        idle_stack + IDLE_STACK_SIZE_ACTUAL,
-        IDLE_STACK_SIZE_ACTUAL,
-        idle_task_func,
-        NULL,
-        task_exit_handler
-    );
+        /* 初始化空闲任务栈 */
+        idle->sp = hal_stack_init(
+            idle_stacks[cpu] + IDLE_STACK_SIZE_ACTUAL,
+            IDLE_STACK_SIZE_ACTUAL,
+            idle_task_func,
+            NULL,
+            task_exit_handler
+        );
+    }
 }
 
 task_id_t task_create(const char   *name,
@@ -911,7 +915,11 @@ task_state_t task_get_state(task_id_t task_id) {
 }
 
 tcb_t *task_get_idle(void) {
-    return &idle_task;
+    uint32_t cpu = hal_get_cpu_id();
+    if (cpu >= SMP_MAX_CPUS) {
+        cpu = 0;
+    }
+    return &idle_tasks[cpu];
 }
 
 uint64_t task_get_used_bitmap(void) {

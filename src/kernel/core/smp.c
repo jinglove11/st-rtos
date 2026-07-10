@@ -18,6 +18,8 @@
 #include "spinlock.h"
 #include <string.h>
 
+static volatile uint32_t core1_ready;
+
 /* The SDK's multicore launch provides a stack for core1 (core1_stack in
  * pico_multicore). We just need an entry function. */
 
@@ -43,6 +45,8 @@ static void core1_entry(void) {
      * a PendSV to select the first task for this core. */
     _current_task[1] = NULL;
     _next_task[1] = NULL;
+    core1_ready = 1;
+    __asm volatile("dmb" ::: "memory");
 
     /* Enable interrupts on core1. */
     hal_irq_enable();
@@ -63,9 +67,19 @@ void smp_init_core1(void) {
      * 1. Resets core1 (PSM force-off)
      * 2. Sends VTOR + SP + entry over the SIO FIFO
      * 3. Core1 bootrom applies them and jumps to core1_entry
-     */
+    */
     extern void multicore_launch_core1(void (*entry)(void));
+    core1_ready = 0;
+    __asm volatile("dmb" ::: "memory");
     multicore_launch_core1(core1_entry);
+
+    for (uint32_t spin = 0; spin < 1000000U; spin++) {
+        __asm volatile("dmb" ::: "memory");
+        if (core1_ready && _current_task[1] != NULL) {
+            break;
+        }
+        __asm volatile("nop");
+    }
 }
 
 #endif /* SMP */
