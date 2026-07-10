@@ -825,6 +825,23 @@ void sched_tick_handler(void) {
             }
         }
 #endif
+    } else {
+        /* 当前是 idle (id<0) 或 NULL:检查 ready 队列是否有任务。
+         * 如果有,触发 PendSV 切到 ready 任务。
+         * 不加锁读 ready_bitmap (只是提示 PendSV,PendSV handler 会加锁重新检查)。
+         * 这修复了"idle 卡死":之前 idle 不参与时间片,
+         * ready 队列里有任务但没人触发重调度。 */
+        int has_ready = 0;
+        for (int i = 0; i < 4; i++) {
+            if (scheduler.ready_bitmap[i] != 0) {
+                has_ready = 1;
+                break;
+            }
+        }
+        if (has_ready) {
+            scheduler.need_resched[hal_get_cpu_id()] = 1;
+            hal_trigger_pendsv();
+        }
     }
 
     /*
