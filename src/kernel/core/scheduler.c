@@ -464,7 +464,7 @@ void sched_start(void) {
     uint32_t cpu = hal_get_cpu_id();
     _current_task[cpu] = NULL;
     _next_task[cpu] = first;
-    scheduler.current_task = first;
+    /* 不再设 scheduler.current_task (per-CPU 用 _current_task) */
 
     scheduler.started = 1;
 
@@ -541,11 +541,12 @@ void sched_add_ready(tcb_t *tcb) {
      * 如果新就绪任务的优先级高于当前任务，触发调度
      * 这实现了优先级抢占调度
      */
-    if (scheduler.started &&
-        scheduler.current_task &&
-        tcb->priority < scheduler.current_task->priority) {
-        scheduler.need_resched[hal_get_cpu_id()] = 1;
-        hal_trigger_pendsv();
+    if (scheduler.started) {
+        tcb_t *curr = sched_get_current();
+        if (curr && tcb->priority < curr->priority) {
+            scheduler.need_resched[hal_get_cpu_id()] = 1;
+            hal_trigger_pendsv();
+        }
     }
 
     irq_spin_unlock(&sched_lock, crit);
@@ -616,7 +617,7 @@ void sched_reinsert_by_priority(tcb_t *tcb) {
  * @note 当任务被唤醒后，会从调用点继续执行
  */
 kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
-    tcb_t *current = scheduler.current_task;
+    tcb_t *current = sched_get_current();
 
     if (current == NULL) {
         return KERN_ERR_STATE;
@@ -692,7 +693,7 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
      * 抢占检查：
      * 如果唤醒的任务优先级高于当前任务，触发调度
      */
-    tcb_t *current = scheduler.current_task;
+    tcb_t *current = sched_get_current();
     if (current && tcb->priority < current->priority) {
         scheduler.need_resched[hal_get_cpu_id()] = 1;
         hal_trigger_pendsv();
@@ -710,14 +711,9 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
  * @return 当前任务的 TCB 指针，如果没有任务运行则返回 NULL
  */
 tcb_t *sched_get_current(void) {
-    /* Phase H4:用 per-cpu _current_task (SMP 安全)。
-     * 之前返回全局 scheduler.current_task,两核会读到同一个 current,
-     * 导致所有 cap owner 检查错乱。 */
-#if SMP
+    /* 统一用 per-cpu _current_task (单核下 cpu=0,等价)。
+     * scheduler.current_task 全局变量已废弃 (SMP 下两核并发写竞态)。 */
     return _current_task[hal_get_cpu_id()];
-#else
-    return scheduler.current_task;
-#endif
 }
 
 /**
@@ -802,9 +798,15 @@ uint32_t sched_get_tick_count(void) {
  * @note 在中断上下文中调用
  */
 void sched_tick_handler(void) {
-    scheduler.tick_count++;
+    /* 根因4:原子递增 tick_count (两核 SysTick 同时++) */
+    __asm volatile("1: ldrex r2, [%0]\n"
+                   "   adds  r2, #1\n"
+                   "   strex r1, r2, [%0]\n"
+                   "   cmp   r1, #0\n"
+                   "   bne   1b\n"
+                   :: "r"(&scheduler.tick_count) : "r1", "r2", "memory");
 
-    tcb_t *current = scheduler.current_task;
+    tcb_t *current = sched_get_current();
 
     /*
      * 时间片处理（空闲任务不参与时间片轮转）
@@ -934,6 +936,11 @@ void kern_pendsv_handler(void) {
     /* 内存屏障：确保读取正确的值 */
     __asm volatile("dmb");
 
+    /* 根因2修复:PendSV handler 加锁保护 ready_list。
+     * PendSV 已在 cpsid i 下 (汇编入口),用纯 spin_lock
+     * (不重入 PRIMASK) 保护 ready_list 操作。 */
+    spin_lock(&sched_lock.lock);
+
     /*
      * 处理当前任务状态转换
      */
@@ -947,65 +954,29 @@ void kern_pendsv_handler(void) {
             switch (current->state) {
 
             case TASK_STATE_RUNNING:
-                /*
-                 * RUNNING → READY
-                 *
-                 * 时间片用完或主动让出 CPU
-                 * 重新加载时间片，加入就绪队列尾部
-                 */
                 current->time_slice = current->time_slice_reload;
                 current->state = TASK_STATE_READY;
                 ready_list_add_internal(current);
                 break;
 
             case TASK_STATE_TERMINATED:
-                /*
-                 * TERMINATED → 回收
-                 *
-                 * 任务已退出，需要回收资源：
-                 * 1. 从就绪队列移除（如果还在的话）
-                 * 2. 释放任务 ID
-                 * 3. 清零 TCB
-                 *
-                 * 注意：任务可能在就绪队列中（如果之前 yield 过）
-                 */
                 {
                     ready_list_t *list = &scheduler.ready_list[current->priority];
-
-                    /* 检查是否在就绪队列中 */
                     if (list->head == current || current->next != NULL || current->prev != NULL) {
                         ready_list_remove_internal(current);
                     }
-
                     extern void task_reclaim(tcb_t *tcb);
                     task_reclaim(current);
                 }
                 break;
 
             case TASK_STATE_BLOCKED:
-                /*
-                 * BLOCKED 状态
-                 *
-                 * 任务等待资源（互斥锁、信号量等）
-                 * 不加入就绪队列，等待被唤醒
-                 *
-                 * 如果阻塞在 mutex 上，优先级继承机制已提升持有者优先级
-                 */
-                if (current->block_reason == BLOCK_REASON_MUTEX && current->block_obj) {
-                    /* 优先级继承：持有锁的任务应该继续运行 */
-                }
                 break;
 
             case TASK_STATE_SUSPENDED:
-                /*
-                 * SUSPENDED 状态
-                 *
-                 * 任务被挂起，不加入就绪队列
-                 */
                 break;
 
             default:
-                /* 未知状态，不做处理 */
                 break;
             }
         }
@@ -1016,21 +987,17 @@ void kern_pendsv_handler(void) {
      */
     tcb_t *next = sched_get_highest_ready();
 
-    /*
-     * 安全检查：
-     * - 没有就绪任务，或
-     * - 选中的任务名称为空（已回收）
-     * 则切换到空闲任务
-     */
     if (next == NULL || next->name[0] == '\0') {
         next = task_get_idle();
     } else {
         ready_list_remove_internal(next);
     }
 
-    /* 设置新任务为运行状态 */
     next->state = TASK_STATE_RUNNING;
-    scheduler.current_task = next;
+
+    spin_unlock(&sched_lock.lock);
+
+    /* 锁释放后再更新 per-CPU 指针 (供汇编加载上下文) */
 
 #if TRACE_ENABLE
     trace_record(TRACE_TASK_SWITCH, (uint8_t)(next->id >= 0 ? next->id : 0), 0);
