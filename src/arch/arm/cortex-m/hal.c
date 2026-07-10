@@ -989,10 +989,15 @@ void hal_system_reset(void) {
     hal_irq_disable();
     SYSTICK->CSR = 0;
 
+#if TARGET_BOARD == BOARD_RP2350_PICO2 && SMP
+    /* SMP:先停 core1,再复位。
+     * AIRCR SYSRESETREQ 只复位当前核 (core0),
+     * 如果 core1 还在跑,reset 后两核状态不一致会卡死。 */
+    multicore_reset_core1();
+#endif
+
     /* AIRCR SYSRESETREQ:软件系统复位。
-     * RP2350 的 watchdog_reboot 会导致 bootrom 重新检查 flash boot,
-     * 冷启动时 QSPI 配置丢失,卡在 bootrom。
-     * AIRCR SYSRESETREQ 只复位 CPU 核心,不重新跑 bootrom,
+     * 只复位 CPU 核心,不重新跑 bootrom,
      * flash 映射保持有效,直接跳到 reset vector。 */
     volatile uint32_t *aircr = (volatile uint32_t *)0xE000ED0C;
     *aircr = (0x05FAUL << 16) | (1U << 2);
