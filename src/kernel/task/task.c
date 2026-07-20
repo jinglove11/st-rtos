@@ -203,6 +203,10 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
 #if CAP_ENABLE
     root_bootstrap_cleanup_task(tcb);
     cap_revoke_all((uint8_t)tcb->id);
+    /* M2: 撤销其他任务持有的指向此 task 的 cap。
+     * 防止 task id 复用后旧 cap 控制无关新 task (陈旧授权)。 */
+    extern kern_err_t cap_revoke_object(void *object, uint8_t obj_type);
+    cap_revoke_object((void *)(uintptr_t)(tcb->id + 1), CAP_OBJ_TASK);
 #endif
 
     task_wake_joiners(tcb, join_result);
