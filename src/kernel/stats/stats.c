@@ -48,7 +48,11 @@ void stats_task_switch(tcb_t *prev, tcb_t *next) {
     if (next && next->id >= 0) {
         next->ctx_switch_count++;
     }
-    kern_stats.total_ctx_switches++;
+    __asm volatile("1: ldrex r2, [%0]\n"
+        "   adds r2, #1\n"
+        "   strex r1, r2, [%0]\n"
+        "   cmp r1, #0\n"
+        "   bne 1b\n" :: "r"(&kern_stats.total_ctx_switches) : "r1", "r2", "memory");
 }
 
 /*============================================================================
@@ -93,7 +97,11 @@ void stats_tick_update(void) {
  *============================================================================*/
 
 void stats_record_irq(uint32_t latency_ticks) {
-    kern_stats.total_irqs++;
+    __asm volatile("1: ldrex r2, [%0]\n"
+        "   adds r2, #1\n"
+        "   strex r1, r2, [%0]\n"
+        "   cmp r1, #0\n"
+        "   bne 1b\n" :: "r"(&kern_stats.total_irqs) : "r1", "r2", "memory");
     if (latency_ticks > kern_stats.irq_latency_max) {
         kern_stats.irq_latency_max = latency_ticks;
     }
@@ -104,7 +112,11 @@ void stats_record_irq(uint32_t latency_ticks) {
  *============================================================================*/
 
 void stats_record_syscall(uint8_t task_id) {
-    kern_stats.total_syscalls++;
+    __asm volatile("1: ldrex r2, [%0]\n"
+        "   adds r2, #1\n"
+        "   strex r1, r2, [%0]\n"
+        "   cmp r1, #0\n"
+        "   bne 1b\n" :: "r"(&kern_stats.total_syscalls) : "r1", "r2", "memory");
     if (task_id < KERNEL_MAX_TASKS) {
         tcb_t *tcb = task_get_tcb((task_id_t)task_id);
         if (tcb) {
@@ -118,7 +130,11 @@ void stats_record_syscall(uint8_t task_id) {
  *============================================================================*/
 
 void stats_record_fault(void) {
-    kern_stats.fault_count++;
+    __asm volatile("1: ldrex r2, [%0]\n"
+        "   adds r2, #1\n"
+        "   strex r1, r2, [%0]\n"
+        "   cmp r1, #0\n"
+        "   bne 1b\n" :: "r"(&kern_stats.fault_count) : "r1", "r2", "memory");
 }
 
 kern_err_t stats_record_event(uint8_t subsystem, uint8_t counter) {
