@@ -55,22 +55,26 @@ static mutex_t *mutex_get(mutex_id_t id) {
 
 #if KERN_MUTEX_PI
 // 优先级继承: 提升持有者优先级
+// 调用者必须已持 mux_lock。此函数内部操作 ready_list 时
+// 会临时获取 sched_lock (锁顺序: mux_lock → sched_lock)。
 static void mutex_priority_inherit(mutex_t *mutex, tcb_t *waiter) {
-    // 获取锁持有者的 TCB
     if (mutex->owner < 0) return;
 
     extern tcb_t *task_get_tcb(task_id_t task_id);
     tcb_t *owner = task_get_tcb(mutex->owner);
     if (owner == NULL) return;
 
-    // 如果等待者优先级高于持有者, 提升持有者优先级
     if (waiter->priority < owner->priority) {
         owner->priority = waiter->priority;
 
-        // 如果持有者在就绪队列中, 需要重新插入以更新位图
         if (owner->state == TASK_STATE_READY) {
+            /* M1-Step4: ready_list 操作需要 sched_lock。
+             * 锁顺序: mux_lock(已持有) → sched_lock */
+            extern irq_spinlock_t sched_lock;
+            uint32_t scrit = irq_spin_lock(&sched_lock);
             extern void sched_reinsert_by_priority(tcb_t *tcb);
             sched_reinsert_by_priority(owner);
+            irq_spin_unlock(&sched_lock, scrit);
         }
         // 如果持有者是 RUNNING 状态，优先级已经提升
         // 当高优先级任务阻塞后，调度器会根据优先级选择下一个任务

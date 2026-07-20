@@ -126,7 +126,7 @@ static struct {
 /* Spinlock protecting the shared ready_list / ready_bitmap / tick_count.
  * In single-core mode this degrades to IRQ disable (irq_spin_lock does
  * PRIMASK save + spinlock, but spinlock is uncontended). */
-static irq_spinlock_t sched_lock;
+irq_spinlock_t sched_lock;  /* M1: 导出供 mutex PI 使用 (非 static) */
 
 /*============================================================================
  * 位图操作 - 快速查找最高优先级
