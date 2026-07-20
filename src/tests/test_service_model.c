@@ -16,6 +16,67 @@
 #include "fs_types.h"   /* Phase F2: dirent_t/vfs_stat_t (原在 inode.h) */
 #include <string.h>
 
+/*============================================================================
+ * M2-Step2b: 双 cap arg 传递机制 (cap_id_t 扩位准备,见 test_driver.c)
+ *
+ * 历史问题: 旧代码用 (cap_a << 16) | cap_b 把两个 cap 打包进单个 R0,
+ * 假设每个 cap <= 16 位。cap_id_t 扩到 int32_t 后此假设失效。
+ *
+ * 新机制: cap_a 仍走 R0 (写 stacked_r0),cap_b 存全局 pair 表,
+ * 任务入口用 sys_task_self() 查自己的 cap_b。per-task_id 索引,
+ * 支持并发测试任务。
+ *============================================================================*/
+#define SVC_TEST_PAIR_MAX 16
+typedef struct {
+    task_id_t task_id;   /* -1 = 空闲槽 */
+    cap_id_t  cap_b;
+} svc_test_pair_slot_t;
+
+static svc_test_pair_slot_t svc_test_pair_slots[SVC_TEST_PAIR_MAX] = {
+    [0 ... SVC_TEST_PAIR_MAX - 1] = { .task_id = -1, .cap_b = (cap_id_t)-1 },
+};
+
+static void svc_test_set_arg_pair(task_id_t task_id, int cap_a, cap_id_t cap_b) {
+    /* cap_a 经 R0 传递 (写 stacked_r0 直接) */
+    tcb_t *tcb = task_get_tcb(task_id);
+    if (tcb != NULL && tcb->sp != NULL) {
+        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
+        *stacked_r0 = (uint32_t)cap_a;
+    }
+    /* cap_b 存 pair 表,任务入口凭 task_id 查。
+     * 复用同 task_id 槽,否则找空槽。 */
+    for (int i = 0; i < SVC_TEST_PAIR_MAX; i++) {
+        if (svc_test_pair_slots[i].task_id == task_id) {
+            svc_test_pair_slots[i].cap_b = cap_b;
+            return;
+        }
+    }
+    for (int i = 0; i < SVC_TEST_PAIR_MAX; i++) {
+        if (svc_test_pair_slots[i].task_id < 0) {
+            svc_test_pair_slots[i].task_id = task_id;
+            svc_test_pair_slots[i].cap_b = cap_b;
+            return;
+        }
+    }
+}
+
+static void svc_test_reset_pairs(void) {
+    for (int i = 0; i < SVC_TEST_PAIR_MAX; i++) {
+        svc_test_pair_slots[i].task_id = -1;
+        svc_test_pair_slots[i].cap_b = (cap_id_t)-1;
+    }
+}
+
+static cap_id_t svc_test_get_cap_b(void) {
+    task_id_t self = (task_id_t)sys_task_self();
+    for (int i = 0; i < SVC_TEST_PAIR_MAX; i++) {
+        if (svc_test_pair_slots[i].task_id == self) {
+            return svc_test_pair_slots[i].cap_b;
+        }
+    }
+    return (cap_id_t)-1;
+}
+
 #if TEST_ENABLE && CAP_ENABLE && MPU_ENABLE
 
 static void root_dummy_task(void *arg) {
@@ -738,9 +799,8 @@ static void test_fs_runtime_lookup_release_caps(void) {
 }
 
 static void nameserver_register_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t service_ep_cap = svc_test_get_cap_b();
     const char name[] = "svc.echo";
     int err;
 
@@ -753,9 +813,8 @@ static void nameserver_register_client_task(void *arg) {
 }
 
 static void nameserver_lookup_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t inbox_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t inbox_cap = svc_test_get_cap_b();
     const char name[] = "svc.echo";
     cap_id_t service_cap = KERN_INVALID_ID;
     int err;
@@ -815,9 +874,8 @@ static void nameserver_missing_lookup_client_task(void *arg) {
 }
 
 static void nameserver_duplicate_register_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t service_ep_cap = svc_test_get_cap_b();
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
@@ -891,9 +949,8 @@ static void nameserver_bad_owner_unregister_client_task(void *arg) {
 }
 
 static void nameserver_recycle_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t service_ep_cap = svc_test_get_cap_b();
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
@@ -957,9 +1014,8 @@ static void nameserver_recycle_client_task(void *arg) {
 }
 
 static void nameserver_registry_full_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t service_ep_cap = svc_test_get_cap_b();
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     ns_name_msg_t *msg = (ns_name_msg_t *)msg_buf;
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
@@ -1841,14 +1897,7 @@ static void test_nameserver_register_service(void) {
                 "client receives service endpoint cap to register");
 
     if (client_id >= 0 && client_ns_cap >= 0 && client_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_service_cap << 16) |
-                          (uint32_t)(uint16_t)client_ns_cap;
-        tcb_t *client_tcb = task_get_tcb(client_id);
-        if (client_tcb != NULL && client_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(client_id, client_ns_cap, client_service_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "name server register client started");
@@ -1989,13 +2038,7 @@ static void test_nameserver_lookup_service(void) {
     TEST_ASSERT(lookup_inbox_cap >= 0, "lookup client receives inbox cap");
 
     if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
-                          (uint32_t)(uint16_t)reg_ns_cap;
-        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(reg_client, reg_ns_cap, reg_service_cap);
         err = task_start(reg_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "lookup register client started");
@@ -2011,13 +2054,7 @@ static void test_nameserver_lookup_service(void) {
     }
 
     if (lookup_client >= 0 && lookup_ns_cap >= 0 && lookup_inbox_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)lookup_inbox_cap << 16) |
-                          (uint32_t)(uint16_t)lookup_ns_cap;
-        if (lookup_tcb != NULL && lookup_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)lookup_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(lookup_client, lookup_ns_cap, lookup_inbox_cap);
         err = task_start(lookup_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "lookup client started");
@@ -2180,7 +2217,7 @@ static void test_nameserver_negative_paths(void) {
         if (missing_tcb != NULL && missing_tcb->sp != NULL) {
             uint32_t *stacked_r0 =
                 (uint32_t *)((uint8_t *)missing_tcb->sp + 32U);
-            *stacked_r0 = (uint32_t)(uint16_t)missing_ns_cap;
+            *stacked_r0 = (uint32_t)missing_ns_cap;
         }
         err = task_start(missing_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
@@ -2197,13 +2234,7 @@ static void test_nameserver_negative_paths(void) {
     }
 
     if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
-                          (uint32_t)(uint16_t)reg_ns_cap;
-        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(reg_client, reg_ns_cap, reg_service_cap);
         err = task_start(reg_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "negative register client started");
@@ -2219,13 +2250,7 @@ static void test_nameserver_negative_paths(void) {
     }
 
     if (dup_client >= 0 && dup_ns_cap >= 0 && dup_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)dup_service_cap << 16) |
-                          (uint32_t)(uint16_t)dup_ns_cap;
-        if (dup_tcb != NULL && dup_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)dup_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(dup_client, dup_ns_cap, dup_service_cap);
         err = task_start(dup_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "duplicate register client started");
@@ -2380,13 +2405,7 @@ static void test_nameserver_unregister_service(void) {
     TEST_ASSERT(missing_ns_cap >= 0, "post-unregister lookup receives ns cap");
 
     if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
-                          (uint32_t)(uint16_t)reg_ns_cap;
-        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(reg_client, reg_ns_cap, reg_service_cap);
         err = task_start(reg_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "unregister register client started");
@@ -2405,7 +2424,7 @@ static void test_nameserver_unregister_service(void) {
         if (unreg_tcb != NULL && unreg_tcb->sp != NULL) {
             uint32_t *stacked_r0 =
                 (uint32_t *)((uint8_t *)unreg_tcb->sp + 32U);
-            *stacked_r0 = (uint32_t)(uint16_t)unreg_ns_cap;
+            *stacked_r0 = (uint32_t)unreg_ns_cap;
         }
         err = task_start(unreg_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
@@ -2425,7 +2444,7 @@ static void test_nameserver_unregister_service(void) {
         if (missing_tcb != NULL && missing_tcb->sp != NULL) {
             uint32_t *stacked_r0 =
                 (uint32_t *)((uint8_t *)missing_tcb->sp + 32U);
-            *stacked_r0 = (uint32_t)(uint16_t)missing_ns_cap;
+            *stacked_r0 = (uint32_t)missing_ns_cap;
         }
         err = task_start(missing_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
@@ -2636,13 +2655,7 @@ static void test_nameserver_cap_recycle_service(void) {
                 "cap recycle client receives service cap");
 
     if (client_id >= 0 && client_ns_cap >= 0 && client_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_service_cap << 16) |
-                          (uint32_t)(uint16_t)client_ns_cap;
-        if (client_tcb != NULL && client_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(client_id, client_ns_cap, client_service_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "cap recycle client started");
@@ -2757,13 +2770,7 @@ static void test_nameserver_registry_full_service(void) {
                 "registry full client receives service cap");
 
     if (client_id >= 0 && client_ns_cap >= 0 && client_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_service_cap << 16) |
-                          (uint32_t)(uint16_t)client_ns_cap;
-        if (client_tcb != NULL && client_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)client_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(client_id, client_ns_cap, client_service_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "registry full client started");
@@ -2907,13 +2914,7 @@ static void test_nameserver_unregister_owner_service(void) {
     TEST_ASSERT(good_ns_cap >= 0, "good owner client receives ns cap");
 
     if (reg_client >= 0 && reg_ns_cap >= 0 && reg_service_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)reg_service_cap << 16) |
-                          (uint32_t)(uint16_t)reg_ns_cap;
-        if (reg_tcb != NULL && reg_tcb->sp != NULL) {
-            uint32_t *stacked_r0 =
-                (uint32_t *)((uint8_t *)reg_tcb->sp + 32U);
-            *stacked_r0 = packed;
-        }
+        svc_test_set_arg_pair(reg_client, reg_ns_cap, reg_service_cap);
         err = task_start(reg_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "owner register client started");
@@ -2932,7 +2933,7 @@ static void test_nameserver_unregister_owner_service(void) {
         if (bad_tcb != NULL && bad_tcb->sp != NULL) {
             uint32_t *stacked_r0 =
                 (uint32_t *)((uint8_t *)bad_tcb->sp + 32U);
-            *stacked_r0 = (uint32_t)(uint16_t)bad_ns_cap;
+            *stacked_r0 = (uint32_t)bad_ns_cap;
         }
         err = task_start(bad_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
@@ -2952,7 +2953,7 @@ static void test_nameserver_unregister_owner_service(void) {
         if (good_tcb != NULL && good_tcb->sp != NULL) {
             uint32_t *stacked_r0 =
                 (uint32_t *)((uint8_t *)good_tcb->sp + 32U);
-            *stacked_r0 = (uint32_t)(uint16_t)good_ns_cap;
+            *stacked_r0 = (uint32_t)good_ns_cap;
         }
         err = task_start(good_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
@@ -3239,6 +3240,7 @@ static void test_fs_server_negative_protocol(void) {
 
 void test_service_model_module(void) {
 #if TEST_ENABLE && CAP_ENABLE && MPU_ENABLE
+    svc_test_reset_pairs();
     test_supervisor_service_stats();
     test_root_bootstrap_rejects_invalid_tasks();
     test_root_bootstrap_initial_task_cap();
