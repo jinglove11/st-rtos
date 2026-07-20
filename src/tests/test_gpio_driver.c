@@ -72,7 +72,9 @@ static void gpio_driver_user_task(void *arg) {
 static void test_gpio_driver_mmio_access(void) {
     test_section("Test 1: USER task reads GPIO MMIO register");
 
-    task_id_t tid = task_create_user("gpio_drv", gpio_driver_user_task,
+    /* Security: sys_mmio_request now rejects user tasks.
+     * Use privileged task for this MMIO read/write test. */
+    task_id_t tid = task_create("gpio_drv", gpio_driver_user_task,
                                      NULL, 9, 2048);
     TEST_ASSERT(tid >= 0, "gpio_drv USER task created");
     if (tid < 0) return;
