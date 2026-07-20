@@ -6,6 +6,7 @@
 #include "bh.h"
 #include "endpoint.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "task.h"
 #include "scheduler.h"
 #include "semaphore.h"
@@ -37,6 +38,7 @@
 #if IRQ_BH_ENABLE
 static bh_t bh_pool[IRQ_BH_MAX];
 static sem_id_t bh_sem = KERN_INVALID_ID;
+static irq_spinlock_t bh_lock; /* M1: SMP safe */
 #endif
 
 /*============================================================================
@@ -108,7 +110,7 @@ static void bh_service_loop(void *arg) {
         sem_wait(bh_sem, 100);
 
         /* 遍历所有 BH，处理 pending 的 */
-        uint32_t crit = hal_enter_critical();
+        uint32_t crit = irq_spin_lock(&bh_lock);
         for (int i = 0; i < IRQ_BH_MAX; i++) {
             bh_t *bh = &bh_pool[i];
             if (bh->in_use && bh->pending) {
@@ -120,7 +122,7 @@ static void bh_service_loop(void *arg) {
                 int16_t      bh_id = (int16_t)i;
                 bh->pending = 0;
                 bh->running = 1;
-                hal_exit_critical(crit);
+                irq_spin_unlock(&bh_lock, crit);
 
                 if (notify_bound) {
                     uint8_t msg[KERN_EP_MSG_SIZE];
@@ -136,14 +138,14 @@ static void bh_service_loop(void *arg) {
                 bh_record_event((int16_t)i, TRACE_BH_RUN, KERN_OK,
                                 STATS_COUNTER_OK);
 
-                crit = hal_enter_critical();
+                crit = irq_spin_lock(&bh_lock);
                 bh->running = 0;
                 if (bh->delete_pending) {
                     memset(bh, 0, sizeof(bh_t));
                 }
             }
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&bh_lock, crit);
     }
 }
 
@@ -155,6 +157,7 @@ static void bh_service_loop(void *arg) {
 
 void bh_init(void) {
 #if IRQ_BH_ENABLE
+    irq_spin_init(&bh_lock);
     memset(bh_pool, 0, sizeof(bh_pool));
     bh_sem = sem_create(0, 0);  /* 计数信号量, 初始0, 无上限 */
 #endif
@@ -177,7 +180,7 @@ void bh_service_start(void) {
 #if IRQ_BH_ENABLE
 
 int16_t bh_create(bh_handler_t handler, void *arg) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&bh_lock);
 
     for (int i = 0; i < IRQ_BH_MAX; i++) {
         if (!bh_pool[i].in_use) {
@@ -189,14 +192,14 @@ int16_t bh_create(bh_handler_t handler, void *arg) {
             bh_pool[i].delete_pending = 0;
             bh_pool[i].notify_bound = 0;
             bh_pool[i].in_use  = 1;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&bh_lock, crit);
             bh_record_event((int16_t)i, TRACE_BH_CREATE, KERN_OK,
                             STATS_COUNTER_OK);
             return (int16_t)i;
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&bh_lock, crit);
     bh_record_event(KERN_INVALID_ID, TRACE_BH_CREATE, KERN_ERR_RESOURCE,
                     STATS_COUNTER_QUEUE_FULL);
     return KERN_INVALID_ID;
@@ -217,16 +220,16 @@ kern_err_t bh_schedule(int16_t bh_id) {
         return KERN_ERR_NOEXIST;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&bh_lock);
     if (!bh->in_use || bh->delete_pending) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&bh_lock, crit);
         bh_record_event(bh_id, TRACE_BH_SCHED, KERN_ERR_NOEXIST,
                         STATS_COUNTER_NOEXIST);
         return KERN_ERR_NOEXIST;
     }
 
     bh->pending = 1;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&bh_lock, crit);
     trace_record(TRACE_BH_SCHEDULE, 0, (uint16_t)bh_id);
     sem_post(bh_sem);
     bh_record_event(bh_id, TRACE_BH_SCHED, KERN_OK, STATS_COUNTER_OK);
@@ -245,9 +248,9 @@ kern_err_t bh_bind_endpoint(int16_t bh_id, ep_id_t ep_id, uint32_t badge) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&bh_lock);
     if (!bh_pool[bh_id].in_use || bh_pool[bh_id].delete_pending) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&bh_lock, crit);
         bh_record_event(bh_id, TRACE_BH_CREATE, KERN_ERR_NOEXIST,
                         STATS_COUNTER_NOEXIST);
         return KERN_ERR_NOEXIST;
@@ -256,7 +259,7 @@ kern_err_t bh_bind_endpoint(int16_t bh_id, ep_id_t ep_id, uint32_t badge) {
     bh_pool[bh_id].notify_ep = ep_id;
     bh_pool[bh_id].notify_badge = badge;
     bh_pool[bh_id].notify_bound = 1;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&bh_lock, crit);
     bh_record_event(bh_id, TRACE_BH_CREATE, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
@@ -268,16 +271,16 @@ kern_err_t bh_cancel(int16_t bh_id) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&bh_lock);
     if (!bh_pool[bh_id].in_use) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&bh_lock, crit);
         bh_record_event(bh_id, TRACE_BH_CANCEL, KERN_ERR_NOEXIST,
                         STATS_COUNTER_NOEXIST);
         return KERN_ERR_NOEXIST;
     }
 
     bh_pool[bh_id].pending = 0;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&bh_lock, crit);
     bh_record_event(bh_id, TRACE_BH_CANCEL, KERN_OK, STATS_COUNTER_CANCEL);
     return KERN_OK;
 }
@@ -289,9 +292,9 @@ kern_err_t bh_delete(int16_t bh_id) {
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&bh_lock);
     if (!bh_pool[bh_id].in_use) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&bh_lock, crit);
         bh_record_event(bh_id, TRACE_BH_DELETE, KERN_ERR_NOEXIST,
                         STATS_COUNTER_NOEXIST);
         return KERN_ERR_NOEXIST;
@@ -305,7 +308,7 @@ kern_err_t bh_delete(int16_t bh_id) {
     } else {
         memset(&bh_pool[bh_id], 0, sizeof(bh_t));
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&bh_lock, crit);
     bh_record_event(bh_id, TRACE_BH_DELETE, KERN_OK, STATS_COUNTER_DELETE);
     return KERN_OK;
 }

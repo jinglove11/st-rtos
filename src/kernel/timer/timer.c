@@ -14,6 +14,7 @@
 #include "trace.h"
 #include "stats.h"
 #include "hal.h"
+#include "spinlock.h"
 #include <string.h>
 
 /*============================================================================
@@ -71,6 +72,7 @@
 /* 定时器池 */
 static timer_t timer_pool[KERN_TIMER_MAX];
 static uint32_t timer_used_bitmap;
+static irq_spinlock_t timer_lock; /* M1: SMP safe */
 
 /* 最小堆 */
 typedef struct {
@@ -651,11 +653,11 @@ static void timer_service_task(void *arg) {
 timer_id_t timer_create(const char *name, timer_callback_t callback,
                         void *arg, uint32_t period) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
 
     timer_id_t id = alloc_timer_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(KERN_INVALID_ID, TRACE_TIMER_CREATE, KERN_ERR_RESOURCE);
         return KERN_INVALID_ID;
     }
@@ -678,7 +680,7 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
         timer->name[KERN_TIMER_NAME_LEN - 1] = '\0';
     }
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     timer_record_event(id, TRACE_TIMER_CREATE, KERN_OK);
     return id;
 #else
@@ -692,20 +694,20 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
 
 kern_err_t timer_delete(timer_id_t timer_id) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(timer_id, TRACE_TIMER_DELETE, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
     if (timer->delete_pending) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(timer_id, TRACE_TIMER_DELETE, KERN_ERR_NOEXIST);
         return KERN_ERR_NOEXIST;
     }
     timer->delete_pending = 1;
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
 
     kern_err_t err = send_command(TIMER_CMD_DELETE, timer_id, 0);
 
@@ -718,16 +720,16 @@ kern_err_t timer_delete(timer_id_t timer_id) {
 
 kern_err_t timer_start(timer_id_t timer_id, uint32_t delay) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->delete_pending) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(timer_id, TRACE_TIMER_START, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
     kern_err_t err = send_command(TIMER_CMD_START, timer_id, delay);
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return err;
 #else
     (void)timer_id;
@@ -738,17 +740,17 @@ kern_err_t timer_start(timer_id_t timer_id, uint32_t delay) {
 
 kern_err_t timer_stop(timer_id_t timer_id) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->delete_pending) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(timer_id, TRACE_TIMER_STOP, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
     timer->stop_pending = 1;
     kern_err_t err = send_command(TIMER_CMD_STOP, timer_id, 0);
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return err;
 #else
     (void)timer_id;
@@ -758,16 +760,16 @@ kern_err_t timer_stop(timer_id_t timer_id) {
 
 kern_err_t timer_reset(timer_id_t timer_id) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->delete_pending) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(timer_id, TRACE_TIMER_RESET, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
     kern_err_t err = send_command(TIMER_CMD_RESET, timer_id, 0);
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return err;
 #else
     (void)timer_id;
@@ -777,16 +779,16 @@ kern_err_t timer_reset(timer_id_t timer_id) {
 
 kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->delete_pending) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         timer_record_event(timer_id, TRACE_TIMER_CHANGE, KERN_ERR_PARAM);
         return KERN_ERR_PARAM;
     }
 
     kern_err_t err = send_command(TIMER_CMD_CHANGE_PERIOD, timer_id, new_period);
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return err;
 #else
     (void)timer_id;
@@ -798,21 +800,21 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
                                uint32_t badge) {
 #if TIMER_ENABLE && IPC_ENDPOINT
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->delete_pending) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         return KERN_ERR_PARAM;
     }
     if (!endpoint_exists(ep_id)) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     timer->notify_ep = ep_id;
     timer->notify_badge = badge;
     timer->notify_bound = 1;
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return KERN_OK;
 #else
     (void)timer_id;
@@ -824,10 +826,10 @@ kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
 
 timer_state_t timer_get_state(timer_id_t timer_id) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     timer_state_t state = timer ? timer->state : TIMER_STATE_DELETED;
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return state;
 #else
     (void)timer_id;
@@ -837,11 +839,11 @@ timer_state_t timer_get_state(timer_id_t timer_id) {
 
 int32_t timer_get_remaining(timer_id_t timer_id) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
 
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->heap_index < 0) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&timer_lock, crit);
         return -1;
     }
 
@@ -849,7 +851,7 @@ int32_t timer_get_remaining(timer_id_t timer_id) {
     int32_t diff = (int32_t)(timer->expire - now);
     int32_t remaining = (diff > 0) ? diff : 0;
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return remaining;
 #else
     (void)timer_id;
@@ -859,12 +861,12 @@ int32_t timer_get_remaining(timer_id_t timer_id) {
 
 int timer_is_active(timer_id_t timer_id) {
 #if TIMER_ENABLE
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&timer_lock);
 
     timer_t *timer = timer_get(timer_id);
     int active = (timer && timer->heap_index >= 0) ? 1 : 0;
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&timer_lock, crit);
     return active;
 #else
     (void)timer_id;
@@ -878,6 +880,7 @@ int timer_is_active(timer_id_t timer_id) {
 
 void timer_init(void) {
 #if TIMER_ENABLE
+    irq_spin_init(&timer_lock);
     memset(timer_pool, 0, sizeof(timer_pool));
     timer_used_bitmap = 0;
 

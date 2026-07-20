@@ -9,14 +9,13 @@
 
 #include "scheduler.h"
 #include "hal.h"
-
-#ifndef TRACE_BUFFER_SIZE
-#define TRACE_BUFFER_SIZE 256
-#endif
+#include "spinlock.h"
+#include "kernel_config.h"
 
 static trace_entry_t trace_buf[TRACE_BUFFER_SIZE];
 static uint16_t trace_head;
 static uint16_t trace_count;
+static spinlock_t trace_slock;
 
 static void trace_put_hex16(uint16_t value) {
     static const char hex[] = "0123456789ABCDEF";
@@ -49,6 +48,8 @@ static void trace_put_u32(uint32_t value) {
 }
 
 void trace_record(uint8_t event, uint8_t task_id, uint16_t data) {
+    /* M1: spinlock 保护 trace_head/count (两核并发 trace_record) */
+    spin_lock(&trace_slock);
     trace_entry_t *e = &trace_buf[trace_head];
     e->tick     = sched_get_tick_count();
     e->event    = event;
@@ -59,6 +60,7 @@ void trace_record(uint8_t event, uint8_t task_id, uint16_t data) {
     if (trace_count < TRACE_BUFFER_SIZE) {
         trace_count++;
     }
+    spin_unlock(&trace_slock);
 }
 
 uint16_t trace_pack(uint8_t object_id, uint8_t result) {
@@ -107,6 +109,7 @@ const trace_entry_t *trace_get_entry(uint16_t index) {
 }
 
 void trace_clear(void) {
+    spin_init(&trace_slock);
     trace_head  = 0;
     trace_count = 0;
 }
