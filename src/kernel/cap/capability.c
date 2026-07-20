@@ -30,6 +30,15 @@ static irq_spinlock_t cap_pool_lock;
 typedef char cap_slot_bits_fit[(CAP_MAX_COUNT_VAL <= (1U << CAP_SLOT_BITS)) ? 1 : -1];
 typedef char cap_shm_type_registered[(CAP_OBJ_SHM < CAP_OBJ_TYPE_MAX) ? 1 : -1];
 
+/* M2-Step2: 保证 encode 产生的合法 cap 永远是 CAP_ID_T 的正值。
+ * 这是 cap_decode 不再需要 'cap < 0' 守卫的不变式 —— CAP_INVALID 是
+ * 唯一的非法哨兵,encode 永不产生其他落入负数范围的值。
+ * (CAP_GENERATION_MAX << CAP_SLOT_BITS) | (CAP_MAX_COUNT_VAL-1) 是合法
+ * cap 的最大值,必须 <= CAP_ID_T 的正数上限。 */
+typedef char cap_encode_stays_positive[
+    ((((uint32_t)CAP_GENERATION_MAX) << CAP_SLOT_BITS) |
+      ((uint32_t)CAP_MAX_COUNT_VAL - 1U)) <= ((uint32_t)CAP_ID_T_MAX) ? 1 : -1];
+
 static cap_entry_t cap_pool[CAP_MAX_COUNT_VAL];
 static cap_cleanup_fn_t cap_cleanup_table[CAP_OBJ_TYPE_MAX];
 static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
@@ -51,7 +60,10 @@ static cap_id_t cap_encode(uint16_t slot, uint16_t generation) {
 static int cap_decode(cap_id_t cap, uint32_t *slot, uint32_t *generation) {
     uint32_t raw;
 
-    if (cap == CAP_INVALID || cap < 0) {
+    /* M2-Step2: CAP_INVALID 是唯一非法哨兵。cap_encode_stays_positive
+     * 编译期断言保证合法 cap 永不为负,故不再需要 'cap < 0' 守卫
+     * (扩位到 int32_t 后,高位合法 cap 不会被误判为负)。 */
+    if (cap == CAP_INVALID) {
         return 0;
     }
 
