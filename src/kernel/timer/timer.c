@@ -15,6 +15,7 @@
 #include "stats.h"
 #include "hal.h"
 #include "spinlock.h"
+#include "capability.h"
 #include <string.h>
 
 /*============================================================================
@@ -527,6 +528,10 @@ static void process_cmd_delete(timer_id_t timer_id) {
     }
 
     /* 清零并释放 */
+#if CAP_ENABLE
+    /* M2-Step1: 撤销所有任务持有的指向此 timer 的 cap,避免悬空句柄 */
+    (void)cap_revoke_object((void *)(uintptr_t)(timer_id + 1), CAP_OBJ_TIMER);
+#endif
     memset(timer, 0, sizeof(timer_t));
     timer->state = TIMER_STATE_DELETED;
     free_timer_id(timer_id);

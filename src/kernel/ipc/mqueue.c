@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "capability.h"
 #include <string.h>
 
 /*============================================================================
@@ -233,6 +234,10 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
     }
 
     // 清零并释放
+#if CAP_ENABLE
+    /* M2-Step1: 撤销所有任务持有的指向此 mqueue 的 cap,避免悬空句柄 */
+    (void)cap_revoke_object((void *)(uintptr_t)(queue_id + 1), CAP_OBJ_MQUEUE);
+#endif
     memset(mq, 0, sizeof(mqueue_t));
     free_mqueue_id(queue_id);
 

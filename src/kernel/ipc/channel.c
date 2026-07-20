@@ -16,6 +16,7 @@
 #include "spinlock.h"
 #include "trace.h"
 #include "syscall.h"
+#include "capability.h"
 #include <string.h>
 
 #if IPC_CHANNEL
@@ -372,6 +373,10 @@ kern_err_t channel_delete(ch_id_t ch_id) {
     memset(ch_cap_id_buffers[ch_id], 0, sizeof(ch_cap_id_buffers[ch_id]));
     memset(ch_cap_count_buffers[ch_id], 0, sizeof(ch_cap_count_buffers[ch_id]));
 
+#if CAP_ENABLE
+    /* M2-Step1: 撤销所有任务持有的指向此 channel 的 cap,避免悬空句柄 */
+    (void)cap_revoke_object((void *)(uintptr_t)(ch_id + 1), CAP_OBJ_CHANNEL);
+#endif
     memset(ch, 0, sizeof(channel_t));
     free_ch_id(ch_id);
 

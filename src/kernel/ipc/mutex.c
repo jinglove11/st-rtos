@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "capability.h"
 #include <string.h>
 
 /*============================================================================
@@ -227,6 +228,10 @@ kern_err_t mutex_delete(mutex_id_t mutex_id) {
     }
 
     // 清零并释放
+#if CAP_ENABLE
+    /* M2-Step1: 撤销所有任务持有的指向此 mutex 的 cap,避免悬空句柄 */
+    (void)cap_revoke_object((void *)(uintptr_t)(mutex_id + 1), CAP_OBJ_MUTEX);
+#endif
     memset(mutex, 0, sizeof(mutex_t));
     free_mutex_id(mutex_id);
 
