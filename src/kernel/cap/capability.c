@@ -425,36 +425,45 @@ void cap_delete(cap_id_t cap) {
 }
 
 void cap_revoke_all(uint8_t owner) {
+    uint32_t crit = CAP_LOCK();
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         if (cap_pool[i].in_use && cap_pool[i].owner == owner) {
             cap_clear_slot(i);
         }
     }
+    CAP_UNLOCK(crit);
 }
 
 cap_id_t cap_derive_for(tcb_t *owner, cap_id_t parent_cap, uint8_t subset_rights) {
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *parent = cap_get_entry(parent_cap);
     if (parent == NULL) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if (!cap_owner_allowed(owner, parent_cap, parent)) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if ((parent->rights & CAP_GRANT) == 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if ((subset_rights & ~parent->rights) != 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
     int child_slot = cap_init_child_slot(parent, subset_rights);
     if (child_slot < 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
     cap_id_t child_cap = cap_encode((uint16_t)child_slot,
                                     cap_pool[child_slot].generation);
     if (child_cap == CAP_INVALID) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -473,9 +482,11 @@ cap_id_t cap_derive_for(tcb_t *owner, cap_id_t parent_cap, uint8_t subset_rights
     if (install_owner != NULL &&
         cap_task_add(install_owner, child_cap) != KERN_OK) {
         cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
+    CAP_UNLOCK(crit);
     return child_cap;
 }
 
@@ -541,22 +552,28 @@ cap_id_t cap_derive_for_restart(tcb_t *supervisor,
 #endif /* CAP_RESTART_SUBSET */
 
 cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights) {
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL || dst == NULL || dst->id < 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if (!cap_owner_allowed(src, cap, entry)) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if ((entry->rights & CAP_TRANSFER) == 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if ((rights & ~entry->rights) != 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
     int child_slot = cap_init_child_slot(entry, rights);
     if (child_slot < 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -564,6 +581,7 @@ cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights) {
                                  cap_pool[child_slot].generation);
     if (copied == CAP_INVALID) {
         cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -572,27 +590,35 @@ cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights) {
 
     if (cap_task_add(dst, copied) != KERN_OK) {
         cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
+    CAP_UNLOCK(crit);
     return copied;
 }
 
 kern_err_t cap_move_to(tcb_t *src, cap_id_t cap, tcb_t *dst, cap_id_t *out_dst) {
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
     if (dst == NULL || dst->id < 0) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_PARAM;
     }
     if (!cap_owner_allowed(src, cap, entry)) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
     if ((entry->rights & CAP_TRANSFER) == 0) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
     if (cap_task_add(dst, cap) != KERN_OK) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_RESOURCE;
     }
 
@@ -604,6 +630,7 @@ kern_err_t cap_move_to(tcb_t *src, cap_id_t cap, tcb_t *dst, cap_id_t *out_dst) 
     if (out_dst != NULL) {
         *out_dst = cap;
     }
+    CAP_UNLOCK(crit);
     return KERN_OK;
 }
 
@@ -663,6 +690,7 @@ kern_err_t cap_revoke_object(void *object, uint8_t obj_type) {
         return KERN_ERR_PARAM;
     }
 
+    uint32_t crit = CAP_LOCK();
     int revoked = 0;
     for (;;) {
         int slot = -1;
@@ -681,6 +709,7 @@ kern_err_t cap_revoke_object(void *object, uint8_t obj_type) {
         revoked = 1;
     }
 
+    CAP_UNLOCK(crit);
     return revoked ? KERN_OK : KERN_ERR_NOEXIST;
 }
 
