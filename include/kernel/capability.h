@@ -54,7 +54,7 @@
  *============================================================================*/
 
 typedef struct {
-    uint16_t    generation; /* slot generation; prevents stale cap reuse */
+    uint32_t    generation; /* slot generation; prevents stale cap reuse (M2-Step2b: 16→32 位) */
     uint8_t     rights;     /* 权限位图 */
     uint8_t     owner;      /* 拥有者 task_id */
     void       *object;     /* 内核对象指针 */

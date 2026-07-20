@@ -14,9 +14,12 @@
 
 #define CAP_MAX_COUNT_VAL  CAP_MAX_COUNT
 #define CAP_INVALID        ((cap_id_t)-1)
+/* M2-Step2b: cap_id_t 扩到 int32_t。SLOT_BITS=7 覆盖 128 全局 slot,
+ * generation 用 24 bit (1..0xFFFFFF),ABA 重用窗口从 256 扩到 16M。
+ * cap 最大值 = (0xFFFFFF << 7) | 0x7F = 0x7FFFFFFF = INT32_MAX。 */
 #define CAP_SLOT_BITS      7
 #define CAP_SLOT_MASK      ((1U << CAP_SLOT_BITS) - 1U)
-#define CAP_GENERATION_MAX (0x7FFFU >> CAP_SLOT_BITS)
+#define CAP_GENERATION_MAX (0x7FFFFFFFU >> CAP_SLOT_BITS)
 #define CAP_NO_SLOT        ((int16_t)-1)
 
 /* Phase #3: cap_pool 自旋锁 (SMP 安全)。
@@ -49,7 +52,7 @@ static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
 typedef char cap_task_cspace_size_matches_config[
     (CAP_TASK_CSPACE_SLOTS == KERN_TASK_CAP_SLOTS) ? 1 : -1];
 
-static cap_id_t cap_encode(uint16_t slot, uint16_t generation) {
+static cap_id_t cap_encode(uint32_t slot, uint32_t generation) {
     if (slot >= CAP_MAX_COUNT_VAL || generation == 0 ||
         generation > CAP_GENERATION_MAX) {
         return CAP_INVALID;
@@ -218,7 +221,7 @@ static int cap_init_child_slot(const cap_entry_t *parent, uint8_t rights) {
     return child_slot;
 }
 
-static uint16_t cap_next_generation(uint16_t generation) {
+static uint32_t cap_next_generation(uint32_t generation) {
     generation++;
     if (generation == 0 || generation > CAP_GENERATION_MAX) {
         generation = 1;
@@ -253,7 +256,7 @@ static void cap_unlink_from_parent(int slot) {
 }
 
 static void cap_clear_slot(int slot) {
-    cap_id_t cap = cap_encode((uint16_t)slot, cap_pool[slot].generation);
+    cap_id_t cap = cap_encode((uint32_t)slot, cap_pool[slot].generation);
     void *object = cap_pool[slot].object;
     uint8_t obj_type = cap_pool[slot].obj_type;
     int16_t child = cap_pool[slot].first_child;
@@ -267,7 +270,7 @@ static void cap_clear_slot(int slot) {
         cap_remove_from_owner(cap_pool[slot].owner, cap);
     }
 
-    uint16_t generation = cap_next_generation(cap_pool[slot].generation);
+    uint32_t generation = cap_next_generation(cap_pool[slot].generation);
 
     while (child != CAP_NO_SLOT) {
         int16_t next = cap_pool[child].next_sibling;
@@ -327,7 +330,7 @@ cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t ri
         owner_id = (uint8_t)owner->id;
     }
 
-    cap_id_t cap = cap_encode((uint16_t)slot, cap_pool[slot].generation);
+    cap_id_t cap = cap_encode((uint32_t)slot, cap_pool[slot].generation);
     if (cap == CAP_INVALID) {
         CAP_UNLOCK(crit);
         return CAP_INVALID;
@@ -472,7 +475,7 @@ cap_id_t cap_derive_for(tcb_t *owner, cap_id_t parent_cap, uint8_t subset_rights
         return CAP_INVALID;
     }
 
-    cap_id_t child_cap = cap_encode((uint16_t)child_slot,
+    cap_id_t child_cap = cap_encode((uint32_t)child_slot,
                                     cap_pool[child_slot].generation);
     if (child_cap == CAP_INVALID) {
         CAP_UNLOCK(crit);
@@ -543,7 +546,7 @@ cap_id_t cap_derive_for_restart(tcb_t *supervisor,
      * reject it (owner mismatch → KERN_ERR_CAP). */
     cap_pool[child_slot].owner = (uint8_t)new_task->id;
 
-    cap_id_t child_cap = cap_encode((uint16_t)child_slot,
+    cap_id_t child_cap = cap_encode((uint32_t)child_slot,
                                     cap_pool[child_slot].generation);
     if (child_cap == CAP_INVALID) {
         return CAP_INVALID;
