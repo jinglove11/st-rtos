@@ -804,13 +804,20 @@ uint32_t sched_get_tick_count(void) {
  * @note 在中断上下文中调用
  */
 void sched_tick_handler(void) {
-    /* 根因4:原子递增 tick_count (两核 SysTick 同时++) */
+    /* tick_count 递增。
+     * SysTick 在中断上下文,tick handler 不持 sched_lock,
+     * 但两核可能同时进 tick handler。
+     * SMP:用原子递增。单核:直接 ++ (关中断已保护)。 */
+#if SMP
     __asm volatile("1: ldrex r2, [%0]\n"
                    "   adds  r2, #1\n"
                    "   strex r1, r2, [%0]\n"
                    "   cmp   r1, #0\n"
                    "   bne   1b\n"
                    :: "r"(&scheduler.tick_count) : "r1", "r2", "memory");
+#else
+    scheduler.tick_count++;
+#endif
 
     tcb_t *current = sched_get_current();
 

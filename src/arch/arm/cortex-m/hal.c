@@ -994,18 +994,16 @@ void hal_system_reset(void) {
     hal_irq_disable();
     SYSTICK->CSR = 0;
 
-#if TARGET_BOARD == BOARD_RP2350_PICO2 && SMP
-    /* SMP:先停 core1,再复位。
+#if TARGET_BOARD == BOARD_RP2350_PICO2
+    /* RP2350:用 watchdog_reboot 完整重启两个核。
      * AIRCR SYSRESETREQ 只复位当前核 (core0),
-     * 如果 core1 还在跑,reset 后两核状态不一致会卡死。 */
-    multicore_reset_core1();
-#endif
-
-    /* AIRCR SYSRESETREQ:软件系统复位。
-     * 只复位 CPU 核心,不重新跑 bootrom,
-     * flash 映射保持有效,直接跳到 reset vector。 */
+     * reset 后 core1 状态不对,导致 smp_init_core1 失败。
+     * watchdog_reboot(0,0,...) 走完整 boot path,两核都重新初始化。 */
+    watchdog_reboot(0, 0, 1);
+#else
     volatile uint32_t *aircr = (volatile uint32_t *)0xE000ED0C;
     *aircr = (0x05FAUL << 16) | (1U << 2);
+#endif
 
     __asm volatile("dsb");
     while (1);
