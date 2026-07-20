@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "syscall.h"
 #include <string.h>
 
@@ -29,6 +30,7 @@ static event_wait_t event_wait_info[KERN_MAX_TASKS];
 
 static event_t event_pool[KERN_MAX_EVENTS];
 static uint32_t event_used_bitmap;
+static irq_spinlock_t event_lock; /* M1: SMP safe */
 
 /*============================================================================
  * 内部函数
@@ -79,17 +81,18 @@ static int event_check(uint32_t current, uint32_t wait, uint32_t opt) {
  *============================================================================*/
 
 void event_init(void) {
+    irq_spin_init(&event_lock);
     memset(event_pool, 0, sizeof(event_pool));
     memset(event_wait_info, 0, sizeof(event_wait_info));
     event_used_bitmap = 0;
 }
 
 event_id_t event_create(uint32_t initial_flags) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_id_t id = alloc_event_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -98,16 +101,16 @@ event_id_t event_create(uint32_t initial_flags) {
     evt->in_use = 1;
     wait_queue_init(&evt->wait_queue);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&event_lock, crit);
     return id;
 }
 
 kern_err_t event_delete(event_id_t event_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -130,7 +133,7 @@ kern_err_t event_delete(event_id_t event_id) {
     memset(evt, 0, sizeof(event_t));
     free_event_id(event_id);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&event_lock, crit);
     return KERN_OK;
 }
 
@@ -139,11 +142,11 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
     if (hal_irq_get_active() >= 0) {
         return KERN_ERR_ISR;
     }
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -154,7 +157,7 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
         if (opt & EVENT_OPT_CLEAR) {
             evt->flags &= ~flags;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_OK;
     }
 
@@ -168,12 +171,12 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
         if (opt & EVENT_OPT_CLEAR) {
             evt->flags &= ~flags;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
@@ -208,7 +211,7 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&event_lock, crit);
 
     /* 触发上下文切换 */
     hal_trigger_pendsv();
@@ -229,19 +232,19 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
          * re-CLEAR. The fast-path (non-blocking match above) handles its own
          * copy+clear. Only ensure the task is unlinked from the wait queue if
          * the signaler didn't (it normally does). */
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&event_lock);
         if (current->block_obj == evt) {
             wait_queue_remove(&evt->wait_queue, current);
             current->block_obj = NULL;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
     } else {
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&event_lock);
         if (current->block_obj == evt) {
             wait_queue_remove(&evt->wait_queue, current);
             current->block_obj = NULL;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
     }
 
     return result;
@@ -254,11 +257,11 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
         return KERN_ERR_ISR;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -266,19 +269,19 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
         if (opt & EVENT_OPT_CLEAR) {
             evt->flags &= ~flags;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERN_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -305,17 +308,17 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&event_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 #endif
 
 kern_err_t event_set(event_id_t event_id, uint32_t flags) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -353,36 +356,36 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
         tcb = next;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&event_lock, crit);
     return KERN_OK;
 }
 
 kern_err_t event_clear(event_id_t event_id, uint32_t flags) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     evt->flags &= ~flags;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&event_lock, crit);
     return KERN_OK;
 }
 
 uint32_t event_get(event_id_t event_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&event_lock);
 
     event_t *evt = get_event(event_id);
     if (evt == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&event_lock, crit);
         return 0;
     }
 
     uint32_t flags = evt->flags;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&event_lock, crit);
     return flags;
 }

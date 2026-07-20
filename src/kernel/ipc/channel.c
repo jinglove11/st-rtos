@@ -13,6 +13,7 @@
 #include "kernel_config.h"
 #include "kernel_types.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "trace.h"
 #include "syscall.h"
 #include <string.h>
@@ -48,6 +49,7 @@ typedef struct {
 
 static channel_t ch_pool[KERN_MAX_CHANNELS];
 static uint32_t ch_used_bitmap;
+static irq_spinlock_t ch_lock; /* M1: SMP safe */
 
 /* 消消息缓冲区: [channel][direction 0=a_to_b, 1=b_to_a][msg_size] */
 static uint8_t ch_msg_buffers[KERN_MAX_CHANNELS][2][KERN_CH_MSG_SIZE]
@@ -291,6 +293,7 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
  *============================================================================*/
 
 void channel_init(void) {
+    irq_spin_init(&ch_lock);
     memset(ch_pool, 0, sizeof(ch_pool));
     memset(ch_cap_id_buffers, 0, sizeof(ch_cap_id_buffers));
     memset(ch_cap_count_buffers, 0, sizeof(ch_cap_count_buffers));
@@ -308,11 +311,11 @@ void channel_init(void) {
 ch_id_t channel_create(uint16_t msg_size, uint32_t shm_size) {
     if (msg_size == 0 || msg_size > KERN_CH_MSG_SIZE) return KERN_INVALID_ID;
 
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     ch_id_t id = alloc_ch_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -348,16 +351,16 @@ ch_id_t channel_create(uint16_t msg_size, uint32_t shm_size) {
 
     ch->in_use = 1;
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return id;
 }
 
 kern_err_t channel_delete(ch_id_t ch_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -372,7 +375,7 @@ kern_err_t channel_delete(ch_id_t ch_id) {
     memset(ch, 0, sizeof(channel_t));
     free_ch_id(ch_id);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 
@@ -410,18 +413,18 @@ void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {
 }
 
 kern_err_t channel_connect(ch_id_t ch_id, task_id_t peer_a, task_id_t peer_b) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     ch->peer_a = peer_a;
     ch->peer_b = peer_b;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 
@@ -434,11 +437,11 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
     if (cap_count > IPC_CAPS_MAX) return KERN_ERR_PARAM;
     if (cap_count > 0 && caps == NULL) return KERN_ERR_PARAM;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -447,7 +450,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
     int is_a = 0;
     kern_err_t side_err = channel_get_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return side_err;
     }
 
@@ -481,7 +484,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
     /* 如果对端还没读取上一条消息，等待 */
     if (*ready_flag) {
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -502,7 +505,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         hal_trigger_pendsv();
 
         while (current->state == TASK_STATE_BLOCKED) {
@@ -511,25 +514,25 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
         }
 
         if (current->block_result != KERN_OK) {
-            crit = hal_enter_critical();
+            crit = irq_spin_lock(&ch_lock);
             if (current->block_obj == ch) {
                 wait_queue_remove_safe(send_wq, current);
                 current->block_obj = NULL;
             }
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return current->block_result;
         }
 
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&ch_lock);
         ch = ch_get(ch_id);
         if (ch == NULL) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_NOEXIST;
         }
 
         side_err = channel_get_side(ch, current, &is_a);
         if (side_err != KERN_OK) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return side_err;
         }
         if (is_a) {
@@ -548,7 +551,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
             receiver_id = ch->peer_a;
         }
         if (*ready_flag) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_BUSY;
         }
     }
@@ -558,7 +561,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
         kern_err_t xfer_err = ipc_transfer_caps(current, receiver,
                                                 caps, cap_count, cap_dst);
         if (xfer_err != KERN_OK) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return xfer_err;
         }
     }
@@ -572,7 +575,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
     channel_wake_recv_waiter(recv_wq, dst_buf, ready_flag, cap_dst,
                              cap_count_dst);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 
@@ -585,18 +588,18 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
                                 uint32_t timeout) {
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL || msg == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_STATE;
     }
     trace_record(TRACE_IPC_SEND, (uint8_t)current->id, (uint16_t)ch_id);
@@ -604,7 +607,7 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
     int is_a = 0;
     kern_err_t side_err = channel_get_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return side_err;
     }
 
@@ -633,7 +636,7 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
 
     if (*ready_flag) {
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -655,7 +658,7 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
     }
 
@@ -667,7 +670,7 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
     channel_wake_recv_waiter(recv_wq, dst_buf, ready_flag, cap_dst,
                              cap_count_dst);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 
@@ -680,18 +683,18 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
     if (cap_count > IPC_CAPS_MAX) return KERN_ERR_PARAM;
     if (cap_count > 0 && caps == NULL) return KERN_ERR_PARAM;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL || msg == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_STATE;
     }
     trace_record(TRACE_IPC_SEND, (uint8_t)current->id, (uint16_t)ch_id);
@@ -699,7 +702,7 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
     int is_a = 0;
     kern_err_t side_err = channel_get_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return side_err;
     }
 
@@ -731,7 +734,7 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
 
     if (*ready_flag) {
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -758,7 +761,7 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
     }
 
@@ -767,7 +770,7 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
         kern_err_t xfer_err = ipc_transfer_caps(current, receiver,
                                                 caps, cap_count, cap_dst);
         if (xfer_err != KERN_OK) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return xfer_err;
         }
     } else {
@@ -781,7 +784,7 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
     channel_wake_recv_waiter(recv_wq, dst_buf, ready_flag, cap_dst,
                              cap_count_dst);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 #endif
@@ -801,11 +804,11 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
                                       uint32_t timeout) {
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -814,7 +817,7 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
     int is_a = 0;
     kern_err_t side_err = channel_get_recv_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return side_err;
     }
 
@@ -847,11 +850,11 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
     /* 如果没有数据，阻塞等待 */
     if (!*ready_flag) {
         if (!channel_sender_alive(ch, is_a)) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_NOEXIST;
         }
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -872,7 +875,7 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         hal_trigger_pendsv();
 
         while (current->state == TASK_STATE_BLOCKED) {
@@ -881,25 +884,25 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
         }
 
         if (current->block_result != KERN_OK) {
-            crit = hal_enter_critical();
+            crit = irq_spin_lock(&ch_lock);
             if (current->block_obj == ch) {
                 wait_queue_remove_safe(recv_wq, current);
                 current->block_obj = NULL;
             }
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return current->block_result;
         }
 
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&ch_lock);
         ch = ch_get(ch_id);
         if (ch == NULL) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_NOEXIST;
         }
 
         side_err = channel_get_recv_side(ch, current, &is_a);
         if (side_err != KERN_OK) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return side_err;
         }
         if (is_a) {
@@ -917,17 +920,17 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
         }
         if (!*ready_flag) {
             if (!channel_sender_alive(ch, is_a)) {
-                hal_exit_critical(crit);
+                irq_spin_unlock(&ch_lock, crit);
                 return KERN_ERR_NOEXIST;
             }
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
     }
 
     if (*cap_count_src > 0) {
         if (out_caps == NULL || out_cap_count == NULL) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_RESOURCE;
         }
 
@@ -947,7 +950,7 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
     channel_wake_send_waiter(send_wq, recv_wq, src_buf, ready_flag, cap_src,
                              cap_count_src, is_a ? ch->peer_a : ch->peer_b);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 
@@ -960,18 +963,18 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
                                 uint32_t timeout) {
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL || user_msg == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_STATE;
     }
     trace_record(TRACE_IPC_RECV, (uint8_t)current->id, (uint16_t)ch_id);
@@ -979,7 +982,7 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
     int is_a = 0;
     kern_err_t side_err = channel_get_recv_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return side_err;
     }
 
@@ -1008,11 +1011,11 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
 
     if (!*ready_flag) {
         if (!channel_sender_alive(ch, is_a)) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_NOEXIST;
         }
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -1034,12 +1037,12 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
     }
 
     if (*cap_count_src > 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_RESOURCE;
     }
 
@@ -1051,7 +1054,7 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
     channel_wake_send_waiter(send_wq, recv_wq, src_buf, ready_flag, cap_src,
                              cap_count_src, is_a ? ch->peer_a : ch->peer_b);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 
@@ -1065,18 +1068,18 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ch_lock);
 
     channel_t *ch = ch_get(ch_id);
     if (ch == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_ERR_STATE;
     }
     trace_record(TRACE_IPC_RECV, (uint8_t)current->id, (uint16_t)ch_id);
@@ -1084,7 +1087,7 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
     int is_a = 0;
     kern_err_t side_err = channel_get_recv_side(ch, current, &is_a);
     if (side_err != KERN_OK) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return side_err;
     }
 
@@ -1113,11 +1116,11 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
 
     if (!*ready_flag) {
         if (!channel_sender_alive(ch, is_a)) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_NOEXIST;
         }
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ch_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -1141,7 +1144,7 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
     }
 
@@ -1160,7 +1163,7 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
     channel_wake_send_waiter(send_wq, recv_wq, src_buf, ready_flag, cap_src,
                              cap_count_src, is_a ? ch->peer_a : ch->peer_b);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
 }
 #endif

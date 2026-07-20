@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "syscall.h"
 #include <string.h>
 
@@ -17,6 +18,7 @@
 
 static mqueue_t mqueue_pool[KERN_MAX_MQUEUES];
 static uint32_t mqueue_used_bitmap;
+static irq_spinlock_t mqueue_lock; /* M1: SMP safe */
 
 // 消息缓冲区池 (每个队列独立缓冲区)
 static uint8_t mqueue_buffers[KERN_MAX_MQUEUES][KERN_MQUEUE_DEPTH * KERN_MSG_MAX_SIZE]
@@ -143,6 +145,7 @@ static void mqueue_wake_send_waiter(mqueue_t *mq) {
  *============================================================================*/
 
 void mqueue_init(void) {
+    irq_spin_init(&mqueue_lock);
     memset(mqueue_pool, 0, sizeof(mqueue_pool));
     mqueue_used_bitmap = 0;
 #if SYSCALL_ENABLE
@@ -152,11 +155,11 @@ void mqueue_init(void) {
 }
 
 queue_id_t mqueue_create(uint32_t msg_size, uint32_t capacity) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     queue_id_t id = alloc_mqueue_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -181,16 +184,16 @@ queue_id_t mqueue_create(uint32_t msg_size, uint32_t capacity) {
     wait_queue_init(&mq->send_queue);
     wait_queue_init(&mq->recv_queue);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return id;
 }
 
 kern_err_t mqueue_delete(queue_id_t queue_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -233,16 +236,16 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
     memset(mq, 0, sizeof(mqueue_t));
     free_mqueue_id(queue_id);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return KERN_OK;
 }
 
 kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -251,17 +254,17 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
 
         mqueue_wake_recv_waiter(mq);
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (hal_irq_get_active() >= 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_ISR;
     }
 
@@ -289,7 +292,7 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
 
     /* 触发上下文切换 */
     hal_trigger_pendsv();
@@ -303,18 +306,18 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
     kern_err_t result = current->block_result;
 
     if (result == KERN_OK) {
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&mqueue_lock);
         if (mq->count < mq->capacity) {
             mqueue_do_put(mq, msg);
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
     } else {
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&mqueue_lock);
         if (current->block_obj == mq) {
             wait_queue_remove(&mq->send_queue, current);
             current->block_obj = NULL;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
     }
 
     return result;
@@ -323,35 +326,35 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
 #if SYSCALL_ENABLE
 kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
                                uint32_t timeout) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL || msg == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (mq->count < mq->capacity) {
         mqueue_do_put(mq, msg);
         mqueue_wake_recv_waiter(mq);
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (hal_irq_get_active() >= 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_ISR;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -376,22 +379,22 @@ kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 #endif
 
 kern_err_t mqueue_trysend(queue_id_t queue_id, const void *msg) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (mq->count >= mq->capacity) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_BUSY;
     }
 
@@ -400,16 +403,16 @@ kern_err_t mqueue_trysend(queue_id_t queue_id, const void *msg) {
     // 检查是否有任务在等待接收
     mqueue_wake_recv_waiter(mq);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return KERN_OK;
 }
 
 kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -418,17 +421,17 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
 
         mqueue_wake_send_waiter(mq);
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (hal_irq_get_active() >= 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_ISR;
     }
 
@@ -463,7 +466,7 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
 
     /* 触发上下文切换
      * 由于状态已经是 BLOCKED，PendSV 会选择下一个任务运行
@@ -479,18 +482,18 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
     kern_err_t result = current->block_result;
 
     if (result == KERN_OK) {
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&mqueue_lock);
         if (mq->count > 0) {
             mqueue_do_get(mq, msg);
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
     } else {
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&mqueue_lock);
         if (current->block_obj == mq) {
             wait_queue_remove(&mq->recv_queue, current);
             current->block_obj = NULL;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
     }
 
     return result;
@@ -499,35 +502,35 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
 #if SYSCALL_ENABLE
 kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
                                uint32_t timeout) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL || user_msg == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (mq->count > 0) {
         mqueue_do_get(mq, user_msg);
         mqueue_wake_send_waiter(mq);
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (hal_irq_get_active() >= 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_ISR;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL ||
         current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -551,22 +554,22 @@ kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 #endif
 
 kern_err_t mqueue_tryrecv(queue_id_t queue_id, void *msg) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (mq->count == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return KERN_ERR_BUSY;
     }
 
@@ -575,21 +578,21 @@ kern_err_t mqueue_tryrecv(queue_id_t queue_id, void *msg) {
     // 检查是否有任务在等待发送
     mqueue_wake_send_waiter(mq);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return KERN_OK;
 }
 
 int32_t mqueue_get_count(queue_id_t queue_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
 
     mqueue_t *mq = get_mqueue(queue_id);
     if (mq == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mqueue_lock, crit);
         return -1;
     }
 
     int32_t count = mq->count;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mqueue_lock, crit);
     return count;
 }

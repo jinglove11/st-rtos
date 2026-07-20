@@ -14,6 +14,7 @@
 #include "kernel_config.h"
 #include "kernel_types.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "trace.h"
 #include "syscall.h"
 #include "capability.h"
@@ -62,6 +63,7 @@ typedef struct {
 
 static endpoint_t ep_pool[KERN_MAX_ENDPOINTS];
 static uint32_t ep_used_bitmap;
+static irq_spinlock_t ep_lock; /* M1: SMP safe */
 
 /* 消息缓冲区: [endpoint][slot][msg_size] */
 static uint8_t ep_msg_buffers[KERN_MAX_ENDPOINTS]
@@ -256,6 +258,7 @@ static void endpoint_cancel_sender(ep_id_t ep_id, endpoint_t *ep, tcb_t *sender)
  *============================================================================*/
 
 void endpoint_init(void) {
+    irq_spin_init(&ep_lock);
     memset(ep_pool, 0, sizeof(ep_pool));
     ep_used_bitmap = 0;
     memset(ep_client_msg, 0, sizeof(ep_client_msg));
@@ -288,11 +291,11 @@ ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pendin
     if (msg_size == 0 || msg_size > KERN_EP_MSG_SIZE) return KERN_INVALID_ID;
     if (max_pending == 0 || max_pending > KERN_EP_MAX_PENDING) return KERN_INVALID_ID;
 
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     ep_id_t id = alloc_ep_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -319,24 +322,24 @@ ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pendin
     wait_queue_init(&ep->send_waiters);
     wait_queue_init(&ep->reply_waiters);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return id;
 }
 
 uint16_t endpoint_msg_size(ep_id_t ep_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&ep_lock);
     endpoint_t *ep = ep_get(ep_id);
     uint16_t size = ep != NULL ? ep->msg_size : 0U;
-    hal_irq_restore(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return size;
 }
 
 kern_err_t endpoint_delete(ep_id_t ep_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -402,14 +405,14 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     memset(ep, 0, sizeof(endpoint_t));
     free_ep_id(ep_id);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_OK;
 }
 
 int endpoint_exists(ep_id_t ep_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&ep_lock);
     int exists = (ep_get(ep_id) != NULL) ? 1 : 0;
-    hal_irq_restore(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return exists;
 }
 
@@ -518,11 +521,11 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
     if (cap_count > IPC_CAPS_MAX) return KERN_ERR_PARAM;
     if (cap_count > 0 && caps == NULL) return KERN_ERR_PARAM;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -562,7 +565,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
                 current->wake_tick = 0;
             }
 
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             hal_trigger_pendsv();
 
             while (current->state == TASK_STATE_BLOCKED) {
@@ -572,12 +575,12 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
 
             kern_err_t result = current->block_result;
             if (result != KERN_OK) {
-                crit = hal_enter_critical();
+                crit = irq_spin_lock(&ep_lock);
                 if (current->block_obj == ep) {
                     endpoint_cancel_sender(ep_id, ep, current);
                     current->block_obj = NULL;
                 }
-                hal_exit_critical(crit);
+                irq_spin_unlock(&ep_lock, crit);
             }
 
             return result;
@@ -587,7 +590,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
     /* 如果缓冲区已满，等待服务端腾出空间 */
     if (ep->count >= ep->max_pending) {
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -608,7 +611,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         hal_trigger_pendsv();
 
         while (current->state == TASK_STATE_BLOCKED) {
@@ -617,20 +620,20 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
         }
 
         if (current->block_result != KERN_OK) {
-            crit = hal_enter_critical();
+            crit = irq_spin_lock(&ep_lock);
             if (current->block_obj == ep) {
                 wait_queue_remove_safe(&ep->send_waiters, current);
                 current->block_obj = NULL;
             }
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return current->block_result;
         }
 
         /* 被唤醒后重新检查 */
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&ep_lock);
         ep = ep_get(ep_id);
         if (ep == NULL) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_NOEXIST;
         }
     }
@@ -687,7 +690,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     hal_trigger_pendsv();
 
     while (current->state == TASK_STATE_BLOCKED) {
@@ -697,12 +700,12 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
 
     kern_err_t result = current->block_result;
     if (result != KERN_OK) {
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&ep_lock);
         if (current->block_obj == ep) {
             endpoint_cancel_sender(ep_id, ep, current);
             current->block_obj = NULL;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
     }
 
     return result;
@@ -716,11 +719,11 @@ kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
     if (msg == NULL) return KERN_ERR_PARAM;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -746,14 +749,14 @@ kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
 #endif
             wait_queue_remove_safe(&ep->recv_waiters, server);
             sched_wakeup(server, KERN_OK);
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_OK;
         }
     }
 #endif
 
     if (ep->count >= ep->max_pending) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_BUSY;
     }
 
@@ -776,7 +779,7 @@ kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_OK;
 }
 
@@ -791,28 +794,28 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
     if (cap_count > IPC_CAPS_MAX) return KERN_ERR_PARAM;
     if (cap_count > 0 && caps == NULL) return KERN_ERR_PARAM;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL || current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_STATE;
     }
     trace_record(TRACE_IPC_SEND, (uint8_t)current->id, (uint16_t)ep_id);
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (ep->count >= ep->max_pending) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_BUSY;
     }
 
@@ -859,7 +862,7 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
                 current->block_obj = NULL;
                 current->wake_tick = 0;
                 current->block_result = KERN_OK;
-                hal_exit_critical(crit);
+                irq_spin_unlock(&ep_lock, crit);
                 return err;
             }
             uint16_t slot = ep->head;
@@ -909,7 +912,7 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 
@@ -946,11 +949,11 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
                                        uint32_t timeout) {
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -960,7 +963,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
     /* 如果没有待处理消息，阻塞等待 */
     if (ep->count == 0) {
         if (timeout == 0) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_TIMEOUT;
         }
 
@@ -981,7 +984,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             current->wake_tick = 0;
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         hal_trigger_pendsv();
 
         while (current->state == TASK_STATE_BLOCKED) {
@@ -990,19 +993,19 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
         }
 
         if (current->block_result != KERN_OK) {
-            crit = hal_enter_critical();
+            crit = irq_spin_lock(&ep_lock);
             if (current->block_obj == ep) {
                 wait_queue_remove(&ep->recv_waiters, current);
                 current->block_obj = NULL;
             }
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return current->block_result;
         }
 
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&ep_lock);
         ep = ep_get(ep_id);
         if (ep == NULL) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_NOEXIST;
         }
     }
@@ -1030,7 +1033,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             ep->tail = (ep->tail + 1) % ep->max_pending;
             ep->count--;
             ep->pending_count--;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_RESOURCE;
         }
 
@@ -1050,7 +1053,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             ep->tail = (ep->tail + 1) % ep->max_pending;
             ep->count--;
             ep->pending_count--;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return xfer_err;
         }
         *out_cap_count = cap_count;
@@ -1083,7 +1086,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_OK;
 }
 
@@ -1095,17 +1098,17 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
     if (hal_irq_get_active() >= 0) return KERN_ERR_ISR;
     if (user_msg == NULL) return KERN_ERR_PARAM;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL || current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_STATE;
     }
     trace_record(TRACE_IPC_RECV, (uint8_t)current->id, (uint16_t)ep_id);
@@ -1126,7 +1129,7 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
             ep->tail = (ep->tail + 1) % ep->max_pending;
             ep->count--;
             ep->pending_count--;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_RESOURCE;
         }
 
@@ -1158,12 +1161,12 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
             sched_wakeup(waiter, KERN_OK);
         }
 
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
@@ -1187,7 +1190,7 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 
@@ -1209,27 +1212,27 @@ kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL || current->id < 0 || current->id >= KERNEL_MAX_TASKS) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_STATE;
     }
 
     if (ep->count > 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return endpoint_recv_common(ep_id, user_msg, out_caps, out_cap_count, 0);
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
@@ -1255,18 +1258,18 @@ kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 
 static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
                                        tcb_t *sender, uint32_t request_gen,
                                        const void *msg) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
 
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -1277,10 +1280,10 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
 #if CAP_ENABLE
             endpoint_invalidate_reply_cap(ep_id, server->id);
 #endif
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return KERN_ERR_NOEXIST;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_STATE;
     }
     if (sender->state != TASK_STATE_BLOCKED ||
@@ -1297,7 +1300,7 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
             endpoint_invalidate_reply_cap(ep_id, server->id);
 #endif
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
@@ -1329,7 +1332,7 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
     sender->block_result = KERN_OK;
     sched_wakeup(sender, KERN_OK);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return KERN_OK;
 }
 
@@ -1344,7 +1347,7 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
         request_gen = ep_server_gen[ep_id][server->id];
 
         if (sender == NULL || request_gen == 0) {
-            uint32_t crit = hal_enter_critical();
+            uint32_t crit = irq_spin_lock(&ep_lock);
             endpoint_t *ep = ep_get(ep_id);
             if (ep != NULL &&
                 ep_last_receiver[ep_id] == server->id &&
@@ -1364,7 +1367,7 @@ kern_err_t endpoint_reply(ep_id_t ep_id, const void *msg) {
 #endif
                 }
             }
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
         }
     }
 
@@ -1379,10 +1382,10 @@ cap_id_t endpoint_take_reply_cap(ep_id_t ep_id) {
         return KERN_INVALID_ID;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&ep_lock);
     endpoint_t *ep = ep_get(ep_id);
     if (ep == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -1410,18 +1413,18 @@ cap_id_t endpoint_take_reply_cap(ep_id_t ep_id) {
     if (!reply->active || reply->used) {
         if (reply->bind_error != KERN_OK) {
             kern_err_t err = reply->bind_error;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&ep_lock, crit);
             return err;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_INVALID_ID;
     }
     cap_id_t cap = ep_server_reply_cap[ep_id][server->id];
     if (cap == KERN_INVALID_ID) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&ep_lock, crit);
         return KERN_INVALID_ID;
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&ep_lock, crit);
     return cap;
 }
 

@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "syscall.h"
 #include <string.h>
 
@@ -17,6 +18,7 @@
 
 static mutex_t mutex_pool[KERN_MAX_MUTEXES];
 static uint32_t mutex_used_bitmap;
+static irq_spinlock_t mux_lock; /* M1: SMP safe */
 
 /*============================================================================
  * 内部函数
@@ -169,16 +171,17 @@ static bool mutex_would_deadlock(mutex_t *mutex, tcb_t *caller)
  *============================================================================*/
 
 void mutex_init(void) {
+    irq_spin_init(&mux_lock);
     memset(mutex_pool, 0, sizeof(mutex_pool));
     mutex_used_bitmap = 0;
 }
 
 mutex_id_t mutex_create(void) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&mux_lock);
 
     mutex_id_t id = alloc_mutex_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -189,22 +192,22 @@ mutex_id_t mutex_create(void) {
     mutex->in_use = 1;
     wait_queue_init(&mutex->wait_queue);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&mux_lock, crit);
     return id;
 }
 
 kern_err_t mutex_delete(mutex_id_t mutex_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&mux_lock);
 
     mutex_t *mutex = mutex_get(mutex_id);
     if (mutex == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     // 如果互斥锁被持有, 不能删除
     if (mutex->owner != KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_BUSY;
     }
 
@@ -223,16 +226,16 @@ kern_err_t mutex_delete(mutex_id_t mutex_id) {
     memset(mutex, 0, sizeof(mutex_t));
     free_mutex_id(mutex_id);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&mux_lock, crit);
     return KERN_OK;
 }
 
 kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mux_lock);
 
     mutex_t *mutex = mutex_get(mutex_id);
     if (mutex == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -242,29 +245,29 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
         mutex->owner = current->id;
         mutex->lock_count = 1;
         mutex->owner_original_prio = current->priority;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
     if (mutex->owner == current->id) {
         mutex->lock_count++;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (hal_irq_get_active() >= 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_ISR;
     }
 
 #if MUTEX_DEADLOCK_DETECT
     if (mutex_would_deadlock(mutex, current)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_DEADLOCK;
     }
 #endif
@@ -306,7 +309,7 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mux_lock, crit);
 
     /* 触发上下文切换 */
     hal_trigger_pendsv();
@@ -319,31 +322,31 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
 
     kern_err_t result = current->block_result;
 
-    crit = hal_enter_critical();
+    crit = irq_spin_lock(&mux_lock);
     if (result != KERN_OK) {
         if (current->block_obj == mutex) {
             wait_queue_remove(&mutex->wait_queue, current);
             current->block_obj = NULL;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mux_lock, crit);
 
     return result;
 }
 
 #if SYSCALL_ENABLE
 kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mux_lock);
 
     mutex_t *mutex = mutex_get(mutex_id);
     if (mutex == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -351,29 +354,29 @@ kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
         mutex->owner = current->id;
         mutex->lock_count = 1;
         mutex->owner_original_prio = current->priority;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
     if (mutex->owner == current->id) {
         mutex->lock_count++;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     if (hal_irq_get_active() >= 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_ISR;
     }
 
 #if MUTEX_DEADLOCK_DETECT
     if (mutex_would_deadlock(mutex, current)) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_DEADLOCK;
     }
 #endif
@@ -405,17 +408,17 @@ kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mux_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 #endif
 
 kern_err_t mutex_trylock(mutex_id_t mutex_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mux_lock);
 
     mutex_t *mutex = mutex_get(mutex_id);
     if (mutex == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -426,27 +429,27 @@ kern_err_t mutex_trylock(mutex_id_t mutex_id) {
         mutex->owner = current->id;
         mutex->lock_count = 1;
         mutex->owner_original_prio = current->priority;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
     // 如果当前任务已持有, 递归锁
     if (mutex->owner == current->id) {
         mutex->lock_count++;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mux_lock, crit);
     return KERN_ERR_BUSY;
 }
 
 kern_err_t mutex_unlock(mutex_id_t mutex_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mux_lock);
 
     mutex_t *mutex = mutex_get(mutex_id);
     if (mutex == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -454,14 +457,14 @@ kern_err_t mutex_unlock(mutex_id_t mutex_id) {
 
     // 检查是否是持有者
     if (mutex->owner != current->id) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_ERR_STATE;
     }
 
     // 递归解锁
     mutex->lock_count--;
     if (mutex->lock_count > 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&mux_lock, crit);
         return KERN_OK;
     }
 
@@ -490,7 +493,7 @@ kern_err_t mutex_unlock(mutex_id_t mutex_id) {
         mutex->owner = KERN_INVALID_ID;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mux_lock, crit);
     return KERN_OK;
 }
 
@@ -502,7 +505,7 @@ kern_err_t mutex_unlock(mutex_id_t mutex_id) {
 
 int mutex_deadlock_check(void)
 {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&mux_lock);
     int      deadlocked_count = 0;
 
     for (task_id_t id = 0; id < KERN_MAX_TASKS; id++) {
@@ -527,7 +530,7 @@ int mutex_deadlock_check(void)
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&mux_lock, crit);
     return deadlocked_count;
 }
 

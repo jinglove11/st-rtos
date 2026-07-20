@@ -8,6 +8,7 @@
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "hal.h"
+#include "spinlock.h"
 #include "syscall.h"
 #include <string.h>
 
@@ -17,6 +18,9 @@
 
 static sem_t sem_pool[KERN_MAX_SEMAPHORES];
 static uint32_t sem_used_bitmap;
+
+/* M1: SMP 安全锁 (替代 hal_enter_critical,跨核互斥) */
+static irq_spinlock_t sem_lock;
 
 /*============================================================================
  * 内部函数
@@ -56,16 +60,17 @@ static sem_t *sem_get(sem_id_t id) {
  *============================================================================*/
 
 void sem_init(void) {
+    irq_spin_init(&sem_lock);
     memset(sem_pool, 0, sizeof(sem_pool));
     sem_used_bitmap = 0;
 }
 
 sem_id_t sem_create(uint32_t initial_count, uint32_t max_count) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_id_t id = alloc_sem_id();
     if (id == KERN_INVALID_ID) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_INVALID_ID;
     }
 
@@ -81,16 +86,16 @@ sem_id_t sem_create(uint32_t initial_count, uint32_t max_count) {
     sem->in_use = 1;
     wait_queue_init(&sem->wait_queue);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&sem_lock, crit);
     return id;
 }
 
 kern_err_t sem_delete(sem_id_t sem_id) {
-    uint32_t crit = hal_irq_save();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_irq_restore(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -109,7 +114,7 @@ kern_err_t sem_delete(sem_id_t sem_id) {
     memset(sem, 0, sizeof(sem_t));
     free_sem_id(sem_id);
 
-    hal_irq_restore(crit);
+    irq_spin_unlock(&sem_lock, crit);
     return KERN_OK;
 }
 
@@ -117,22 +122,22 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
     if (hal_irq_get_active() >= 0) {
         return KERN_ERR_ISR;
     }
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (sem->count > 0) {
         sem->count--;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
@@ -160,7 +165,7 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sem_lock, crit);
 
     /* 触发上下文切换 */
     hal_trigger_pendsv();
@@ -173,14 +178,14 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
 
     kern_err_t result = current->block_result;
 
-    crit = hal_enter_critical();
+    crit = irq_spin_lock(&sem_lock);
     if (result != KERN_OK) {
         if (current->block_obj == sem) {
             wait_queue_remove(&sem->wait_queue, current);
             current->block_obj = NULL;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sem_lock, crit);
 
     return result;
 }
@@ -191,28 +196,28 @@ kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
         return KERN_ERR_ISR;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (sem->count > 0) {
         sem->count--;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_OK;
     }
 
     if (timeout == 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_TIMEOUT;
     }
 
     tcb_t *current = sched_get_current();
     if (current == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_STATE;
     }
 
@@ -231,36 +236,36 @@ kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
         current->wake_tick = 0;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sem_lock, crit);
     return KERN_SYSCALL_BLOCKED;
 }
 #endif
 
 kern_err_t sem_trywait(sem_id_t sem_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_PARAM;
     }
 
     if (sem->count > 0) {
         sem->count--;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_OK;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sem_lock, crit);
     return KERN_ERR_BUSY;
 }
 
 kern_err_t sem_post(sem_id_t sem_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return KERN_ERR_PARAM;
     }
 
@@ -278,26 +283,26 @@ kern_err_t sem_post(sem_id_t sem_id) {
         if (sem->count < sem->max_count) {
             sem->count++;
         } else {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&sem_lock, crit);
             return KERN_ERR_OVERFLOW;  // 计数溢出
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sem_lock, crit);
     return KERN_OK;
 }
 
 int32_t sem_get_count(sem_id_t sem_id) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&sem_lock);
 
     sem_t *sem = sem_get(sem_id);
     if (sem == NULL) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&sem_lock, crit);
         return -1;
     }
 
     int32_t count = (int32_t)sem->count;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&sem_lock, crit);
     return count;
 }
