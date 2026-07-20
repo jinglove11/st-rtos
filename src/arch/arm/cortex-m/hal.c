@@ -262,10 +262,15 @@ void hal_interrupt_priority_init(void) {
  * @note PendSV 优先级最低，不会打断其他中断
  */
 void hal_trigger_pendsv(void) {
-    /* 设置 PENDSVSET 位触发 PendSV */
+    /* 设置 PENDSVSET 位触发本核 PendSV */
     SCB->ICSR = (1 << 28);
 
-    /* 内存屏障确保写入完成 */
+    /* SMP-B (IPI):暂不实现核间中断。
+     * RP2350 Cortex-M33 的 SGIR 可发 SGI 到另一核,但需要注册
+     * SGI handler (NVIC IRQ 0-15),且 RP2350 的 SGI 行为需要验证。
+     * 当前方案:无 IPI,靠 tick handler 的 idle 旁路检查 ready_bitmap
+     * 触发 PendSV。跨核唤醒延迟最多 1ms (一个 tick)。 */
+
     __asm volatile("dsb");
     __asm volatile("isb");
 }
