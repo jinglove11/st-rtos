@@ -860,6 +860,19 @@ void sched_tick_handler(void) {
     }
 
     /*
+     * 超时唤醒检查 (仅 core0 执行,避免两核重复唤醒)
+     * SMP 下两核 SysTick 同时触发 tick handler,如果都做超时唤醒,
+     * timer_svc/notification 的时序会被打乱 (timer callback 在 timer_svc
+     * 上下文执行,两核同时 process_expired_timers 导致竞态)。
+     * 只让 core0 做超时唤醒 + timer_svc 处理,core1 只做时间片/idle。
+     */
+#if SMP
+    if (hal_get_cpu_id() != 0) {
+        return;  /* core1 不做超时唤醒 */
+    }
+#endif
+
+    /*
      * 超时唤醒检查
      *
      * 遍历所有任务，检查是否有阻塞任务超时
