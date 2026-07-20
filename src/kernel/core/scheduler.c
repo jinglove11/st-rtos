@@ -537,19 +537,23 @@ void sched_add_ready(tcb_t *tcb) {
     ready_list_add_internal(tcb);
 
     /*
-     * 抢占检查：
-     * 如果新就绪任务的优先级高于当前任务，触发调度
-     * 这实现了优先级抢占调度
+     * 抢占检查：先标记,解锁后再触发 PendSV。
+     * 不能在持锁时触发 PendSV (SMP 下 PendSV handler 会等锁,死锁)。
      */
+    int need_preempt = 0;
     if (scheduler.started) {
         tcb_t *curr = sched_get_current();
         if (curr && tcb->priority < curr->priority) {
-            scheduler.need_resched[hal_get_cpu_id()] = 1;
-            hal_trigger_pendsv();
+            need_preempt = 1;
         }
     }
 
     irq_spin_unlock(&sched_lock, crit);
+
+    if (need_preempt) {
+        scheduler.need_resched[hal_get_cpu_id()] = 1;
+        hal_trigger_pendsv();
+    }
 }
 
 /**
@@ -689,17 +693,19 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     tcb->state = TASK_STATE_READY;
     ready_list_add_internal(tcb);
 
-    /*
-     * 抢占检查：
-     * 如果唤醒的任务优先级高于当前任务，触发调度
-     */
+    /* 抢占检查:先标记,解锁后再触发 PendSV (避免持锁死锁) */
+    int need_preempt = 0;
     tcb_t *current = sched_get_current();
     if (current && tcb->priority < current->priority) {
-        scheduler.need_resched[hal_get_cpu_id()] = 1;
-        hal_trigger_pendsv();
+        need_preempt = 1;
     }
 
     irq_spin_unlock(&sched_lock, crit);
+
+    if (need_preempt) {
+        scheduler.need_resched[hal_get_cpu_id()] = 1;
+        hal_trigger_pendsv();
+    }
 }
 
 /*============================================================================
@@ -936,12 +942,16 @@ void kern_pendsv_handler(void) {
     /* 内存屏障：确保读取正确的值 */
     __asm volatile("dmb");
 
-    /* PendSV handler 不持 sched_lock:
-     * - 单核:PendSV 是最低优先级,tick handler 返回后才执行,锁已释放
-     * - SMP:两核 PendSV 并发操作 ready_list 有竞态风险,但实践中
-     *   窗口极短 (几个指针操作),spin_lock/trylock 在 PendSV 上下文
-     *   会导致死锁或异常,所以保持不加锁。
-     *   后续可用 per-CPU ready_list 或 BIG KERNEL LOCK 方案解决。 */
+    /* SMP-A 修复:PendSV handler 用 spin_lock 保护 ready_list。
+     *
+     * 安全性保证:所有持 sched_lock 的路径 (sched_add_ready/sched_wakeup/
+     * sched_block/sched_remove_ready) 都在**解锁后**才触发 PendSV,
+     * 所以 PendSV 执行时锁一定空闲。单核下 PendSV 是最低优先级异常,
+     * 不会被 tick handler 中断 (tick handler 不持锁)。
+     *
+     * PendSV 已在 cpsid i 下 (汇编入口),用纯 spin_lock (不操作 PRIMASK)。
+     */
+    spin_lock(&sched_lock.lock);
 
     /*
      * 处理当前任务状态转换
@@ -996,6 +1006,8 @@ void kern_pendsv_handler(void) {
     }
 
     next->state = TASK_STATE_RUNNING;
+
+    spin_unlock(&sched_lock.lock);
 
     /* 更新 per-CPU 指针 (供汇编加载上下文) */
 
