@@ -45,7 +45,7 @@ typedef int16_t mutex_id_t;      // 互斥锁 ID
 typedef int16_t queue_id_t;      // 消息队列 ID
 typedef int16_t event_id_t;      // 事件标志组 ID
 typedef int16_t timer_id_t;      // 定时器 ID
-typedef int16_t cap_id_t;        // 能力 ID
+typedef int16_t         cap_id_t;        // 能力 ID
 typedef int16_t ep_id_t;         // Endpoint ID
 typedef int16_t ch_id_t;         // Channel ID
 

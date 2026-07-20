@@ -48,14 +48,14 @@ static cap_id_t cap_encode(uint16_t slot, uint16_t generation) {
     return (cap_id_t)((generation << CAP_SLOT_BITS) | slot);
 }
 
-static int cap_decode(cap_id_t cap, uint16_t *slot, uint16_t *generation) {
-    uint16_t raw;
+static int cap_decode(cap_id_t cap, uint32_t *slot, uint32_t *generation) {
+    uint32_t raw;
 
     if (cap == CAP_INVALID || cap < 0) {
         return 0;
     }
 
-    raw = (uint16_t)cap;
+    raw = (uint32_t)cap;
     *slot = raw & CAP_SLOT_MASK;
     *generation = raw >> CAP_SLOT_BITS;
     if (*slot >= CAP_MAX_COUNT_VAL || *generation == 0) {
@@ -65,8 +65,8 @@ static int cap_decode(cap_id_t cap, uint16_t *slot, uint16_t *generation) {
 }
 
 static cap_entry_t *cap_get_entry(cap_id_t cap) {
-    uint16_t slot;
-    uint16_t generation;
+    uint32_t slot;
+    uint32_t generation;
 
     if (!cap_decode(cap, &slot, &generation)) {
         return NULL;
