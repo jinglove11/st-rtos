@@ -525,7 +525,7 @@ def main():
     # 路径设置
     kconfig_file = "Kconfig"
     config_file = ".config"
-    header_file = "src/kernel/include/kernel_config.h"
+    header_file = "include/kernel/kernel_config.h"
 
     # 解析 Kconfig
     parser = KconfigParser(kconfig_file)

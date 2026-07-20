@@ -442,7 +442,7 @@ DEPS         = $(OBJECTS:.o=.d)
 
 # 配置文件
 CONFIG_FILE   = .config
-CONFIG_HEADER = src/kernel/include/kernel_config.h
+CONFIG_HEADER = include/kernel/kernel_config.h
 
 all: $(TARGET)
 
