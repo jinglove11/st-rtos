@@ -1286,13 +1286,12 @@ static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
         return KERN_ERR_STATE;
     }
 #if CAP_ENABLE
-    /* Hand the caller a CAP_FULL capability over the fault endpoint. The
-     * supervisor needs CAP_READ to recv fault events AND CAP_WRITE to bind a
-     * one-shot timer onto this same endpoint (the timer delivers its
-     * backoff-expiry notification here, so fault events and timer events
-     * arrive on the single ep the supervisor already recv's on — there is no
-     * multi-endpoint wait primitive). */
+    /* Security: only privileged tasks (supervisor/init) can subscribe.
+     * User tasks are rejected to prevent fault event eavesdropping. */
     tcb_t *cur = sched_get_current();
+    if (cur != NULL && (cur->attrs & TASK_ATTR_USER) != 0) {
+        return KERN_ERR_PERM;
+    }
     cap_id_t cap = cap_create_for(cur,
                                   (void *)(uintptr_t)(kern_fault_ep + 1),
                                   CAP_OBJ_ENDPOINT, CAP_FULL);
@@ -1491,6 +1490,12 @@ static int sys_task_set_policy(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_flash_op(uint32_t a1, uint32_t a2, uint32_t a3,
                         uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a5);U(a6);
+    /* Security: only privileged tasks can do flash operations.
+     * User tasks must go through a block server with a block cap. */
+    tcb_t *cur = sched_get_current();
+    if (cur != NULL && (cur->attrs & TASK_ATTR_USER) != 0) {
+        return KERN_ERR_PERM;
+    }
     uint32_t op    = a1;
     uint32_t offs  = a2;
     void *buf      = (void *)(uintptr_t)a3;
@@ -1581,13 +1586,18 @@ static int sys_mmio_unmap(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_mmio_request(uint32_t a1, uint32_t a2, uint32_t a3,
                             uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a4);U(a5);U(a6);
+    /* Security: only privileged tasks can request arbitrary MMIO.
+     * User tasks must receive MMIO caps via cap derivation from root. */
+    tcb_t *cur = sched_get_current();
+    if (cur != NULL && (cur->attrs & TASK_ATTR_USER) != 0) {
+        return KERN_ERR_PERM;
+    }
     uintptr_t base = (uintptr_t)a1;
     uint32_t  size = a2;
     uint8_t   width = (uint8_t)a3;
     extern kern_err_t kmmio_create_cap_for(tcb_t *owner, uintptr_t base,
                                            size_t size, uint8_t width,
                                            uint8_t rights, cap_id_t *out_cap);
-    tcb_t *cur = sched_get_current();
     if (cur == NULL) {
         return KERN_ERR_STATE;
     }
