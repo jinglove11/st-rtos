@@ -29,6 +29,9 @@
 
 #define DRIVER_TEST_IRQ_DETACH ((int16_t)(BOARD_IRQ_COUNT - 1U))
 
+/* M2-Step2b: 前向声明,双 cap arg 传递机制 (定义在 driver_test_set_arg 后) */
+static cap_id_t driver_test_get_cap_b(void);
+
 static void driver_root_dummy_task(void *arg) {
     (void)arg;
     task_exit(NULL);
@@ -115,9 +118,8 @@ static void uart_server_irq_user_task(void *arg) {
 }
 
 static void driver_attach_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t resource_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ep_cap = (int)(intptr_t)arg;
+    cap_id_t resource_cap = driver_test_get_cap_b();
     int err;
 
     if (ep_cap <= 0 || resource_cap <= 0) {
@@ -129,9 +131,8 @@ static void driver_attach_client_task(void *arg) {
 }
 
 static void driver_resource_session_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t resource_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ep_cap = (int)(intptr_t)arg;
+    cap_id_t resource_cap = driver_test_get_cap_b();
     uint32_t events = 0;
     uint32_t resources = 0;
     int err;
@@ -187,9 +188,8 @@ static void driver_resource_session_client_task(void *arg) {
 }
 
 static void driver_irq_only_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t resource_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ep_cap = (int)(intptr_t)arg;
+    cap_id_t resource_cap = driver_test_get_cap_b();
     uint32_t resources = 0;
     int err;
 
@@ -256,9 +256,8 @@ static void driver_irq_event_client_task(void *arg) {
 }
 
 static void driver_attach_no_transfer_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t resource_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ep_cap = (int)(intptr_t)arg;
+    cap_id_t resource_cap = driver_test_get_cap_b();
     int err;
 
     if (ep_cap <= 0 || resource_cap <= 0) {
@@ -275,9 +274,8 @@ static void driver_attach_no_transfer_client_task(void *arg) {
 }
 
 static void driver_attach_bad_type_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t resource_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ep_cap = (int)(intptr_t)arg;
+    cap_id_t resource_cap = driver_test_get_cap_b();
     drv_msg_t msg;
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
     int err;
@@ -305,9 +303,8 @@ static void driver_attach_bad_type_client_task(void *arg) {
 }
 
 static void driver_register_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t service_ep_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t service_ep_cap = driver_test_get_cap_b();
     int err;
 
     if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
@@ -320,9 +317,8 @@ static void driver_register_client_task(void *arg) {
 }
 
 static void driver_lookup_ping_client_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int ns_ep_cap = (int)(cap_id_t)(packed & 0xffffU);
-    cap_id_t inbox_cap = (cap_id_t)((packed >> 16) & 0xffffU);
+    int ns_ep_cap = (int)(intptr_t)arg;
+    cap_id_t inbox_cap = driver_test_get_cap_b();
     cap_id_t driver_cap = KERN_INVALID_ID;
     uint8_t read_buf[4];
     uint32_t events = 0;
@@ -380,6 +376,63 @@ static void driver_test_set_arg(task_id_t task_id, uint32_t arg) {
         uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
         *stacked_r0 = arg;
     }
+}
+
+/*============================================================================
+ * M2-Step2b: 双 cap arg 传递机制
+ *
+ * 历史问题: 旧代码用 (cap_a << 16) | cap_b 把两个 cap 打包进单个 R0,
+ * 假设每个 cap <= 16 位。cap_id_t 扩到 int32_t 后此假设失效。
+ *
+ * 新机制: cap_a 仍走 R0 (driver_test_set_arg),cap_b 存全局 pair 表,
+ * 任务入口用 sys_task_self() 查自己的 cap_b。per-task_id 索引,
+ * 支持并发测试任务。
+ *============================================================================*/
+#define DRIVER_TEST_PAIR_MAX 16
+typedef struct {
+    task_id_t task_id;   /* -1 = 空闲槽 */
+    cap_id_t  cap_b;
+} driver_test_pair_slot_t;
+
+static driver_test_pair_slot_t driver_test_pair_slots[DRIVER_TEST_PAIR_MAX] = {
+    [0 ... DRIVER_TEST_PAIR_MAX - 1] = { .task_id = -1, .cap_b = (cap_id_t)-1 },
+};
+
+static void driver_test_set_arg_pair(task_id_t task_id, int cap_a, cap_id_t cap_b) {
+    /* cap_a 经 R0 传递 (driver_test_set_arg) */
+    driver_test_set_arg(task_id, (uint32_t)cap_a);
+    /* cap_b 存 pair 表,任务入口凭 task_id 查。
+     * 复用同 task_id 槽,否则找空槽。 */
+    for (int i = 0; i < DRIVER_TEST_PAIR_MAX; i++) {
+        if (driver_test_pair_slots[i].task_id == task_id) {
+            driver_test_pair_slots[i].cap_b = cap_b;
+            return;
+        }
+    }
+    for (int i = 0; i < DRIVER_TEST_PAIR_MAX; i++) {
+        if (driver_test_pair_slots[i].task_id < 0) {
+            driver_test_pair_slots[i].task_id = task_id;
+            driver_test_pair_slots[i].cap_b = cap_b;
+            return;
+        }
+    }
+}
+
+static void driver_test_reset_pairs(void) {
+    for (int i = 0; i < DRIVER_TEST_PAIR_MAX; i++) {
+        driver_test_pair_slots[i].task_id = -1;
+        driver_test_pair_slots[i].cap_b = (cap_id_t)-1;
+    }
+}
+
+static cap_id_t driver_test_get_cap_b(void) {
+    task_id_t self = (task_id_t)sys_task_self();
+    for (int i = 0; i < DRIVER_TEST_PAIR_MAX; i++) {
+        if (driver_test_pair_slots[i].task_id == self) {
+            return driver_test_pair_slots[i].cap_b;
+        }
+    }
+    return (cap_id_t)-1;
 }
 
 /*============================================================================
@@ -1831,9 +1884,7 @@ static void test_uart_driver_nameserver_lookup(void) {
                 "driver lookup client receives inbox cap");
 
     if (reg_client >= 0 && reg_ns_cap >= 0 && reg_uart_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)reg_uart_cap << 16) |
-                          (uint32_t)(uint16_t)reg_ns_cap;
-        driver_test_set_arg(reg_client, packed);
+        driver_test_set_arg_pair(reg_client, reg_ns_cap, reg_uart_cap);
         err = task_start(reg_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver register client started");
@@ -1849,9 +1900,7 @@ static void test_uart_driver_nameserver_lookup(void) {
     }
 
     if (lookup_client >= 0 && lookup_ns_cap >= 0 && lookup_inbox_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)lookup_inbox_cap << 16) |
-                          (uint32_t)(uint16_t)lookup_ns_cap;
-        driver_test_set_arg(lookup_client, packed);
+        driver_test_set_arg_pair(lookup_client, lookup_ns_cap, lookup_inbox_cap);
         err = task_start(lookup_client);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver lookup client started");
@@ -2118,9 +2167,7 @@ static void test_uart_driver_resource_attach(void) {
                 "driver attach client receives MMIO cap");
 
     if (client_id >= 0 && client_ep_cap >= 0 && client_mmio_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_mmio_cap << 16) |
-                          (uint32_t)(uint16_t)client_ep_cap;
-        driver_test_set_arg(client_id, packed);
+        driver_test_set_arg_pair(client_id, client_ep_cap, client_mmio_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver attach client started");
@@ -2559,9 +2606,7 @@ static void test_uart_driver_resource_attach_requires_transfer(void) {
                 "no-transfer client receives read-only MMIO cap");
 
     if (client_id >= 0 && client_ep_cap >= 0 && client_mmio_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_mmio_cap << 16) |
-                          (uint32_t)(uint16_t)client_ep_cap;
-        driver_test_set_arg(client_id, packed);
+        driver_test_set_arg_pair(client_id, client_ep_cap, client_mmio_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "no-transfer client started");
@@ -2690,9 +2735,7 @@ static void test_uart_driver_resource_attach_bad_type(void) {
                 "bad-type client receives MMIO cap");
 
     if (client_id >= 0 && client_ep_cap >= 0 && client_mmio_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_mmio_cap << 16) |
-                          (uint32_t)(uint16_t)client_ep_cap;
-        driver_test_set_arg(client_id, packed);
+        driver_test_set_arg_pair(client_id, client_ep_cap, client_mmio_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "bad-type client started");
@@ -4075,9 +4118,7 @@ static void test_uart_driver_user_resource_session(void) {
                 "user-session client receives MMIO cap");
 
     if (client_id >= 0 && client_ep_cap >= 0 && client_mmio_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_mmio_cap << 16) |
-                          (uint32_t)(uint16_t)client_ep_cap;
-        driver_test_set_arg(client_id, packed);
+        driver_test_set_arg_pair(client_id, client_ep_cap, client_mmio_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver user-session client started");
@@ -4217,9 +4258,7 @@ static void test_uart_driver_user_irq_only_open_rejected(void) {
                 "user-IRQ client receives resource cap");
 
     if (client_id >= 0 && client_ep_cap >= 0 && client_irq_cap >= 0) {
-        uint32_t packed = ((uint32_t)(uint16_t)client_irq_cap << 16) |
-                          (uint32_t)(uint16_t)client_ep_cap;
-        driver_test_set_arg(client_id, packed);
+        driver_test_set_arg_pair(client_id, client_ep_cap, client_irq_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver user-IRQ client started");
@@ -4575,7 +4614,7 @@ static void test_uart_driver_user_irq_event_client(void) {
                    "UART user IRQ-event notification sent");
 
     if (client_id >= 0 && client_ep_cap >= 0) {
-        driver_test_set_arg(client_id, (uint32_t)(uint16_t)client_ep_cap);
+        driver_test_set_arg(client_id, (uint32_t)client_ep_cap);
         err = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver IRQ-event user client started");
@@ -4628,6 +4667,7 @@ static void test_uart_driver_user_irq_event_client(void) {
  *============================================================================*/
 
 static void test_driver_module(void) {
+    driver_test_reset_pairs();
     test_device_alloc_basic();
     test_device_alloc_dup();
     test_device_find();
