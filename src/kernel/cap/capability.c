@@ -214,6 +214,7 @@ static int cap_init_child_slot(const cap_entry_t *parent, uint8_t rights) {
     cap_pool[child_slot].object = parent->object;
     cap_pool[child_slot].obj_type = parent->obj_type;
     cap_pool[child_slot].obj_generation = parent->obj_generation;  /* M2-Step3a: 透传 */
+    cap_pool[child_slot].badge = 0;  /* M2-#7: derive 不带 badge (mint 才设) */
     cap_pool[child_slot].in_use = 1;
     cap_pool[child_slot].first_child = CAP_NO_SLOT;
     cap_pool[child_slot].next_sibling = CAP_NO_SLOT;
@@ -342,6 +343,7 @@ cap_id_t cap_create_for_gen(tcb_t *owner, void *object, uint8_t obj_type,
     cap_pool[slot].object = object;
     cap_pool[slot].obj_type = obj_type;
     cap_pool[slot].obj_generation = obj_generation;  /* M2-Step3a */
+    cap_pool[slot].badge = 0;  /* M2-#7: 新建 cap 无 badge */
     cap_pool[slot].in_use = 1;
     cap_pool[slot].parent = CAP_NO_SLOT;
     cap_pool[slot].first_child = CAP_NO_SLOT;
@@ -509,6 +511,79 @@ cap_id_t cap_derive_for(tcb_t *owner, cap_id_t parent_cap, uint8_t subset_rights
 
 cap_id_t cap_derive(cap_id_t parent_cap, uint8_t subset_rights) {
     return cap_derive_for(sched_get_current(), parent_cap, subset_rights);
+}
+
+cap_id_t cap_mint_for(tcb_t *owner, cap_id_t parent_cap,
+                      uint8_t subset_rights, uint32_t badge) {
+    /* M2-#7: mint = derive + badge。复用 cap_derive_for 的所有不变量
+     * (rights 衰减、GRANT drop、child 共享 parent object+generation),
+     * 只额外写 badge 字段。 */
+    uint32_t crit = CAP_LOCK();
+    cap_entry_t *parent = cap_get_entry(parent_cap);
+    if (parent == NULL) {
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+    if (!cap_owner_allowed(owner, parent_cap, parent)) {
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+    if ((parent->rights & CAP_GRANT) == 0) {
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+    if ((subset_rights & ~parent->rights) != 0) {
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+
+    int child_slot = cap_init_child_slot(parent, subset_rights);
+    if (child_slot < 0) {
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+
+    cap_id_t child_cap = cap_encode((uint16_t)child_slot,
+                                    cap_pool[child_slot].generation);
+    if (child_cap == CAP_INVALID) {
+        cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+
+    /* M2-#7: 写 badge (cap_init_child_slot 不写 badge,这里补) */
+    cap_pool[child_slot].badge = badge;
+
+    cap_link_child(cap_slot_of(parent), child_slot);
+
+    /* 安装到 owner (或 registered owner) 的 cspace */
+    tcb_t *install_owner = NULL;
+    if (owner != NULL && cap_task_has(owner, parent_cap)) {
+        install_owner = owner;
+    } else {
+        tcb_t *registered_owner = cap_task_by_id(parent->owner);
+        if (cap_task_has(registered_owner, parent_cap)) {
+            install_owner = registered_owner;
+        }
+    }
+
+    if (install_owner != NULL &&
+        cap_task_add(install_owner, child_cap) != KERN_OK) {
+        cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
+        return CAP_INVALID;
+    }
+
+    CAP_UNLOCK(crit);
+    return child_cap;
+}
+
+uint32_t cap_get_badge(cap_id_t cap) {
+    uint32_t crit = CAP_LOCK();
+    cap_entry_t *entry = cap_get_entry(cap);
+    uint32_t badge = entry != NULL ? entry->badge : 0;
+    CAP_UNLOCK(crit);
+    return badge;
 }
 
 #if CAP_RESTART_SUBSET

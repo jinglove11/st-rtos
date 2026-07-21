@@ -1260,6 +1260,33 @@ static int sys_cap_self_slot(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+/* M2-#7: mint — 派生 cap 衰减 rights + 设 badge */
+static int sys_cap_mint(uint32_t a1, uint32_t a2, uint32_t a3,
+                                uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    tcb_t *current = sched_get_current();
+    cap_id_t child = cap_mint_for(current, (cap_id_t)a1,
+                                  (uint8_t)a2, (uint32_t)a3);
+    return (int)child;
+#else
+    (void)a1; (void)a2; (void)a3;
+    return (int)KERN_NOSYS;
+#endif
+}
+
+/* M2-#7: 读 cap badge */
+static int sys_cap_badge(uint32_t a1, uint32_t a2, uint32_t a3,
+                                 uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    return (int)cap_get_badge((cap_id_t)a1);
+#else
+    (void)a1;
+    return 0;
+#endif
+}
+
 static int sys_cap_revoke(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
@@ -1738,6 +1765,8 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_TRANSFER_TO, sys_cap_transfer_to, 2),
     SYSDEF(SYSCALL_EP_SENDER,     sys_ep_sender,     1),
     SYSDEF(SYSCALL_CAP_SELF_SLOT, sys_cap_self_slot, 2),
+    SYSDEF(SYSCALL_CAP_MINT,      sys_cap_mint,      3),
+    SYSDEF(SYSCALL_CAP_BADGE,     sys_cap_badge,     1),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),

@@ -47,7 +47,17 @@
 #define CAP_OBJ_REPLY      12
 #define CAP_OBJ_MMIO       13
 #define CAP_OBJ_SHM        14
-#define CAP_OBJ_TYPE_MAX   15
+/* M2-#6: 微内核标准对象类型 (placeholder,功能留 M4 地址域 + M6 mint):
+ * - CNODE:   CSpace 节点对象 (CSpace 本身作为可派生 cap,跨 task 共享)
+ * - FACTORY: 对象工厂 cap (创建新内核对象的权限,如 task_create_cap)
+ * - FRAME:   物理内存帧 (M4 地址域:用户私有 data domain 的 backing memory)
+ * - SYSTEM:  系统操作 cap (reboot/info/debug 控制等特权操作)
+ * 当前无 backing 内核对象,enum 占位让 mint (#7) + 未来 ABI 可引用。 */
+#define CAP_OBJ_CNODE       15
+#define CAP_OBJ_FACTORY     16
+#define CAP_OBJ_FRAME       17
+#define CAP_OBJ_SYSTEM      18
+#define CAP_OBJ_TYPE_MAX   19
 
 /*============================================================================
  * 能力池条目 (内部)
@@ -61,6 +71,7 @@ typedef struct {
     void       *object;         /* 内核对象指针 */
     uint8_t     obj_type;       /* 对象类型 */
     uint8_t     in_use;         /* 槽是否使用中 */
+    uint32_t    badge;          /* M2-#7: mint 设置的 badge (server 识别 client) */
     int16_t     parent;         /* parent slot, -1 if root */
     int16_t     first_child;    /* first derived child slot */
     int16_t     next_sibling;   /* next child under same parent */
@@ -85,6 +96,22 @@ cap_id_t cap_derive(cap_id_t cap, uint8_t subset_rights);
 kern_err_t cap_transfer(cap_id_t cap, uint8_t target_task);
 kern_err_t cap_transfer_to_task_cap(cap_id_t cap, cap_id_t task_cap);
 kern_err_t cap_revoke(cap_id_t cap);
+
+/*============================================================================
+ * M2-#7: mint — 派生 cap 同时衰减 rights + 设置 badge
+ *
+ * 与 cap_derive 区别: mint 允许设置 badge (uint32,server 端识别 client 用)。
+ * 典型用途: nameserver 给 client 派发带 badge 的 endpoint cap,server recv
+ * 时通过 badge 区分 client 身份 (无需查 task_id)。
+ *
+ * 不变性:
+ * - child.rights ⊆ parent.rights (rights 只能衰减,不能放大)
+ * - child.badge 由 mint 调用方指定 (badge=0 表示无 badge)
+ * - child 共享 parent 的 object (不创建新内核对象)
+ *============================================================================*/
+cap_id_t cap_mint_for(tcb_t *owner, cap_id_t parent_cap,
+                      uint8_t subset_rights, uint32_t badge);
+uint32_t cap_get_badge(cap_id_t cap);
 
 /* M2-Step3a: cap_create_for 是 cap_create_for_gen 的 wrapper。
  * obj_generation=0 → cap_get_entry 跳过对象 generation cross-check

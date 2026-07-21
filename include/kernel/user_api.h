@@ -369,6 +369,17 @@ static inline int sys_cap_self_slot(int obj_type, int index) {
     return sys_call2(SYSCALL_CAP_SELF_SLOT, (uint32_t)obj_type, (uint32_t)index);
 }
 
+/* M2-#7: mint — 派生 cap 同时衰减 rights + 设 badge。
+ * 返回新 cap_id (失败 <0)。badge=0 表示无 badge。 */
+static inline int sys_cap_mint(int parent_cap, int subset_rights, uint32_t badge) {
+    return sys_call3(SYSCALL_CAP_MINT, parent_cap, subset_rights, (int)badge);
+}
+
+/* M2-#7: 读 cap 的 badge。 */
+static inline uint32_t sys_cap_badge(int cap) {
+    return (uint32_t)sys_call1(SYSCALL_CAP_BADGE, cap);
+}
+
 static inline int sys_cap_type(int cap) {
     return sys_call1(SYSCALL_CAP_TYPE, cap);
 }

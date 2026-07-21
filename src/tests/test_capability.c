@@ -453,6 +453,71 @@ static void test_cap_object_stale_on_reuse(void) {
 }
 
 /*============================================================================
+ * Test 17c: M2-#7 — mint 派生 cap 衰减 rights + 设 badge
+ *
+ * mint = derive + badge。验证:
+ * - child rights ⊆ parent rights
+ * - child.badge = 调用方指定值
+ * - child 共享 parent 的 object (不创建新对象)
+ * - superset rights 被拒绝
+ *============================================================================*/
+static void test_cap_mint_badge(void) {
+    test_section("Test 17c: mint with rights subset + badge (M2-#7)");
+
+#if CAP_ENABLE
+    int obj = 0xAB;
+    cap_id_t parent = cap_create(&obj, CAP_OBJ_ENDPOINT,
+                                 CAP_READ | CAP_WRITE | CAP_GRANT, 1);
+    TEST_ASSERT(parent != ((cap_id_t)-1), "M2-#7: parent cap created");
+
+    /* mint: 衰减到 CAP_READ,设 badge=0x1234 */
+    cap_id_t child = cap_mint_for(NULL, parent, CAP_READ, 0x1234U);
+    TEST_ASSERT(child != ((cap_id_t)-1), "M2-#7: mint child created");
+    TEST_ASSERT(child != parent, "M2-#7: mint child is distinct cap");
+
+    /* rights 应该是 CAP_READ (衰减后) */
+    uint8_t child_rights = 0;
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_get_rights(child, &child_rights),
+                   "M2-#7: child rights queryable");
+    TEST_ASSERT_EQ((int)CAP_READ, (int)child_rights,
+                   "M2-#7: child rights = CAP_READ (subset)");
+
+    /* badge 应该是 0x1234 */
+    TEST_ASSERT_EQ(0x1234U, cap_get_badge(child),
+                   "M2-#7: child badge = 0x1234");
+
+    /* child 应该能 resolve 到同一 object */
+    void *p1 = cap_resolve(parent, CAP_OBJ_ENDPOINT, CAP_READ);
+    void *p2 = cap_resolve(child, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(p1 == p2 && p1 == &obj,
+                "M2-#7: child shares parent object");
+
+    /* parent badge 应该是 0 (mint 不影响 parent) */
+    TEST_ASSERT_EQ(0U, cap_get_badge(parent),
+                   "M2-#7: parent badge stays 0");
+
+    /* superset rights 被拒绝 */
+    cap_id_t bad = cap_mint_for(NULL, parent,
+                                CAP_READ | CAP_MANAGE, 0U);
+    TEST_ASSERT(bad == ((cap_id_t)-1),
+                "M2-#7: mint rejects superset rights");
+
+    /* 没 CAP_GRANT 的 parent 不能 mint */
+    cap_id_t no_grant = cap_create(&obj, CAP_OBJ_ENDPOINT, CAP_READ, 1);
+    cap_id_t bad2 = cap_mint_for(NULL, no_grant, CAP_READ, 0U);
+    TEST_ASSERT(bad2 == ((cap_id_t)-1),
+                "M2-#7: mint rejected without CAP_GRANT");
+
+    cap_delete(child);
+    cap_delete(parent);
+    cap_delete(no_grant);
+#else
+    test_skip("CAP_ENABLE off");
+#endif
+}
+
+/*============================================================================
  * Test 18: parent revoke cascades to derived children
  *============================================================================*/
 
@@ -1205,6 +1270,7 @@ static void test_capability_module(void) {
     test_cap_no_permission();
     test_cap_stale_generation();
     test_cap_object_stale_on_reuse();
+    test_cap_mint_badge();
     test_cap_revoke_cascade();
     test_cap_delete_preserves_children();
     test_cap_cspace_required_for_user();
