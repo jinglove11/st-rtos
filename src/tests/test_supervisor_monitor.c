@@ -248,9 +248,7 @@ static void test_user_forever_wait(void) {
     }
 
     tcb_t *task = task_get_tcb(tid);
-    cap_id_t ep_cap = cap_create_for(task,
-                                     (void *)(uintptr_t)(ep + 1),
-                                     CAP_OBJ_ENDPOINT, CAP_READ);
+    cap_id_t ep_cap = cap_create_for(task, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_READ);
     TEST_ASSERT(ep_cap >= 0, "wait-forever USER task receives endpoint cap");
     if (ep_cap < 0) {
         (void)task_delete(tid);

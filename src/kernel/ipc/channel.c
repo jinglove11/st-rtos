@@ -26,6 +26,7 @@
  *============================================================================*/
 
 typedef struct {
+    kobject_header_t hdr;            // M2-Step3b: 对象 header
     task_id_t   peer_a;
     task_id_t   peer_b;
     void       *shm;
@@ -321,7 +322,13 @@ ch_id_t channel_create(uint16_t msg_size, uint32_t shm_size) {
     }
 
     channel_t *ch = &ch_pool[id];
+    /* M2-Step3b: 跨 memset 保留 generation */
+    uint16_t saved_gen = ch->hdr.generation;
     memset(ch, 0, sizeof(channel_t));
+    kobj_header_init(&ch->hdr, CAP_OBJ_CHANNEL);
+    if (saved_gen != 0) {
+        ch->hdr.generation = saved_gen;
+    }
 
     ch->peer_a   = KERN_INVALID_ID;
     ch->peer_b   = KERN_INVALID_ID;
@@ -374,14 +381,32 @@ kern_err_t channel_delete(ch_id_t ch_id) {
     memset(ch_cap_count_buffers[ch_id], 0, sizeof(ch_cap_count_buffers[ch_id]));
 
 #if CAP_ENABLE
-    /* M2-Step1: 撤销所有任务持有的指向此 channel 的 cap,避免悬空句柄 */
-    (void)cap_revoke_object((void *)(uintptr_t)(ch_id + 1), CAP_OBJ_CHANNEL);
+    /* M2-Step1+3b: 撤销所有任务持有的指向此 channel 的 cap。Step3b 改真指针。 */
+    (void)cap_revoke_object(ch, CAP_OBJ_CHANNEL);
 #endif
+    /* M2-Step3b: bump generation 跨 memset 保留 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&ch->hdr);
     memset(ch, 0, sizeof(channel_t));
+    ch->hdr.obj_type   = CAP_OBJ_CHANNEL;
+    ch->hdr.generation = next_gen;
     free_ch_id(ch_id);
 
     irq_spin_unlock(&ch_lock, crit);
     return KERN_OK;
+}
+
+/* M2-Step3b: cap 路径 id ↔ 对象指针 转换。 */
+ch_id_t channel_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    channel_t *ch = (channel_t *)obj;
+    ch_id_t id = (ch_id_t)(ch - ch_pool);
+    if (id < 0 || id >= KERN_MAX_CHANNELS) return KERN_INVALID_ID;
+    return id;
+}
+
+void *channel_obj_for_cap(ch_id_t id) {
+    if (id < 0 || id >= KERN_MAX_CHANNELS) return NULL;
+    return (void *)&ch_pool[id];
 }
 
 void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {

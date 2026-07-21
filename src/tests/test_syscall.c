@@ -472,8 +472,7 @@ static void test_user_timer_endpoint_notification(void) {
         return;
     }
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "user timer endpoint cap created");
     if (ep_cap < 0) {
         timer_delete(tid);
@@ -675,8 +674,7 @@ static void test_user_shm_map_region_exhaustion(void) {
     TEST_ASSERT(ep >= 0, "SHM exhaustion endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "SHM exhaustion endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1230,8 +1228,7 @@ static void test_user_endpoint_service_nonblocking(void) {
     TEST_ASSERT(ep >= 0, "service endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "service endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1284,8 +1281,7 @@ static void test_user_endpoint_reply_cap(void) {
     TEST_ASSERT(ep >= 0, "reply-cap endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "reply-cap endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1345,8 +1341,7 @@ static void test_user_endpoint_reply_cap_timeout(void) {
     TEST_ASSERT(ep >= 0, "reply-cap-timeout endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "reply-cap-timeout endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1410,8 +1405,7 @@ static void test_user_endpoint_recv_sleep_timeout(void) {
     TEST_ASSERT(ep >= 0, "timeout endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "timeout endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1459,8 +1453,7 @@ static void test_user_endpoint_send_sleep_reply(void) {
     TEST_ASSERT(ep >= 0, "client endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "client endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1516,8 +1509,7 @@ static void test_user_endpoint_send_caps_sleepable(void) {
     TEST_ASSERT(ep >= 0, "send_caps endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "send_caps endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1608,8 +1600,7 @@ static void test_user_endpoint_recv_caps_sleepable(void) {
     TEST_ASSERT(ep >= 0, "recv_caps endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "recv_caps endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1697,8 +1688,7 @@ static void test_user_endpoint_recv_mem_cap_sleepable(void) {
     TEST_ASSERT(ep >= 0, "recv mem cap endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "recv mem cap endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1780,8 +1770,7 @@ static void test_user_endpoint_send_sleep_timeout(void) {
     TEST_ASSERT(ep >= 0, "send-timeout endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "send-timeout endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1829,8 +1818,7 @@ static void test_user_endpoint_send_sleep_delete(void) {
     TEST_ASSERT(ep >= 0, "send-delete endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "send-delete endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -1880,8 +1868,7 @@ static void test_user_endpoint_send_nowait_timeout(void) {
     TEST_ASSERT(ep >= 0, "send-nowait endpoint created");
     if (ep < 0) return;
 
-    cap_id_t ep_cap = cap_create((void *)(uintptr_t)(ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t ep_cap = cap_create(endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     TEST_ASSERT(ep_cap >= 0, "send-nowait endpoint cap created");
     if (ep_cap < 0) {
         endpoint_delete(ep);
@@ -2556,8 +2543,7 @@ static void test_user_channel_recv_sleepable(void) {
     TEST_ASSERT(ch >= 0, "sleepable channel created");
     if (ch < 0) return;
 
-    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
-                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    cap_id_t ch_cap = cap_create(channel_obj_for_cap(ch), CAP_OBJ_CHANNEL, CAP_FULL, 0);
     TEST_ASSERT(ch_cap >= 0, "sleepable channel cap created");
     if (ch_cap < 0) {
         channel_delete(ch);
@@ -2619,8 +2605,7 @@ static void test_user_channel_recv_sleep_timeout(void) {
     TEST_ASSERT(ch >= 0, "timeout channel created");
     if (ch < 0) return;
 
-    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
-                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    cap_id_t ch_cap = cap_create(channel_obj_for_cap(ch), CAP_OBJ_CHANNEL, CAP_FULL, 0);
     TEST_ASSERT(ch_cap >= 0, "timeout channel cap created");
     if (ch_cap < 0) {
         channel_delete(ch);
@@ -2678,8 +2663,7 @@ static void test_user_channel_recv_delete_wakeup(void) {
     TEST_ASSERT(ch >= 0, "delete-wakeup channel created");
     if (ch < 0) return;
 
-    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
-                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    cap_id_t ch_cap = cap_create(channel_obj_for_cap(ch), CAP_OBJ_CHANNEL, CAP_FULL, 0);
     TEST_ASSERT(ch_cap >= 0, "delete-wakeup channel cap created");
     if (ch_cap < 0) {
         channel_delete(ch);
@@ -2738,8 +2722,7 @@ static void test_user_channel_send_sleepable(void) {
     TEST_ASSERT(ch >= 0, "send channel created");
     if (ch < 0) return;
 
-    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
-                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    cap_id_t ch_cap = cap_create(channel_obj_for_cap(ch), CAP_OBJ_CHANNEL, CAP_FULL, 0);
     TEST_ASSERT(ch_cap >= 0, "send channel cap created");
     if (ch_cap < 0) {
         channel_delete(ch);
@@ -2809,8 +2792,7 @@ static void test_user_channel_send_caps_sleepable(void) {
     TEST_ASSERT(ch >= 0, "send_caps channel created");
     if (ch < 0) return;
 
-    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
-                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    cap_id_t ch_cap = cap_create(channel_obj_for_cap(ch), CAP_OBJ_CHANNEL, CAP_FULL, 0);
     TEST_ASSERT(ch_cap >= 0, "send_caps channel cap created");
     if (ch_cap < 0) {
         channel_delete(ch);
@@ -2909,8 +2891,7 @@ static void test_user_channel_recv_caps_sleepable(void) {
     TEST_ASSERT(ch >= 0, "recv_caps channel created");
     if (ch < 0) return;
 
-    cap_id_t ch_cap = cap_create((void *)(uintptr_t)(ch + 1),
-                                 CAP_OBJ_CHANNEL, CAP_FULL, 0);
+    cap_id_t ch_cap = cap_create(channel_obj_for_cap(ch), CAP_OBJ_CHANNEL, CAP_FULL, 0);
     TEST_ASSERT(ch_cap >= 0, "recv_caps channel cap created");
     if (ch_cap < 0) {
         channel_delete(ch);

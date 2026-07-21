@@ -61,4 +61,11 @@ void       endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb);
 /* 返回当前任务在指定 endpoint 上最近 recv 的 sender task id */
 task_id_t  endpoint_last_sender(ep_id_t ep_id);
 
+/*============================================================================
+ * M2-Step3b: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+ep_id_t endpoint_id_from_obj(void *obj);
+void *endpoint_obj_for_cap(ep_id_t id);
+
 #endif /* ENDPOINT_H */

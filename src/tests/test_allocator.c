@@ -104,9 +104,7 @@ static void test_allocator_shm_create_and_map(void) {
     tcb_t *alloc_tcb = task_get_tcb(alloc_id);
     cap_id_t alloc_service_cap = KERN_INVALID_ID;
     if (alloc_tcb != NULL) {
-        alloc_service_cap = cap_create_for(alloc_tcb,
-                                           (void *)(uintptr_t)(alloc_ep + 1),
-                                           CAP_OBJ_ENDPOINT,
+        alloc_service_cap = cap_create_for(alloc_tcb, endpoint_obj_for_cap(alloc_ep), CAP_OBJ_ENDPOINT,
                                            CAP_READ | CAP_WRITE);
     }
     TEST_ASSERT(alloc_service_cap >= 0, "allocator got endpoint cap");
@@ -125,15 +123,11 @@ static void test_allocator_shm_create_and_map(void) {
     cap_id_t client_alloc_cap = KERN_INVALID_ID;  /* client 持有的 allocator ep cap */
     cap_id_t client_inbox_cap = KERN_INVALID_ID;  /* client 持有的自己 inbox cap */
     if (client_tcb != NULL) {
-        client_alloc_cap = cap_create_for(client_tcb,
-                                          (void *)(uintptr_t)(alloc_ep + 1),
-                                          CAP_OBJ_ENDPOINT,
+        client_alloc_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(alloc_ep), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE);
         /* inbox cap 带 TRANSFER,这样 client 能把它 COPY 给 allocator,
          * allocator 再用它推 shm cap 回来 */
-        client_inbox_cap = cap_create_for(client_tcb,
-                                          (void *)(uintptr_t)(client_ep + 1),
-                                          CAP_OBJ_ENDPOINT,
+        client_inbox_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(client_ep), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     TEST_ASSERT(client_alloc_cap >= 0, "client got allocator ep cap");
@@ -211,17 +205,13 @@ static void test_allocator_ping(void) {
     tcb_t *alloc_tcb = task_get_tcb(alloc_id);
     cap_id_t alloc_cap = KERN_INVALID_ID;
     if (alloc_tcb != NULL) {
-        alloc_cap = cap_create_for(alloc_tcb,
-                                   (void *)(uintptr_t)(alloc_ep + 1),
-                                   CAP_OBJ_ENDPOINT,
+        alloc_cap = cap_create_for(alloc_tcb, endpoint_obj_for_cap(alloc_ep), CAP_OBJ_ENDPOINT,
                                    CAP_READ | CAP_WRITE);
     }
 
     /* client 用内核态直接 ping (测试任务本身是特权的) */
     /* 先拿一个 allocator ep cap 给当前测试任务 */
-    cap_id_t self_cap = cap_create_for(sched_get_current(),
-                                       (void *)(uintptr_t)(alloc_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+    cap_id_t self_cap = cap_create_for(sched_get_current(), endpoint_obj_for_cap(alloc_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
     TEST_ASSERT(self_cap >= 0, "ping: test got allocator ep cap");
 

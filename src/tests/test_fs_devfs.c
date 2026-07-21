@@ -91,8 +91,7 @@ static task_id_t create_service(const char *name, task_func_t entry,
     if (tid < 0) return tid;
     tcb_t *tcb = task_get_tcb(tid);
     if (tcb != NULL && out_cap != NULL) {
-        *out_cap = cap_create_for(tcb, (void *)(uintptr_t)(ep + 1),
-                                  CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        *out_cap = cap_create_for(tcb, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
     }
     if (tcb != NULL && tcb->sp != NULL && out_cap != NULL && *out_cap >= 0) {
         uint32_t *r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
@@ -132,12 +131,9 @@ static void test_devfs_forwarding(void) {
     TEST_ASSERT(fs_id >= 0, "fs task created");
     tcb_t *fs_tcb = (fs_id >= 0) ? task_get_tcb(fs_id) : NULL;
     if (fs_tcb != NULL) {
-        fs_cap = cap_create_for(fs_tcb, (void *)(uintptr_t)(fs_ep + 1),
-                                CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        fs_cap = cap_create_for(fs_tcb, endpoint_obj_for_cap(fs_ep), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
         /* fs 还需要 driver 的 ep_cap 来转发 + 注册设备 */
-        cap_id_t fs_drv_cap = cap_create_for(fs_tcb,
-                                             (void *)(uintptr_t)(dev_ep + 1),
-                                             CAP_OBJ_ENDPOINT,
+        cap_id_t fs_drv_cap = cap_create_for(fs_tcb, endpoint_obj_for_cap(dev_ep), CAP_OBJ_ENDPOINT,
                                              CAP_READ | CAP_WRITE);
         /* arg: 低16=fs_cap, 高16=fs_drv_cap */
         if (fs_tcb->sp != NULL && fs_cap >= 0 && fs_drv_cap >= 0) {
@@ -154,8 +150,7 @@ static void test_devfs_forwarding(void) {
     TEST_ASSERT(cli_id >= 0, "client task created");
     tcb_t *cli_tcb = (cli_id >= 0) ? task_get_tcb(cli_id) : NULL;
     if (cli_tcb != NULL) {
-        cli_cap = cap_create_for(cli_tcb, (void *)(uintptr_t)(fs_ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        cli_cap = cap_create_for(cli_tcb, endpoint_obj_for_cap(fs_ep), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
         if (cli_tcb->sp != NULL && cli_cap >= 0) {
             uint32_t *r0 = (uint32_t *)((uint8_t *)cli_tcb->sp + 32U);
             *r0 = (uint32_t)cli_cap;

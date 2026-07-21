@@ -124,9 +124,7 @@ kern_err_t root_bootstrap_prepare(tcb_t *root_task) {
         return KERN_ERR_RESOURCE;
     }
 
-    cap_id_t ep_cap = cap_create_for(root_task,
-                                     (void *)(uintptr_t)(ep_id + 1),
-                                     CAP_OBJ_ENDPOINT, CAP_FULL);
+    cap_id_t ep_cap = cap_create_for(root_task, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL);
     if (ep_cap < 0) {
         (void)endpoint_delete(ep_id);
         cap_delete(task_cap);
@@ -297,17 +295,13 @@ kern_err_t root_bootstrap_create_service_endpoint(cap_id_t service_task_cap,
         return KERN_ERR_RESOURCE;
     }
 
-    cap_id_t root_cap = cap_create_for(root_task,
-                                       (void *)(uintptr_t)(ep_id + 1),
-                                       CAP_OBJ_ENDPOINT, CAP_FULL);
+    cap_id_t root_cap = cap_create_for(root_task, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL);
     if (root_cap < 0) {
         (void)endpoint_delete(ep_id);
         return KERN_ERR_RESOURCE;
     }
 
-    cap_id_t service_cap = cap_create_for(service_task,
-                                          (void *)(uintptr_t)(ep_id + 1),
-                                          CAP_OBJ_ENDPOINT,
+    cap_id_t service_cap = cap_create_for(service_task, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE);
     if (service_cap < 0) {
         cap_delete(root_cap);

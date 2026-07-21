@@ -1793,13 +1793,9 @@ static void test_uart_driver_nameserver_lookup(void) {
     cap_id_t reg_uart_cap = KERN_INVALID_ID;
     tcb_t *reg_tcb = task_get_tcb(reg_client);
     if (reg_tcb != NULL) {
-        reg_ns_cap = cap_create_for(reg_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        reg_ns_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
-        reg_uart_cap = cap_create_for(reg_tcb,
-                                      (void *)(uintptr_t)(uart_ep + 1),
-                                      CAP_OBJ_ENDPOINT,
+        reg_uart_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(uart_ep), CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
 
@@ -1807,13 +1803,9 @@ static void test_uart_driver_nameserver_lookup(void) {
     cap_id_t lookup_inbox_cap = KERN_INVALID_ID;
     tcb_t *lookup_tcb = task_get_tcb(lookup_client);
     if (lookup_tcb != NULL) {
-        lookup_ns_cap = cap_create_for(lookup_tcb,
-                                       (void *)(uintptr_t)(ns_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        lookup_ns_cap = cap_create_for(lookup_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
-        lookup_inbox_cap = cap_create_for(lookup_tcb,
-                                          (void *)(uintptr_t)(inbox_ep + 1),
-                                          CAP_OBJ_ENDPOINT,
+        lookup_inbox_cap = cap_create_for(lookup_tcb, endpoint_obj_for_cap(inbox_ep), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
 
@@ -1919,14 +1911,11 @@ static void test_uart_driver_lookup_release_caps(void) {
 
     tcb_t *ns_tcb = task_get_tcb(ns_id);
     if (ns_tcb != NULL) {
-        ns_service_cap = cap_create_for(ns_tcb,
-                                        (void *)(uintptr_t)(ns_ep + 1),
-                                        CAP_OBJ_ENDPOINT,
+        ns_service_cap = cap_create_for(ns_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                         CAP_READ | CAP_WRITE);
     }
     if (ns_ep >= 0) {
-        ns_root_cap = cap_create((void *)(uintptr_t)(ns_ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+        ns_root_cap = cap_create(endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     }
     TEST_ASSERT(ns_service_cap >= 0,
                 "driver release name-server receives endpoint cap");
@@ -1947,8 +1936,7 @@ static void test_uart_driver_lookup_release_caps(void) {
     TEST_ASSERT(service_ep >= 0, "driver release service endpoint created");
     cap_id_t service_cap = KERN_INVALID_ID;
     if (service_ep >= 0) {
-        service_cap = cap_create((void *)(uintptr_t)(service_ep + 1),
-                                 CAP_OBJ_ENDPOINT,
+        service_cap = cap_create(endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                  CAP_READ | CAP_WRITE | CAP_TRANSFER, 0);
     }
     TEST_ASSERT(service_cap >= 0, "driver release service cap created");
@@ -1964,8 +1952,7 @@ static void test_uart_driver_lookup_release_caps(void) {
     TEST_ASSERT(inbox_ep >= 0, "driver release inbox endpoint created");
     cap_id_t inbox_cap = KERN_INVALID_ID;
     if (inbox_ep >= 0) {
-        inbox_cap = cap_create((void *)(uintptr_t)(inbox_ep + 1),
-                               CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+        inbox_cap = cap_create(endpoint_obj_for_cap(inbox_ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     }
     TEST_ASSERT(inbox_cap >= 0, "driver release inbox cap created");
 
@@ -2092,9 +2079,7 @@ static void test_uart_driver_resource_attach(void) {
     cap_id_t client_mmio_cap = KERN_INVALID_ID;
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ep_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(server_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ep_cap = cap_create_for(client, endpoint_obj_for_cap(server_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
         client_mmio_cap = cap_copy_to(NULL, mmio_cap, client,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER);
@@ -2531,9 +2516,7 @@ static void test_uart_driver_resource_attach_requires_transfer(void) {
     cap_id_t client_mmio_cap = KERN_INVALID_ID;
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ep_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(server_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ep_cap = cap_create_for(client, endpoint_obj_for_cap(server_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
         client_mmio_cap = cap_copy_to(NULL, mmio_cap, client, CAP_READ);
     }
@@ -2658,9 +2641,7 @@ static void test_uart_driver_resource_attach_bad_type(void) {
     cap_id_t client_mmio_cap = KERN_INVALID_ID;
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ep_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(server_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ep_cap = cap_create_for(client, endpoint_obj_for_cap(server_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
         client_mmio_cap = cap_copy_to(NULL, mmio_cap, client,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER);
@@ -4040,9 +4021,7 @@ static void test_uart_driver_user_resource_session(void) {
     cap_id_t client_mmio_cap = KERN_INVALID_ID;
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ep_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(server_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ep_cap = cap_create_for(client, endpoint_obj_for_cap(server_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
         client_mmio_cap = cap_copy_to(NULL, mmio_cap, client,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER);
@@ -4179,9 +4158,7 @@ static void test_uart_driver_user_irq_only_open_rejected(void) {
     cap_id_t client_irq_cap = KERN_INVALID_ID;
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ep_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(server_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ep_cap = cap_create_for(client, endpoint_obj_for_cap(server_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
         client_irq_cap = cap_copy_to(NULL, irq_cap, client,
                                      CAP_READ | CAP_WRITE | CAP_TRANSFER);
@@ -4496,9 +4473,7 @@ static void test_uart_driver_user_irq_event_client(void) {
     cap_id_t client_ep_cap = KERN_INVALID_ID;
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ep_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(server_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ep_cap = cap_create_for(client, endpoint_obj_for_cap(server_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
     }
     TEST_ASSERT(client_ep_cap >= 0,

@@ -1137,7 +1137,7 @@ static int cmd_driver_release_owned_inbox(void) {
     cap_id_t inbox_cap = driver_runtime_inbox_cap();
     void *obj = cap_resolve(inbox_cap, CAP_OBJ_ENDPOINT, CAP_MANAGE);
     if (obj != NULL) {
-        ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1U);
+        ep_id_t ep_id = endpoint_id_from_obj(obj);  /* M2-Step3b */
         (void)endpoint_delete(ep_id);
     } else {
         cap_delete(inbox_cap);
@@ -1651,8 +1651,7 @@ static void cmd_driver_bind_inbox(const char *arg) {
             return;
         }
 
-        cap_id_t inbox_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
-                                        CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+        cap_id_t inbox_cap = cap_create(endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
         if (inbox_cap < 0) {
             (void)endpoint_delete(ep_id);
             sh_puts("driver bind-inbox: resource\r\n");
@@ -1782,9 +1781,7 @@ static void cmd_driver_uart_start(void) {
     }
 
     tcb_t *uart_tcb = task_get_tcb(tid);
-    cap_id_t service_cap = cap_create_for(uart_tcb,
-                                          (void *)(uintptr_t)(ep_id + 1),
-                                          CAP_OBJ_ENDPOINT,
+    cap_id_t service_cap = cap_create_for(uart_tcb, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE);
     if (service_cap < 0) {
         (void)task_delete(tid);
@@ -1793,8 +1790,7 @@ static void cmd_driver_uart_start(void) {
         return;
     }
 
-    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
-                                   CAP_OBJ_ENDPOINT,
+    cap_id_t root_cap = cap_create(endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                    CAP_READ | CAP_WRITE | CAP_TRANSFER,
                                    0);
     if (root_cap < 0) {
@@ -1867,9 +1863,7 @@ static void cmd_driver_ns_start(void) {
     }
 
     tcb_t *ns_tcb = task_get_tcb(tid);
-    cap_id_t ns_service_cap = cap_create_for(ns_tcb,
-                                             (void *)(uintptr_t)(ep_id + 1),
-                                             CAP_OBJ_ENDPOINT,
+    cap_id_t ns_service_cap = cap_create_for(ns_tcb, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                              CAP_READ | CAP_WRITE);
     if (ns_service_cap < 0) {
         (void)task_delete(tid);
@@ -1878,8 +1872,7 @@ static void cmd_driver_ns_start(void) {
         return;
     }
 
-    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
-                                   CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t root_cap = cap_create(endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     if (root_cap < 0) {
         (void)task_delete(tid);
         (void)endpoint_delete(ep_id);
@@ -2325,9 +2318,7 @@ static void cmd_fs_start(void) {
     }
 
     tcb_t *fs_tcb = task_get_tcb(tid);
-    cap_id_t service_cap = cap_create_for(fs_tcb,
-                                          (void *)(uintptr_t)(ep_id + 1),
-                                          CAP_OBJ_ENDPOINT,
+    cap_id_t service_cap = cap_create_for(fs_tcb, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE);
     if (service_cap < 0) {
         (void)task_delete(tid);
@@ -2336,8 +2327,7 @@ static void cmd_fs_start(void) {
         return;
     }
 
-    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
-                                   CAP_OBJ_ENDPOINT,
+    cap_id_t root_cap = cap_create(endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                    CAP_READ | CAP_WRITE | CAP_TRANSFER,
                                    0);
     if (root_cap < 0) {
@@ -2951,8 +2941,7 @@ static void cmd_fs_bind_inbox(const char *arg) {
         sh_puts("fs bind-inbox: resource\r\n");
         return;
     }
-    cap_id_t cap = cap_create((void *)(uintptr_t)(ep_id + 1),
-                              CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t cap = cap_create(endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     if (cap < 0) {
         (void)endpoint_delete(ep_id);
         sh_puts("fs bind-inbox: resource\r\n");
@@ -2986,9 +2975,7 @@ static void cmd_fs_ns_start(void) {
         return;
     }
     tcb_t *ns_tcb = task_get_tcb(tid);
-    cap_id_t service_cap = cap_create_for(ns_tcb,
-                                          (void *)(uintptr_t)(ep_id + 1),
-                                          CAP_OBJ_ENDPOINT,
+    cap_id_t service_cap = cap_create_for(ns_tcb, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE);
     if (service_cap < 0) {
         (void)task_delete(tid);
@@ -2996,8 +2983,7 @@ static void cmd_fs_ns_start(void) {
         sh_puts("fs ns-start: service cap\r\n");
         return;
     }
-    cap_id_t root_cap = cap_create((void *)(uintptr_t)(ep_id + 1),
-                                   CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+    cap_id_t root_cap = cap_create(endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     if (root_cap < 0) {
         (void)task_delete(tid);
         (void)endpoint_delete(ep_id);

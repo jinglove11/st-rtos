@@ -72,8 +72,7 @@ static task_id_t create_user_with_cap(const char *name, task_func_t entry,
     tcb_t *tcb = task_get_tcb(tid);
     cap_id_t cap = KERN_INVALID_ID;
     if (tcb != NULL) {
-        cap = cap_create_for(tcb, (void *)(uintptr_t)(ep_id + 1),
-                             CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        cap = cap_create_for(tcb, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
     }
     if (tcb != NULL && tcb->sp != NULL && cap >= 0) {
         uint32_t *r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);

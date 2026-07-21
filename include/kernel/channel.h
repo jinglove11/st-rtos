@@ -52,4 +52,11 @@ kern_err_t channel_recv_caps(ch_id_t ch_id, void *msg,
 void      *channel_get_shm(ch_id_t ch_id);
 void       channel_cleanup_task(void *channel_obj, tcb_t *tcb);
 
+/*============================================================================
+ * M2-Step3b: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+ch_id_t channel_id_from_obj(void *obj);
+void *channel_obj_for_cap(ch_id_t id);
+
 #endif /* CHANNEL_H */

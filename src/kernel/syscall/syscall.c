@@ -526,8 +526,10 @@ static int sys_ep_create(uint32_t a1, uint32_t a2, uint32_t a3,
                                  (uint16_t)a2, (uint16_t)a3);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_ENDPOINT,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    /* M2-Step3b: 真指针 + obj_generation 启用 cross-check */
+    void *obj = endpoint_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_ENDPOINT, CAP_FULL, obj_gen);
     if (cap < 0) { endpoint_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -542,7 +544,7 @@ static int sys_ep_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    ep_id_t id = (ep_id_t)((uintptr_t)obj - 1);
+    ep_id_t id = endpoint_id_from_obj(obj);
     kern_err_t ret = endpoint_delete(id);
     cap_delete((cap_id_t)a1);
     return ret;
@@ -558,7 +560,7 @@ static int sys_ep_send(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    ep_id_t ep_id = endpoint_id_from_obj(obj);
 #else
     ep_id_t ep_id = (ep_id_t)a1;
 #endif
@@ -591,7 +593,7 @@ static int sys_ep_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
     }
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    ep_id_t ep_id = endpoint_id_from_obj(obj);
     uint16_t msg_size = endpoint_msg_size(ep_id);
     if (msg_size == 0U) return KERN_ERR_PARAM;
     if (!user_access_ok((const void *)(uintptr_t)a2, msg_size,
@@ -637,7 +639,7 @@ static int sys_ep_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    ep_id_t ep_id = endpoint_id_from_obj(obj);
 #else
     ep_id_t ep_id = (ep_id_t)a1;
 #endif
@@ -664,7 +666,7 @@ static int sys_ep_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    ep_id_t ep_id = endpoint_id_from_obj(obj);
     uint16_t msg_size = endpoint_msg_size(ep_id);
     if (msg_size == 0U) return KERN_ERR_PARAM;
     if (!user_access_ok((void *)(uintptr_t)a2, msg_size,
@@ -712,7 +714,7 @@ static int sys_ep_reply(uint32_t a1, uint32_t a2, uint32_t a3,
     }
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return endpoint_reply((ep_id_t)((uintptr_t)obj - 1), msg);
+    return endpoint_reply(endpoint_id_from_obj(obj), msg);
 #else
     return endpoint_reply((ep_id_t)a1, msg);
 #endif
@@ -724,7 +726,7 @@ static int sys_ep_take_reply(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return (int)endpoint_take_reply_cap((ep_id_t)((uintptr_t)obj - 1));
+    return (int)endpoint_take_reply_cap(endpoint_id_from_obj(obj));
 #else
     U(a1);
     return KERN_ERR_CAP;
@@ -742,8 +744,10 @@ static int sys_ch_create(uint32_t a1, uint32_t a2, uint32_t a3,
     ch_id_t id = channel_create((uint16_t)a1, a2);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_CHANNEL,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    /* M2-Step3b: 真指针 + obj_generation */
+    void *obj = channel_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_CHANNEL, CAP_FULL, obj_gen);
     if (cap < 0) { channel_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -757,7 +761,7 @@ static int sys_ch_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    ch_id_t id = (ch_id_t)((uintptr_t)obj - 1);
+    ch_id_t id = channel_id_from_obj(obj);
     kern_err_t ret = channel_delete(id);
     cap_delete((cap_id_t)a1);
     return ret;
@@ -772,7 +776,7 @@ static int sys_ch_connect(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return channel_connect((ch_id_t)((uintptr_t)obj - 1), (task_id_t)a2, (task_id_t)a3);
+    return channel_connect(channel_id_from_obj(obj), (task_id_t)a2, (task_id_t)a3);
 #else
     return channel_connect((ch_id_t)a1, (task_id_t)a2, (task_id_t)a3);
 #endif
@@ -794,7 +798,7 @@ static int sys_ch_send(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return channel_send_syscall((ch_id_t)((uintptr_t)obj - 1), msg, a3);
+    return channel_send_syscall(channel_id_from_obj(obj), msg, a3);
 #else
     return channel_send_syscall((ch_id_t)a1, msg, a3);
 #endif
@@ -835,7 +839,7 @@ static int sys_ch_send_caps(uint32_t a1, uint32_t a2, uint32_t a3,
 
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return channel_send_caps_syscall((ch_id_t)((uintptr_t)obj - 1),
+    return channel_send_caps_syscall(channel_id_from_obj(obj),
                                      msg, xfers, cap_count, a5);
 #else
     U(a1);U(a2);U(a3);U(a4);U(a5);
@@ -855,7 +859,7 @@ static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
         void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
         if (!obj) return KERN_ERR_CAP;
-        return channel_recv_syscall((ch_id_t)((uintptr_t)obj - 1),
+        return channel_recv_syscall(channel_id_from_obj(obj),
                                     (void *)(uintptr_t)a2, a3);
 #else
         return channel_recv_syscall((ch_id_t)a1, (void *)(uintptr_t)a2, a3);
@@ -866,7 +870,7 @@ static int sys_ch_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    kern_err_t ret = channel_recv((ch_id_t)((uintptr_t)obj - 1), msg, a3);
+    kern_err_t ret = channel_recv(channel_id_from_obj(obj), msg, a3);
 #else
     kern_err_t ret = channel_recv((ch_id_t)a1, msg, a3);
 #endif
@@ -896,7 +900,7 @@ static int sys_ch_recv_caps(uint32_t a1, uint32_t a2, uint32_t a3,
 
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return channel_recv_caps_syscall((ch_id_t)((uintptr_t)obj - 1),
+    return channel_recv_caps_syscall(channel_id_from_obj(obj),
                                      (void *)(uintptr_t)a2,
                                      (cap_id_t *)(uintptr_t)a3,
                                      (uint8_t *)(uintptr_t)a4,
@@ -913,7 +917,7 @@ static int sys_ch_get_shm(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    void *shm = channel_get_shm((ch_id_t)((uintptr_t)obj - 1));
+    void *shm = channel_get_shm(channel_id_from_obj(obj));
     return (int)(uintptr_t)shm;
 #else
     void *shm = channel_get_shm((ch_id_t)a1);
@@ -985,7 +989,7 @@ static int sys_timer_bind(uint32_t a1, uint32_t a2, uint32_t a3,
     void *ep_obj = cap_resolve((cap_id_t)a2, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!ep_obj) return KERN_ERR_CAP;
     return timer_bind_endpoint(timer_id_from_obj(timer_obj),
-                               (ep_id_t)((uintptr_t)ep_obj - 1),
+                               endpoint_id_from_obj(ep_obj),
                                a3);
 #else
     return timer_bind_endpoint((timer_id_t)a1, (ep_id_t)a2, a3);
@@ -1161,7 +1165,7 @@ static int sys_irq_bind(uint32_t a1, uint32_t a2, uint32_t a3,
     if (ep_obj == NULL) {
         return KERN_ERR_CAP;
     }
-    ep_id_t ep_id = (ep_id_t)((uintptr_t)ep_obj - 1);
+    ep_id_t ep_id = endpoint_id_from_obj(ep_obj);
     return kirq_bind_endpoint((cap_id_t)a1, ep_id, a3);
 #else
     U(a1);U(a2);U(a3);
@@ -1226,7 +1230,7 @@ static int sys_ep_sender(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_ENDPOINT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    ep_id_t ep_id = (ep_id_t)((uintptr_t)obj - 1);
+    ep_id_t ep_id = endpoint_id_from_obj(obj);
     return (int)endpoint_last_sender(ep_id);
 #else
     return (int)endpoint_last_sender((ep_id_t)a1);
@@ -1321,9 +1325,12 @@ static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
     if (cur != NULL && (cur->attrs & TASK_ATTR_USER) != 0) {
         return KERN_ERR_PERM;
     }
-    cap_id_t cap = cap_create_for(cur,
-                                  (void *)(uintptr_t)(kern_fault_ep + 1),
-                                  CAP_OBJ_ENDPOINT, CAP_FULL);
+    /* M2-Step3b: 真指针 + obj_generation */
+    void *fault_obj = endpoint_obj_for_cap(kern_fault_ep);
+    uint16_t fault_gen = fault_obj != NULL
+        ? ((const kobject_header_t *)fault_obj)->generation : 0;
+    cap_id_t cap = cap_create_for_gen(cur, fault_obj,
+                                      CAP_OBJ_ENDPOINT, CAP_FULL, fault_gen);
     if (cap < 0) {
         return KERN_ERR_RESOURCE;
     }

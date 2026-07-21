@@ -628,14 +628,11 @@ static void test_fs_runtime_lookup_release_caps(void) {
 
     tcb_t *ns_tcb = task_get_tcb(ns_id);
     if (ns_tcb != NULL) {
-        ns_service_cap = cap_create_for(ns_tcb,
-                                        (void *)(uintptr_t)(ns_ep + 1),
-                                        CAP_OBJ_ENDPOINT,
+        ns_service_cap = cap_create_for(ns_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                         CAP_READ | CAP_WRITE);
     }
     if (ns_ep >= 0) {
-        ns_root_cap = cap_create((void *)(uintptr_t)(ns_ep + 1),
-                                 CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+        ns_root_cap = cap_create(endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     }
     TEST_ASSERT(ns_service_cap >= 0,
                 "FS runtime name-server receives endpoint cap");
@@ -656,8 +653,7 @@ static void test_fs_runtime_lookup_release_caps(void) {
     TEST_ASSERT(service_ep >= 0, "FS runtime service endpoint created");
     cap_id_t service_cap = KERN_INVALID_ID;
     if (service_ep >= 0) {
-        service_cap = cap_create((void *)(uintptr_t)(service_ep + 1),
-                                 CAP_OBJ_ENDPOINT,
+        service_cap = cap_create(endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                  CAP_READ | CAP_WRITE | CAP_TRANSFER, 0);
     }
     TEST_ASSERT(service_cap >= 0, "FS runtime service cap created");
@@ -673,8 +669,7 @@ static void test_fs_runtime_lookup_release_caps(void) {
     TEST_ASSERT(inbox_ep >= 0, "FS runtime inbox endpoint created");
     cap_id_t inbox_cap = KERN_INVALID_ID;
     if (inbox_ep >= 0) {
-        inbox_cap = cap_create((void *)(uintptr_t)(inbox_ep + 1),
-                               CAP_OBJ_ENDPOINT, CAP_FULL, 0);
+        inbox_cap = cap_create(endpoint_obj_for_cap(inbox_ep), CAP_OBJ_ENDPOINT, CAP_FULL, 0);
     }
     TEST_ASSERT(inbox_cap >= 0, "FS runtime inbox cap created");
 
@@ -1139,7 +1134,7 @@ static void test_root_bootstrap_initial_task_cap(void) {
                                       CAP_OBJ_ENDPOINT, CAP_WRITE);
         TEST_ASSERT_NOT_NULL(ep_obj, "root task can resolve initial endpoint cap");
         if (ep_obj != NULL) {
-            ep_id_t ep_id = (ep_id_t)((uintptr_t)ep_obj - 1U);
+            ep_id_t ep_id = endpoint_id_from_obj(ep_obj);  /* M2-Step3b */
             TEST_ASSERT_EQ((int)info.root_endpoint, (int)ep_id,
                            "root endpoint cap matches bootstrap record");
             TEST_ASSERT(endpoint_exists(ep_id),
@@ -1449,12 +1444,12 @@ static void test_root_bootstrap_service_endpoint(void) {
 
     void *root_ep = cap_lookup_for(root, root_ep_cap,
                                    CAP_OBJ_ENDPOINT, CAP_MANAGE);
-    TEST_ASSERT_EQ((uintptr_t)(ep_id + 1), (uintptr_t)root_ep,
+    TEST_ASSERT_EQ((int)ep_id, (int)endpoint_id_from_obj(root_ep),
                    "root service endpoint cap resolves endpoint");
 
     void *service_ep = cap_lookup_for(service, service_ep_cap,
                                       CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
-    TEST_ASSERT_EQ((uintptr_t)(ep_id + 1), (uintptr_t)service_ep,
+    TEST_ASSERT_EQ((int)ep_id, (int)endpoint_id_from_obj(service_ep),
                    "service endpoint cap resolves endpoint");
 
     service_ep = cap_lookup_for(service, service_ep_cap,
@@ -1826,13 +1821,9 @@ static void test_nameserver_register_service(void) {
 
     tcb_t *client = task_get_tcb(client_id);
     if (client != NULL) {
-        client_ns_cap = cap_create_for(client,
-                                       (void *)(uintptr_t)(ns_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ns_cap = cap_create_for(client, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
-        client_service_cap = cap_create_for(client,
-                                            (void *)(uintptr_t)(service_ep + 1),
-                                            CAP_OBJ_ENDPOINT,
+        client_service_cap = cap_create_for(client, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                             CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     TEST_ASSERT(client_ns_cap >= 0,
@@ -1954,24 +1945,16 @@ static void test_nameserver_lookup_service(void) {
 
     tcb_t *reg_tcb = task_get_tcb(reg_client);
     if (reg_tcb != NULL) {
-        reg_ns_cap = cap_create_for(reg_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        reg_ns_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
-        reg_service_cap = cap_create_for(reg_tcb,
-                                         (void *)(uintptr_t)(service_ep + 1),
-                                         CAP_OBJ_ENDPOINT,
+        reg_service_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     tcb_t *lookup_tcb = task_get_tcb(lookup_client);
     if (lookup_tcb != NULL) {
-        lookup_ns_cap = cap_create_for(lookup_tcb,
-                                       (void *)(uintptr_t)(ns_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        lookup_ns_cap = cap_create_for(lookup_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
-        lookup_inbox_cap = cap_create_for(lookup_tcb,
-                                          (void *)(uintptr_t)(inbox_ep + 1),
-                                          CAP_OBJ_ENDPOINT,
+        lookup_inbox_cap = cap_create_for(lookup_tcb, endpoint_obj_for_cap(inbox_ep), CAP_OBJ_ENDPOINT,
                                           CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
 
@@ -2119,31 +2102,21 @@ static void test_nameserver_negative_paths(void) {
 
     tcb_t *missing_tcb = task_get_tcb(missing_client);
     if (missing_tcb != NULL) {
-        missing_ns_cap = cap_create_for(missing_tcb,
-                                        (void *)(uintptr_t)(ns_ep + 1),
-                                        CAP_OBJ_ENDPOINT,
+        missing_ns_cap = cap_create_for(missing_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                         CAP_READ | CAP_WRITE);
     }
     tcb_t *reg_tcb = task_get_tcb(reg_client);
     if (reg_tcb != NULL) {
-        reg_ns_cap = cap_create_for(reg_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        reg_ns_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
-        reg_service_cap = cap_create_for(reg_tcb,
-                                         (void *)(uintptr_t)(service_ep + 1),
-                                         CAP_OBJ_ENDPOINT,
+        reg_service_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     tcb_t *dup_tcb = task_get_tcb(dup_client);
     if (dup_tcb != NULL) {
-        dup_ns_cap = cap_create_for(dup_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        dup_ns_cap = cap_create_for(dup_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
-        dup_service_cap = cap_create_for(dup_tcb,
-                                         (void *)(uintptr_t)(service_ep + 1),
-                                         CAP_OBJ_ENDPOINT,
+        dup_service_cap = cap_create_for(dup_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
 
@@ -2313,27 +2286,19 @@ static void test_nameserver_unregister_service(void) {
 
     tcb_t *reg_tcb = task_get_tcb(reg_client);
     if (reg_tcb != NULL) {
-        reg_ns_cap = cap_create_for(reg_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        reg_ns_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
-        reg_service_cap = cap_create_for(reg_tcb,
-                                         (void *)(uintptr_t)(service_ep + 1),
-                                         CAP_OBJ_ENDPOINT,
+        reg_service_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     tcb_t *unreg_tcb = task_get_tcb(unreg_client);
     if (unreg_tcb != NULL) {
-        unreg_ns_cap = cap_create_for(unreg_tcb,
-                                      (void *)(uintptr_t)(ns_ep + 1),
-                                      CAP_OBJ_ENDPOINT,
+        unreg_ns_cap = cap_create_for(unreg_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_WRITE);
     }
     tcb_t *missing_tcb = task_get_tcb(missing_client);
     if (missing_tcb != NULL) {
-        missing_ns_cap = cap_create_for(missing_tcb,
-                                        (void *)(uintptr_t)(ns_ep + 1),
-                                        CAP_OBJ_ENDPOINT,
+        missing_ns_cap = cap_create_for(missing_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                         CAP_READ | CAP_WRITE);
     }
 
@@ -2579,13 +2544,9 @@ static void test_nameserver_cap_recycle_service(void) {
 
     tcb_t *client_tcb = task_get_tcb(client_id);
     if (client_tcb != NULL) {
-        client_ns_cap = cap_create_for(client_tcb,
-                                       (void *)(uintptr_t)(ns_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ns_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
-        client_service_cap = cap_create_for(client_tcb,
-                                            (void *)(uintptr_t)(service_ep + 1),
-                                            CAP_OBJ_ENDPOINT,
+        client_service_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                             CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     TEST_ASSERT(client_ns_cap >= 0, "cap recycle client receives ns cap");
@@ -2693,13 +2654,9 @@ static void test_nameserver_registry_full_service(void) {
 
     tcb_t *client_tcb = task_get_tcb(client_id);
     if (client_tcb != NULL) {
-        client_ns_cap = cap_create_for(client_tcb,
-                                       (void *)(uintptr_t)(ns_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_ns_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
-        client_service_cap = cap_create_for(client_tcb,
-                                            (void *)(uintptr_t)(service_ep + 1),
-                                            CAP_OBJ_ENDPOINT,
+        client_service_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                             CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     TEST_ASSERT(client_ns_cap >= 0, "registry full client receives ns cap");
@@ -2820,27 +2777,19 @@ static void test_nameserver_unregister_owner_service(void) {
 
     tcb_t *reg_tcb = task_get_tcb(reg_client);
     if (reg_tcb != NULL) {
-        reg_ns_cap = cap_create_for(reg_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        reg_ns_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
-        reg_service_cap = cap_create_for(reg_tcb,
-                                         (void *)(uintptr_t)(service_ep + 1),
-                                         CAP_OBJ_ENDPOINT,
+        reg_service_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(service_ep), CAP_OBJ_ENDPOINT,
                                          CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }
     tcb_t *bad_tcb = task_get_tcb(bad_client);
     if (bad_tcb != NULL) {
-        bad_ns_cap = cap_create_for(bad_tcb,
-                                    (void *)(uintptr_t)(ns_ep + 1),
-                                    CAP_OBJ_ENDPOINT,
+        bad_ns_cap = cap_create_for(bad_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                     CAP_READ | CAP_WRITE);
     }
     tcb_t *good_tcb = task_get_tcb(good_client);
     if (good_tcb != NULL) {
-        good_ns_cap = cap_create_for(good_tcb,
-                                     (void *)(uintptr_t)(ns_ep + 1),
-                                     CAP_OBJ_ENDPOINT,
+        good_ns_cap = cap_create_for(good_tcb, endpoint_obj_for_cap(ns_ep), CAP_OBJ_ENDPOINT,
                                      CAP_READ | CAP_WRITE);
     }
     TEST_ASSERT(reg_ns_cap >= 0, "owner register client receives ns cap");
@@ -2977,16 +2926,12 @@ static void test_fs_server_basic_session(void) {
 
     tcb_t *fs_tcb = task_get_tcb(fs_id);
     if (fs_tcb != NULL) {
-        fs_service_cap = cap_create_for(fs_tcb,
-                                        (void *)(uintptr_t)(fs_ep + 1),
-                                        CAP_OBJ_ENDPOINT,
+        fs_service_cap = cap_create_for(fs_tcb, endpoint_obj_for_cap(fs_ep), CAP_OBJ_ENDPOINT,
                                         CAP_READ | CAP_WRITE);
     }
     tcb_t *client_tcb = task_get_tcb(client_id);
     if (client_tcb != NULL) {
-        client_fs_cap = cap_create_for(client_tcb,
-                                       (void *)(uintptr_t)(fs_ep + 1),
-                                       CAP_OBJ_ENDPOINT,
+        client_fs_cap = cap_create_for(client_tcb, endpoint_obj_for_cap(fs_ep), CAP_OBJ_ENDPOINT,
                                        CAP_READ | CAP_WRITE);
     }
     TEST_ASSERT(fs_service_cap >= 0, "FS server receives endpoint cap");
@@ -3082,9 +3027,7 @@ static void test_fs_server_negative_protocol(void) {
 
     tcb_t *fs_tcb = task_get_tcb(fs_id);
     if (fs_tcb != NULL) {
-        fs_service_cap = cap_create_for(fs_tcb,
-                                        (void *)(uintptr_t)(fs_ep + 1),
-                                        CAP_OBJ_ENDPOINT,
+        fs_service_cap = cap_create_for(fs_tcb, endpoint_obj_for_cap(fs_ep), CAP_OBJ_ENDPOINT,
                                         CAP_READ | CAP_WRITE);
     }
     TEST_ASSERT(fs_service_cap >= 0,

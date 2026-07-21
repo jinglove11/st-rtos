@@ -681,8 +681,7 @@ static void test_irq_user_cap_endpoint_bind(void) {
     cap_id_t user_irq_cap = KERN_INVALID_ID;
     tcb_t *user = task_get_tcb(user_id);
     if (user != NULL) {
-        user_ep_cap = cap_create_for(user, (void *)(uintptr_t)(ep + 1),
-                                     CAP_OBJ_ENDPOINT,
+        user_ep_cap = cap_create_for(user, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT,
                                      CAP_READ | CAP_WRITE);
         user_irq_cap = cap_copy_to(NULL, irq_cap, user,
                                    CAP_READ | CAP_WRITE | CAP_TRANSFER);
@@ -759,8 +758,7 @@ static void test_irq_user_cap_endpoint_bind_rights(void) {
     cap_id_t irq_ro = KERN_INVALID_ID;
     tcb_t *task = task_get_tcb(no_irq_write);
     if (task != NULL) {
-        ep_rw = cap_create_for(task, (void *)(uintptr_t)(ep + 1),
-                               CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        ep_rw = cap_create_for(task, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
         irq_ro = cap_copy_to(NULL, irq_cap, task,
                              CAP_READ | CAP_TRANSFER);
     }
@@ -787,8 +785,7 @@ static void test_irq_user_cap_endpoint_bind_rights(void) {
     cap_id_t irq_rw = KERN_INVALID_ID;
     task = task_get_tcb(no_ep_write);
     if (task != NULL) {
-        ep_ro = cap_create_for(task, (void *)(uintptr_t)(ep + 1),
-                               CAP_OBJ_ENDPOINT, CAP_READ);
+        ep_ro = cap_create_for(task, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_READ);
         irq_rw = cap_copy_to(NULL, irq_cap, task,
                              CAP_READ | CAP_WRITE | CAP_TRANSFER);
     }

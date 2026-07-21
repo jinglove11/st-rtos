@@ -27,6 +27,7 @@
  *============================================================================*/
 
 typedef struct {
+    kobject_header_t hdr;            // M2-Step3b: 对象 header (generation 等)
     char        name[ENDPOINT_NAME_LEN];
     uint16_t    msg_size;
     uint16_t    max_pending;
@@ -43,7 +44,7 @@ typedef struct {
     uint16_t    tail;
     uint16_t    count;
 
-    uint32_t    next_request_gen;  // request generation
+    uint32_t    next_request_gen;  // request generation (per-IPC-request,非对象 generation)
 
     uint8_t     in_use;
 } endpoint_t;
@@ -300,7 +301,14 @@ ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pendin
     }
 
     endpoint_t *ep = &ep_pool[id];
+    /* M2-Step3b: 跨 memset 保留 generation (endpoint_delete 已 bump)。
+     * 首次分配 generation=0 → 初始化为 1; 复用时保留 bumped 值。 */
+    uint16_t saved_gen = ep->hdr.generation;
     memset(ep, 0, sizeof(endpoint_t));
+    kobj_header_init(&ep->hdr, CAP_OBJ_ENDPOINT);
+    if (saved_gen != 0) {
+        ep->hdr.generation = saved_gen;
+    }
 
     if (name) {
         strncpy(ep->name, name, ENDPOINT_NAME_LEN - 1);
@@ -332,6 +340,20 @@ uint16_t endpoint_msg_size(ep_id_t ep_id) {
     uint16_t size = ep != NULL ? ep->msg_size : 0U;
     irq_spin_unlock(&ep_lock, crit);
     return size;
+}
+
+/* M2-Step3b: cap 路径 id ↔ 对象指针 转换 (header 在 offset 0)。 */
+ep_id_t endpoint_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    endpoint_t *ep = (endpoint_t *)obj;
+    ep_id_t id = (ep_id_t)(ep - ep_pool);
+    if (id < 0 || id >= KERN_MAX_ENDPOINTS) return KERN_INVALID_ID;
+    return id;
+}
+
+void *endpoint_obj_for_cap(ep_id_t id) {
+    if (id < 0 || id >= KERN_MAX_ENDPOINTS) return NULL;
+    return (void *)&ep_pool[id];
 }
 
 kern_err_t endpoint_delete(ep_id_t ep_id) {
@@ -400,9 +422,14 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     memset(ep_cap_xfer_buffers[ep_id], 0, sizeof(ep_cap_xfer_buffers[ep_id]));
     memset(ep_cap_count_buffers[ep_id], 0, sizeof(ep_cap_count_buffers[ep_id]));
 #if CAP_ENABLE
-    (void)cap_revoke_object((void *)(uintptr_t)(ep_id + 1), CAP_OBJ_ENDPOINT);
+    /* M2-Step1+3b: 撤销所有任务持有的指向此 endpoint 的 cap。Step3b 改真指针。 */
+    (void)cap_revoke_object(ep, CAP_OBJ_ENDPOINT);
 #endif
+    /* M2-Step3b: bump generation 跨 memset 保留 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&ep->hdr);
     memset(ep, 0, sizeof(endpoint_t));
+    ep->hdr.obj_type   = CAP_OBJ_ENDPOINT;
+    ep->hdr.generation = next_gen;
     free_ep_id(ep_id);
 
     irq_spin_unlock(&ep_lock, crit);

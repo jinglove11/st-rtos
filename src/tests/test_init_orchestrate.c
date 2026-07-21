@@ -60,15 +60,12 @@ static void test_ep_sender(void) {
     tcb_t *svc_tcb = task_get_tcb(svc_id);
     cap_id_t svc_ep_cap = KERN_INVALID_ID;
     if (svc_tcb != NULL) {
-        svc_ep_cap = cap_create_for(svc_tcb, (void *)(uintptr_t)(ep + 1),
-                                    CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        svc_ep_cap = cap_create_for(svc_tcb, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
     }
     TEST_ASSERT(svc_ep_cap > 0, "service got ep cap");
 
     /* 给 client (本测试任务) 装 ep cap */
-    cap_id_t cli_ep_cap = cap_create_for(sched_get_current(),
-                                         (void *)(uintptr_t)(ep + 1),
-                                         CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+    cap_id_t cli_ep_cap = cap_create_for(sched_get_current(), endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
     TEST_ASSERT(cli_ep_cap > 0, "client got ep cap");
 
     /* 服务任务通过 r0 接收 svc_ep_cap */
