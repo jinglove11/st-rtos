@@ -128,6 +128,7 @@
 #define SYSCALL_MEM_MAP          79            /* map memblock into task MPU */
 #define SYSCALL_CAP_TRANSFER_TO  80            /* transfer cap to task (via task cap) */
 #define SYSCALL_EP_SENDER        81            /* get last IPC sender task id */
+#define SYSCALL_CAP_SELF_SLOT    82            /* M2-Step2c: find nth cap of obj_type in self CSpace */
 
 /*============================================================================
  * Syscall 分发

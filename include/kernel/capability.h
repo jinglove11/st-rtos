@@ -54,7 +54,7 @@
  *============================================================================*/
 
 typedef struct {
-    uint32_t    generation; /* slot generation; prevents stale cap reuse (M2-Step2b: 16→32 位) */
+    uint16_t    generation; /* slot generation; prevents stale cap reuse */
     uint8_t     rights;     /* 权限位图 */
     uint8_t     owner;      /* 拥有者 task_id */
     void       *object;     /* 内核对象指针 */
@@ -99,6 +99,17 @@ uint16_t cap_free_count(void);
 kern_err_t cap_register_cleanup(uint8_t obj_type, cap_cleanup_fn_t cleanup);
 kern_err_t cap_register_revoke_hook(uint8_t obj_type,
                                     cap_revoke_hook_fn_t hook);
+
+/*============================================================================
+ * M2-Step2c: per-task CSpace 自查询
+ *
+ * 替代历史 pair-table/packed-arg 机制。user task 启动后通过此 API
+ * 在自己 CSpace 中按对象类型查找第 n 个 cap。无全局状态、无竞态。
+ * 测试框架在 task_create_user 后用 cap_create_for 把所需 cap 写入
+ * task 的 cap_set (顺序即 cap_set[0], [1], ...),task 入口按
+ * (obj_type, 0/1/2/...) 索引取出。
+ *============================================================================*/
+cap_id_t cap_self_find_slot(tcb_t *owner, uint8_t obj_type, uint8_t index);
 
 #endif /* CAP_ENABLE */
 #endif /* CAPABILITY_H */

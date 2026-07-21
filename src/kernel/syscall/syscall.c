@@ -1224,6 +1224,26 @@ static int sys_ep_sender(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+/* M2-Step2c: 当前任务 CSpace 自查询。task 入口用 (obj_type, index) 取出
+ * 自己第 index 个匹配的 cap。替代历史 pair-table/packed-arg 机制。 */
+static int sys_cap_self_slot(uint32_t a1, uint32_t a2, uint32_t a3,
+                                     uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    uint8_t obj_type = (uint8_t)a1;
+    uint8_t index = (uint8_t)a2;
+    tcb_t *current = sched_get_current();
+    if (current == NULL) {
+        return (int)KERN_INVALID_ID;
+    }
+    cap_id_t cap = cap_self_find_slot(current, obj_type, index);
+    return (int)cap;
+#else
+    (void)a1; (void)a2;
+    return (int)KERN_NOSYS;
+#endif
+}
+
 static int sys_cap_revoke(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
@@ -1696,6 +1716,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_MEM_MAP,       sys_mem_map,       2),
     SYSDEF(SYSCALL_CAP_TRANSFER_TO, sys_cap_transfer_to, 2),
     SYSDEF(SYSCALL_EP_SENDER,     sys_ep_sender,     1),
+    SYSDEF(SYSCALL_CAP_SELF_SLOT, sys_cap_self_slot, 2),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),

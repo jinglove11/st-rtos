@@ -24,67 +24,6 @@
 #if SYSCALL_ENABLE
 
 /*============================================================================
- * M2-Step2b: 双 cap arg 传递机制 (cap_id_t 扩位准备,见 test_driver.c)
- *
- * 历史问题: 旧代码用 (cap_a << 16) | cap_b 把两个 cap 打包进单个 R0,
- * 假设每个 cap <= 16 位。cap_id_t 扩到 int32_t 后此假设失效。
- *
- * 新机制: cap_a 仍走 R0,cap_b 存全局 pair 表,
- * 任务入口用 sys_task_self() 查自己的 cap_b。per-task_id 索引,
- * 支持并发测试任务。
- *============================================================================*/
-#define SYSCALL_TEST_PAIR_MAX 16
-typedef struct {
-    task_id_t task_id;   /* -1 = 空闲槽 */
-    cap_id_t  cap_b;
-} syscall_test_pair_slot_t;
-
-static syscall_test_pair_slot_t syscall_test_pair_slots[SYSCALL_TEST_PAIR_MAX] = {
-    [0 ... SYSCALL_TEST_PAIR_MAX - 1] = { .task_id = -1, .cap_b = (cap_id_t)-1 },
-};
-
-static void syscall_test_set_arg_pair(task_id_t task_id, int cap_a, cap_id_t cap_b) {
-    /* cap_a 经 R0 传递 (写 stacked R0) */
-    tcb_t *tcb = task_get_tcb(task_id);
-    if (tcb != NULL && tcb->sp != NULL) {
-        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
-        *stacked_r0 = (uint32_t)cap_a;
-    }
-    /* cap_b 存 pair 表,任务入口凭 task_id 查。
-     * 复用同 task_id 槽,否则找空槽。 */
-    for (int i = 0; i < SYSCALL_TEST_PAIR_MAX; i++) {
-        if (syscall_test_pair_slots[i].task_id == task_id) {
-            syscall_test_pair_slots[i].cap_b = cap_b;
-            return;
-        }
-    }
-    for (int i = 0; i < SYSCALL_TEST_PAIR_MAX; i++) {
-        if (syscall_test_pair_slots[i].task_id < 0) {
-            syscall_test_pair_slots[i].task_id = task_id;
-            syscall_test_pair_slots[i].cap_b = cap_b;
-            return;
-        }
-    }
-}
-
-static void syscall_test_reset_pairs(void) {
-    for (int i = 0; i < SYSCALL_TEST_PAIR_MAX; i++) {
-        syscall_test_pair_slots[i].task_id = -1;
-        syscall_test_pair_slots[i].cap_b = (cap_id_t)-1;
-    }
-}
-
-static cap_id_t syscall_test_get_cap_b(void) {
-    task_id_t self = (task_id_t)sys_task_self();
-    for (int i = 0; i < SYSCALL_TEST_PAIR_MAX; i++) {
-        if (syscall_test_pair_slots[i].task_id == self) {
-            return syscall_test_pair_slots[i].cap_b;
-        }
-    }
-    return (cap_id_t)-1;
-}
-
-/*============================================================================
  * 测试 1: syscall 表存在
  *============================================================================*/
 
@@ -291,8 +230,9 @@ static void user_callback_syscall_task(void *arg) {
 }
 
 static void user_timer_notify_task(void *arg) {
-    int ep_cap = (int)(intptr_t)arg;
-    int timer_cap = (int)syscall_test_get_cap_b();
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    int timer_cap = sys_cap_self_slot(CAP_OBJ_TIMER, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     int err;
@@ -585,7 +525,6 @@ static void test_user_timer_endpoint_notification(void) {
     }
 
     /* cap_a(R0)=ep_cap, cap_b(table)=timer_cap */
-    syscall_test_set_arg_pair(user, ep_cap, timer_cap);
     task_start(user);
 
     void *retval = NULL;
@@ -977,8 +916,9 @@ static void user_endpoint_client_task(void *arg) {
 }
 
 static void user_endpoint_send_caps_task(void *arg) {
-    int ep_cap = (int)(intptr_t)arg;
-    cap_id_t src_cap = syscall_test_get_cap_b();
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    cap_id_t src_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 1);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
@@ -1230,8 +1170,9 @@ static void user_channel_send_twice_task(void *arg) {
 }
 
 static void user_channel_send_caps_task(void *arg) {
-    int ch_cap = (int)(intptr_t)arg;
-    cap_id_t src_cap = syscall_test_get_cap_b();
+    (void)arg;
+    int ch_cap = sys_cap_self_slot(CAP_OBJ_CHANNEL, 0);
+    cap_id_t src_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_CH_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     ipc_cap_xfer_t xfers[IPC_CAPS_MAX];
@@ -1624,8 +1565,6 @@ static void test_user_endpoint_send_caps_sleepable(void) {
         return;
     }
 
-    /* cap_a(R0)=ep_cap, cap_b(table)=src_cap */
-    syscall_test_set_arg_pair(client, ep_cap, src_cap);
     task_start(client);
 
     uint32_t msg = 0;
@@ -2942,8 +2881,6 @@ static void test_user_channel_send_caps_sleepable(void) {
         return;
     }
 
-    /* cap_a(R0)=ch_cap, cap_b(table)=src_cap */
-    syscall_test_set_arg_pair(sender, ch_cap, src_cap);
     task_start(sender);
 
     uint32_t msg = 0;
@@ -3086,7 +3023,6 @@ static void test_user_channel_recv_caps_sleepable(void) {
  *============================================================================*/
 
 static void test_syscall_module(void) {
-    syscall_test_reset_pairs();
     test_syscall_table_exists();
     test_syscall_task_yield();
     test_syscall_task_delay();

@@ -362,6 +362,13 @@ static inline int sys_ep_sender(int ep_cap) {
     return sys_call1(SYSCALL_EP_SENDER, ep_cap);
 }
 
+/* M2-Step2c: 在自己 CSpace 中查第 index 个 obj_type 类型的 cap。
+ * 替代历史 pair-table/packed-arg 机制。无全局状态、SMP 安全。
+ * 返回 (int)cap_id_t,失败返回 KERN_INVALID_ID (=0)。 */
+static inline int sys_cap_self_slot(int obj_type, int index) {
+    return sys_call2(SYSCALL_CAP_SELF_SLOT, (uint32_t)obj_type, (uint32_t)index);
+}
+
 static inline int sys_cap_type(int cap) {
     return sys_call1(SYSCALL_CAP_TYPE, cap);
 }

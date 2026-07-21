@@ -23,57 +23,6 @@
 #if TEST_MODULE_ALLOCATOR && CAP_ENABLE && MPU_ENABLE
 
 /*============================================================================
- * M2-Step2b: 双 cap arg 传递机制 (cap_id_t 扩位准备,见 test_driver.c)
- *============================================================================*/
-#define ALLOC_TEST_PAIR_MAX 8
-typedef struct {
-    task_id_t task_id;   /* -1 = free slot */
-    cap_id_t  cap_b;
-} alloc_test_pair_slot_t;
-
-static alloc_test_pair_slot_t alloc_test_pair_slots[ALLOC_TEST_PAIR_MAX] = {
-    [0 ... ALLOC_TEST_PAIR_MAX - 1] = { .task_id = -1, .cap_b = (cap_id_t)-1 },
-};
-
-static void alloc_test_set_arg_pair(task_id_t task_id, int cap_a, cap_id_t cap_b) {
-    tcb_t *tcb = task_get_tcb(task_id);
-    if (tcb != NULL && tcb->sp != NULL) {
-        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
-        *stacked_r0 = (uint32_t)cap_a;
-    }
-    for (int i = 0; i < ALLOC_TEST_PAIR_MAX; i++) {
-        if (alloc_test_pair_slots[i].task_id == task_id) {
-            alloc_test_pair_slots[i].cap_b = cap_b;
-            return;
-        }
-    }
-    for (int i = 0; i < ALLOC_TEST_PAIR_MAX; i++) {
-        if (alloc_test_pair_slots[i].task_id < 0) {
-            alloc_test_pair_slots[i].task_id = task_id;
-            alloc_test_pair_slots[i].cap_b = cap_b;
-            return;
-        }
-    }
-}
-
-static void alloc_test_reset_pairs(void) {
-    for (int i = 0; i < ALLOC_TEST_PAIR_MAX; i++) {
-        alloc_test_pair_slots[i].task_id = -1;
-        alloc_test_pair_slots[i].cap_b = (cap_id_t)-1;
-    }
-}
-
-static cap_id_t alloc_test_get_cap_b(void) {
-    task_id_t self = (task_id_t)sys_task_self();
-    for (int i = 0; i < ALLOC_TEST_PAIR_MAX; i++) {
-        if (alloc_test_pair_slots[i].task_id == self) {
-            return alloc_test_pair_slots[i].cap_b;
-        }
-    }
-    return (cap_id_t)-1;
-}
-
-/*============================================================================
  * 测试用的 endpoint / cap (通过 r0 传给任务)
  *============================================================================*/
 
@@ -84,12 +33,12 @@ static void allocator_task(void *arg) {
     sys_task_exit((void *)(intptr_t)err);
 }
 
-/* client user 任务:arg 编码两个 cap (user 任务不能用全局 .bss,MPU 禁止)。
- * 低 16 位 = allocator ep cap,高 16 位 = 自己的 inbox cap。
- * 结果通过 sys_task_exit retval 返回。 */
+/* client user 任务:allocator ep cap + 自己的 inbox cap 都通过 cap_self_slot
+ * 从自己 CSpace 拿 (sys_cap_self_slot 替代历史全局 pair 表,SMP 安全)。 */
 static void client_shm_task(void *arg) {
-    int alloc_ep_cap = (int)(intptr_t)arg;
-    int inbox_ep_cap = (int)alloc_test_get_cap_b();
+    (void)arg;
+    int alloc_ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    int inbox_ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 1);
     int shm_cap = KERN_INVALID_ID;
     int err;
 
@@ -199,9 +148,9 @@ static void test_allocator_shm_create_and_map(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)e, "allocator started");
     }
 
-    /* 启动 client (alloc_cap 经 R0, inbox_cap 经 pair 表) */
+    /* 启动 client (caps 已通过 cap_create_for 写入 client 的 CSpace,
+     * client 入口用 sys_cap_self_slot 自查,无需 R0/pair 表) */
     if (client_tcb != NULL && client_tcb->sp != NULL) {
-        alloc_test_set_arg_pair(client_id, (int)client_alloc_cap, client_inbox_cap);
         kern_err_t e = task_start(client_id);
         TEST_ASSERT_EQ((int)KERN_OK, (int)e, "client started");
     }
@@ -300,7 +249,6 @@ static void test_allocator_ping(void) {
  *============================================================================*/
 
 static void test_allocator_module(void) {
-    alloc_test_reset_pairs();
     test_allocator_ping();
     test_allocator_shm_create_and_map();
 }

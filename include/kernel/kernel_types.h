@@ -45,10 +45,7 @@ typedef int16_t mutex_id_t;      // 互斥锁 ID
 typedef int16_t queue_id_t;      // 消息队列 ID
 typedef int16_t event_id_t;      // 事件标志组 ID
 typedef int16_t timer_id_t;      // 定时器 ID
-typedef int32_t         cap_id_t;        // 能力 ID (M2-Step2b: 16→32 位,支持更大 CSpace + generation)
-/* CAP_ID_T_MAX: cap_id_t 正数上限。encode 产生的合法 cap 必须不超过此值,
- * 这样 cap_decode 只需检查 CAP_INVALID 哨兵,不需要 'cap < 0' 守卫。 */
-#define CAP_ID_T_MAX    ((uint32_t)INT32_MAX)
+typedef int16_t         cap_id_t;        // 能力 ID
 typedef int16_t ep_id_t;         // Endpoint ID
 typedef int16_t ch_id_t;         // Channel ID
 

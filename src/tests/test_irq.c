@@ -36,62 +36,11 @@
 #define TEST_IRQ_THREADED_BASE  ((int16_t)(BOARD_IRQ_COUNT - IRQ_THREADED_MAX))
 
 static void test_handler_stub(void);
-static cap_id_t irq_test_get_cap_b(void);  /* M2-Step2b: 前向声明 (定义在下方 pair-table 块) */
-
-/* M2-Step2b: 双 cap arg 传递机制 (cap_id_t 扩位准备,见 test_driver.c) */
-#define IRQ_TEST_PAIR_MAX 8
-typedef struct {
-    task_id_t task_id;   /* -1 = free slot */
-    cap_id_t  cap_b;
-} irq_test_pair_slot_t;
-
-static irq_test_pair_slot_t irq_test_pair_slots[IRQ_TEST_PAIR_MAX] = {
-    [0 ... IRQ_TEST_PAIR_MAX - 1] = { .task_id = -1, .cap_b = (cap_id_t)-1 },
-};
-
-static void irq_test_set_arg_pair(task_id_t task_id, cap_id_t cap_a, cap_id_t cap_b) {
-    /* cap_a via R0 (write stacked_r0 directly like driver_test_set_arg) */
-    tcb_t *tcb = task_get_tcb(task_id);
-    if (tcb != NULL && tcb->sp != NULL) {
-        uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
-        *stacked_r0 = (uint32_t)cap_a;
-    }
-    /* cap_b in pair table */
-    for (int i = 0; i < IRQ_TEST_PAIR_MAX; i++) {
-        if (irq_test_pair_slots[i].task_id == task_id) {
-            irq_test_pair_slots[i].cap_b = cap_b;
-            return;
-        }
-    }
-    for (int i = 0; i < IRQ_TEST_PAIR_MAX; i++) {
-        if (irq_test_pair_slots[i].task_id < 0) {
-            irq_test_pair_slots[i].task_id = task_id;
-            irq_test_pair_slots[i].cap_b = cap_b;
-            return;
-        }
-    }
-}
-
-static void irq_test_reset_pairs(void) {
-    for (int i = 0; i < IRQ_TEST_PAIR_MAX; i++) {
-        irq_test_pair_slots[i].task_id = -1;
-        irq_test_pair_slots[i].cap_b = (cap_id_t)-1;
-    }
-}
-
-static cap_id_t irq_test_get_cap_b(void) {
-    task_id_t self = (task_id_t)sys_task_self();
-    for (int i = 0; i < IRQ_TEST_PAIR_MAX; i++) {
-        if (irq_test_pair_slots[i].task_id == self) {
-            return irq_test_pair_slots[i].cap_b;
-        }
-    }
-    return (cap_id_t)-1;
-}
 
 static void irq_user_bind_task(void *arg) {
-    cap_id_t ep_cap = (cap_id_t)(intptr_t)arg;
-    cap_id_t irq_cap = irq_test_get_cap_b();
+    (void)arg;
+    cap_id_t ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    cap_id_t irq_cap = sys_cap_self_slot(CAP_OBJ_IRQ, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE] = {0};
     uint32_t *msg = (uint32_t *)msg_buf;
     int err;
@@ -114,8 +63,9 @@ static void irq_user_bind_task(void *arg) {
 }
 
 static void irq_user_bind_once_task(void *arg) {
-    cap_id_t ep_cap = (cap_id_t)(intptr_t)arg;
-    cap_id_t irq_cap = irq_test_get_cap_b();
+    (void)arg;
+    cap_id_t ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    cap_id_t irq_cap = sys_cap_self_slot(CAP_OBJ_IRQ, 0);
     int err;
 
     err = sys_irq_bind((int)irq_cap, (int)ep_cap, 0x42495251);
@@ -741,7 +691,6 @@ static void test_irq_user_cap_endpoint_bind(void) {
     TEST_ASSERT(user_irq_cap >= 0, "user receives IRQ cap");
 
     if (user_id >= 0 && user_ep_cap >= 0 && user_irq_cap >= 0) {
-        irq_test_set_arg_pair(user_id, user_ep_cap, user_irq_cap);
         err = task_start(user_id);
         TEST_ASSERT_EQ(KERN_OK, err, "user IRQ bind task started");
     }
@@ -818,7 +767,6 @@ static void test_irq_user_cap_endpoint_bind_rights(void) {
     TEST_ASSERT(ep_rw >= 0, "read-only IRQ bind task receives endpoint cap");
     TEST_ASSERT(irq_ro >= 0, "read-only IRQ bind task receives IRQ cap");
     if (no_irq_write >= 0 && ep_rw >= 0 && irq_ro >= 0) {
-        irq_test_set_arg_pair(no_irq_write, ep_rw, irq_ro);
         err = task_start(no_irq_write);
         TEST_ASSERT_EQ(KERN_OK, err, "read-only IRQ bind task started");
     }
@@ -847,7 +795,6 @@ static void test_irq_user_cap_endpoint_bind_rights(void) {
     TEST_ASSERT(ep_ro >= 0, "read-only endpoint bind task receives endpoint cap");
     TEST_ASSERT(irq_rw >= 0, "read-only endpoint bind task receives IRQ cap");
     if (no_ep_write >= 0 && ep_ro >= 0 && irq_rw >= 0) {
-        irq_test_set_arg_pair(no_ep_write, ep_ro, irq_rw);
         err = task_start(no_ep_write);
         TEST_ASSERT_EQ(KERN_OK, err, "read-only endpoint bind task started");
     }
@@ -885,7 +832,6 @@ static void test_irq_user_cap_endpoint_bind_rights(void) {
  *============================================================================*/
 
 static void test_irq_module(void) {
-    irq_test_reset_pairs();
     test_isr_pool();
     test_isr_context();
     test_bh_lifecycle();
