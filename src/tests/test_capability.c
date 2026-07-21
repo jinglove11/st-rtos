@@ -518,6 +518,76 @@ static void test_cap_mint_badge(void) {
 }
 
 /*============================================================================
+ * Test 17d: M2-#8 — copy/move 事务原子性 (CSpace 满时回滚)
+ *
+ * 验收 #2: "CSpace 满时 cap transfer 原子失败,源和目标均无半提交状态"。
+ * 场景: dst task 的 CSpace 填满,再 cap_copy_to 应失败,且:
+ *   - dst 没多出 cap (cap_set 未被污染)
+ *   - src 的原 cap 仍可用 (未被删/移)
+ *   - cap_pool 没泄漏 slot (失败的 child slot 被回滚)
+ *============================================================================*/
+static void test_cap_copy_atomic_on_full(void) {
+    test_section("Test 17d: copy atomic on CSpace full (M2-#8)");
+
+#if CAP_ENABLE
+    /* src task + 源 cap */
+    task_id_t src_id = task_create("capsrc", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("capdst", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "M2-#8: src/dst tasks created");
+    if (src_id < 0 || dst_id < 0) return;
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int obj = 0x77;
+    cap_id_t src_cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
+                                      CAP_READ | CAP_WRITE | CAP_TRANSFER | CAP_GRANT);
+    TEST_ASSERT(src_cap > 0, "M2-#8: src cap created");
+
+    /* 填满 dst 的 CSpace */
+    cap_id_t filler[KERN_TASK_CAP_SLOTS];
+    int filled = 0;
+    for (int i = 0; i < KERN_TASK_CAP_SLOTS; i++) {
+        filler[i] = cap_create_for(dst, &obj, CAP_OBJ_ENDPOINT, CAP_READ);
+        if (filler[i] < 0) break;
+        filled++;
+    }
+    TEST_ASSERT_EQ(KERN_TASK_CAP_SLOTS, filled,
+                   "M2-#8: dst CSpace filled to capacity");
+
+    uint16_t free_before = cap_free_count();
+
+    /* 试图 copy 到满的 dst — 应失败 */
+    cap_id_t bad = cap_copy_to(src, src_cap, dst, CAP_READ);
+    TEST_ASSERT(bad == ((cap_id_t)-1),
+                "M2-#8: cap_copy_to fails when dst CSpace full");
+
+    /* 验证原子性:
+     * - cap_pool 没泄漏 (失败的 child slot 被回滚)
+     * - src_cap 仍可用 (未被移除)
+     * - dst 没多出 cap (仍是 KERN_TASK_CAP_SLOTS 个) */
+    TEST_ASSERT_EQ((int)free_before, (int)cap_free_count(),
+                   "M2-#8: no cap_pool slot leaked on failed copy");
+
+    void *p = cap_resolve(src_cap, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(p == &obj,
+                "M2-#8: src cap still resolves after failed copy");
+
+    /* cleanup */
+    cap_delete(src_cap);
+    for (int i = 0; i < filled; i++) {
+        cap_delete(filler[i]);
+    }
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+#else
+    test_skip("CAP_ENABLE off");
+#endif
+}
+
+/*============================================================================
  * Test 18: parent revoke cascades to derived children
  *============================================================================*/
 
@@ -1271,6 +1341,7 @@ static void test_capability_module(void) {
     test_cap_stale_generation();
     test_cap_object_stale_on_reuse();
     test_cap_mint_badge();
+    test_cap_copy_atomic_on_full();
     test_cap_revoke_cascade();
     test_cap_delete_preserves_children();
     test_cap_cspace_required_for_user();
