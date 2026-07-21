@@ -189,4 +189,11 @@ void timer_init(void);
  */
 void timer_service_start(void);
 
+/*============================================================================
+ * M2-Step3a: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+timer_id_t timer_id_from_obj(void *obj);
+void *timer_obj_for_cap(timer_id_t id);
+
 #endif /* TIMER_H */

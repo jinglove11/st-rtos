@@ -54,15 +54,16 @@
  *============================================================================*/
 
 typedef struct {
-    uint16_t    generation; /* slot generation; prevents stale cap reuse */
-    uint8_t     rights;     /* 权限位图 */
-    uint8_t     owner;      /* 拥有者 task_id */
-    void       *object;     /* 内核对象指针 */
-    uint8_t     obj_type;   /* 对象类型 */
-    uint8_t     in_use;     /* 槽是否使用中 */
-    int16_t     parent;     /* parent slot, -1 if root */
-    int16_t     first_child;/* first derived child slot */
-    int16_t     next_sibling;/* next child under same parent */
+    uint16_t    generation;     /* slot generation; prevents stale cap reuse */
+    uint16_t    obj_generation; /* M2-Step3a: 目标对象 generation (0=不校验) */
+    uint8_t     rights;         /* 权限位图 */
+    uint8_t     owner;          /* 拥有者 task_id */
+    void       *object;         /* 内核对象指针 */
+    uint8_t     obj_type;       /* 对象类型 */
+    uint8_t     in_use;         /* 槽是否使用中 */
+    int16_t     parent;         /* parent slot, -1 if root */
+    int16_t     first_child;    /* first derived child slot */
+    int16_t     next_sibling;   /* next child under same parent */
 } cap_entry_t;
 
 typedef void (*cap_cleanup_fn_t)(void *object, uint8_t obj_type);
@@ -74,6 +75,8 @@ typedef void (*cap_revoke_hook_fn_t)(cap_id_t cap, void *object,
  *============================================================================*/
 
 void     cap_init(void);
+cap_id_t cap_create_for_gen(tcb_t *owner, void *object, uint8_t obj_type,
+                            uint8_t rights, uint16_t obj_generation);
 cap_id_t cap_create(void *object, uint8_t obj_type, uint8_t rights, uint8_t owner);
 void     cap_delete(cap_id_t cap);
 void    *cap_resolve(cap_id_t cap, uint8_t obj_type, uint8_t required_rights);
@@ -83,7 +86,15 @@ kern_err_t cap_transfer(cap_id_t cap, uint8_t target_task);
 kern_err_t cap_transfer_to_task_cap(cap_id_t cap, cap_id_t task_cap);
 kern_err_t cap_revoke(cap_id_t cap);
 
-cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t rights);
+/* M2-Step3a: cap_create_for 是 cap_create_for_gen 的 wrapper。
+ * obj_generation=0 → cap_get_entry 跳过对象 generation cross-check
+ * (用于无 header 的栈/堆临时对象,如 test_capability.c 的 &test_obj)。
+ * 真池对象 (sem/mutex/mqueue/event/timer/...) 应直接调 cap_create_for_gen
+ * 传入对象当前 hdr.generation。 */
+static inline cap_id_t cap_create_for(tcb_t *owner, void *object,
+                                       uint8_t obj_type, uint8_t rights) {
+    return cap_create_for_gen(owner, object, obj_type, rights, 0);
+}
 void    *cap_lookup_for(tcb_t *owner, cap_id_t cap, uint8_t obj_type, uint8_t required_rights);
 kern_err_t cap_get_type_for(tcb_t *owner, cap_id_t cap, uint8_t *out_type);
 kern_err_t cap_get_type(cap_id_t cap, uint8_t *out_type);

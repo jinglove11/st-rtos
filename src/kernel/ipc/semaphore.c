@@ -82,6 +82,15 @@ sem_id_t sem_create(uint32_t initial_count, uint32_t max_count) {
         max_count = 0xFFFFFFFF;
     }
 
+    /* M2-Step3a: 初始化对象 header (generation=1)。alloc_sem_id 复用 slot
+     * 时,sem_pool[id] 已被 sem_delete memset 并写回 next generation,
+     * 所以这里只在 hdr 未初始化时设 generation=1 (首次分配)。复用时
+     * 保留 sem_delete 写入的 bumped generation。 */
+    if (sem->hdr.generation == 0) {
+        kobj_header_init(&sem->hdr, CAP_OBJ_SEMAPHORE);
+    } else {
+        sem->hdr.obj_type = CAP_OBJ_SEMAPHORE;
+    }
     sem->count = initial_count;
     sem->max_count = max_count;
     sem->in_use = 1;
@@ -113,14 +122,44 @@ kern_err_t sem_delete(sem_id_t sem_id) {
 
     // 清零并释放
 #if CAP_ENABLE
-    /* M2-Step1: 撤销所有任务持有的指向此 sem 的 cap,避免悬空句柄 */
-    (void)cap_revoke_object((void *)(uintptr_t)(sem_id + 1), CAP_OBJ_SEMAPHORE);
+    /* M2-Step1+3a: 撤销所有任务持有的指向此 sem 的 cap。M2-Step3a 改用
+     * 真指针 &sem_pool[id] (与 sys_sem_create 的 cap_create_for_gen 一致),
+     * 替代历史 (id+1) fake-pointer。 */
+    (void)cap_revoke_object(sem, CAP_OBJ_SEMAPHORE);
 #endif
+    /* M2-Step3a: bump generation 并跨 memset 保留,使下次 alloc 拿到新 generation。
+     * 即使 cap_revoke_object 漏撤某个 cap (例如 race),旧 cap 的 obj_generation
+     * 与新对象的 hdr.generation 不匹配,cap_get_entry cross-check 拒绝。 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&sem->hdr);
     memset(sem, 0, sizeof(sem_t));
+    sem->hdr.obj_type   = CAP_OBJ_SEMAPHORE;
+    sem->hdr.generation = next_gen;
     free_sem_id(sem_id);
 
     irq_spin_unlock(&sem_lock, crit);
     return KERN_OK;
+}
+
+/* M2-Step3a: cap_resolve(CAP_OBJ_SEMAPHORE) 返回 &sem_pool[id] (header 在 offset 0)。
+ * 本函数把 void* 还原为 sem_id 供 syscall 层调用 sem_*。 */
+sem_id_t sem_id_from_obj(void *obj) {
+    if (obj == NULL) {
+        return KERN_INVALID_ID;
+    }
+    sem_t *sem = (sem_t *)obj;
+    sem_id_t id = (sem_id_t)(sem - sem_pool);
+    if (id < 0 || id >= KERN_MAX_SEMAPHORES) {
+        return KERN_INVALID_ID;
+    }
+    return id;
+}
+
+/* M2-Step3a: 反向,sem_id → &sem_pool[id] 给 cap_create_for_gen 用。 */
+void *sem_obj_for_cap(sem_id_t id) {
+    if (id < 0 || id >= KERN_MAX_SEMAPHORES) {
+        return NULL;
+    }
+    return (void *)&sem_pool[id];
 }
 
 kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {

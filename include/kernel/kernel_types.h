@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "kernel_config.h"
+#include "kobject.h"   /* M2-Step3a: kobject_header_t */
 
 /*============================================================================
  * 错误码
@@ -206,10 +207,11 @@ typedef struct {
  *============================================================================*/
 
 typedef struct {
-    uint32_t    count;                 // 当前计数
-    uint32_t    max_count;             // 最大计数
-    wait_queue_t wait_queue;           // 等待队列
-    uint8_t     in_use;                // 使用标志
+    kobject_header_t hdr;               // M2-Step3a: 对象 header (generation 等)
+    uint32_t    count;                  // 当前计数
+    uint32_t    max_count;              // 最大计数
+    wait_queue_t wait_queue;            // 等待队列
+    uint8_t     in_use;                 // 使用标志
 } sem_t;
 
 /*============================================================================
@@ -217,11 +219,12 @@ typedef struct {
  *============================================================================*/
 
 typedef struct {
-    task_id_t   owner;                 // 持有者
-    uint8_t     lock_count;            // 锁计数 (递归锁)
-    uint8_t     owner_original_prio;   // 持有者原始优先级
-    wait_queue_t wait_queue;           // 等待队列
-    uint8_t     in_use;                // 使用标志
+    kobject_header_t hdr;               // M2-Step3a: 对象 header
+    task_id_t   owner;                  // 持有者
+    uint8_t     lock_count;             // 锁计数 (递归锁)
+    uint8_t     owner_original_prio;    // 持有者原始优先级
+    wait_queue_t wait_queue;            // 等待队列
+    uint8_t     in_use;                 // 使用标志
 } mutex_t;
 
 /*============================================================================
@@ -229,15 +232,16 @@ typedef struct {
  *============================================================================*/
 
 typedef struct {
-    void       *buffer;                // 消息缓冲区
-    uint16_t    msg_size;              // 单条消息大小
-    uint16_t    capacity;              // 容量
-    uint16_t    count;                 // 当前消息数
-    uint16_t    head;                  // 头指针 (写入)
-    uint16_t    tail;                  // 尾指针 (读取)
-    wait_queue_t send_queue;           // 发送等待队列
-    wait_queue_t recv_queue;           // 接收等待队列
-    uint8_t     in_use;                // 使用标志
+    kobject_header_t hdr;               // M2-Step3a: 对象 header
+    void       *buffer;                 // 消息缓冲区
+    uint16_t    msg_size;               // 单条消息大小
+    uint16_t    capacity;               // 容量
+    uint16_t    count;                  // 当前消息数
+    uint16_t    head;                   // 头指针 (写入)
+    uint16_t    tail;                   // 尾指针 (读取)
+    wait_queue_t send_queue;            // 发送等待队列
+    wait_queue_t recv_queue;            // 接收等待队列
+    uint8_t     in_use;                 // 使用标志
 } mqueue_t;
 
 /*============================================================================
@@ -245,9 +249,10 @@ typedef struct {
  *============================================================================*/
 
 typedef struct {
-    uint32_t    flags;                 // 当前标志
-    wait_queue_t wait_queue;           // 等待队列
-    uint8_t     in_use;                // 使用标志
+    kobject_header_t hdr;               // M2-Step3a: 对象 header
+    uint32_t    flags;                  // 当前标志
+    wait_queue_t wait_queue;            // 等待队列
+    uint8_t     in_use;                 // 使用标志
 } event_t;
 
 /*============================================================================
@@ -284,6 +289,9 @@ typedef void (*timer_callback_t)(void *arg);
  * @brief 定时器控制块
  */
 typedef struct {
+    // --- M2-Step3a: 对象 header ---
+    kobject_header_t hdr;                        // 对象 header (generation 等)
+
     // --- 基本信息 ---
     char            name[KERN_TASK_NAME_LEN];  // 定时器名称
     timer_id_t      id;                         // 定时器 ID

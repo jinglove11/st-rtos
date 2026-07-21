@@ -4,6 +4,7 @@
  */
 
 #include "capability.h"
+#include "kobject.h"
 #include "scheduler.h"
 #include "task.h"
 #include "hal.h"
@@ -75,6 +76,19 @@ static cap_entry_t *cap_get_entry(cap_id_t cap) {
     cap_entry_t *entry = &cap_pool[slot];
     if (!entry->in_use || entry->generation != generation) {
         return NULL;
+    }
+
+    /* M2-Step3a: 对象 generation cross-check。
+     * obj_generation=0 (栈/堆临时对象,如 test_capability.c 的 &test_obj)
+     * 跳过校验,保持向后兼容。
+     * obj_generation>0 (真池对象 sem/mutex/.../timer 等,header 在 offset 0)
+     * 要求 entry->object 头部的 kobject_header_t.generation 与创建时一致。
+     * 对象 slot 复用 + bump generation 后,旧 cap 在此失效。 */
+    if (entry->obj_generation != 0 && entry->object != NULL) {
+        const kobject_header_t *kh = (const kobject_header_t *)entry->object;
+        if (kh->generation != entry->obj_generation) {
+            return NULL;
+        }
     }
 
     return entry;
@@ -199,6 +213,7 @@ static int cap_init_child_slot(const cap_entry_t *parent, uint8_t rights) {
     cap_pool[child_slot].owner = parent->owner;
     cap_pool[child_slot].object = parent->object;
     cap_pool[child_slot].obj_type = parent->obj_type;
+    cap_pool[child_slot].obj_generation = parent->obj_generation;  /* M2-Step3a: 透传 */
     cap_pool[child_slot].in_use = 1;
     cap_pool[child_slot].first_child = CAP_NO_SLOT;
     cap_pool[child_slot].next_sibling = CAP_NO_SLOT;
@@ -298,7 +313,8 @@ void cap_init(void) {
     }
 }
 
-cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t rights) {
+cap_id_t cap_create_for_gen(tcb_t *owner, void *object, uint8_t obj_type,
+                            uint8_t rights, uint16_t obj_generation) {
     if (obj_type >= CAP_OBJ_TYPE_MAX) {
         return CAP_INVALID;
     }
@@ -325,6 +341,7 @@ cap_id_t cap_create_for(tcb_t *owner, void *object, uint8_t obj_type, uint8_t ri
     cap_pool[slot].owner = owner_id;
     cap_pool[slot].object = object;
     cap_pool[slot].obj_type = obj_type;
+    cap_pool[slot].obj_generation = obj_generation;  /* M2-Step3a */
     cap_pool[slot].in_use = 1;
     cap_pool[slot].parent = CAP_NO_SLOT;
     cap_pool[slot].first_child = CAP_NO_SLOT;
@@ -344,10 +361,10 @@ cap_id_t cap_create(void *object, uint8_t obj_type, uint8_t rights, uint8_t owne
     tcb_t *current = sched_get_current();
 
     if (current != NULL && (current->attrs & TASK_ATTR_USER) != 0) {
-        return cap_create_for(current, object, obj_type, rights);
+        return cap_create_for_gen(current, object, obj_type, rights, 0);
     }
 
-    cap_id_t cap = cap_create_for(NULL, object, obj_type, rights);
+    cap_id_t cap = cap_create_for_gen(NULL, object, obj_type, rights, 0);
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry != NULL) {
         entry->owner = owner;

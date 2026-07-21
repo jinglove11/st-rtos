@@ -100,4 +100,11 @@ int32_t mqueue_get_count(queue_id_t queue_id);
  */
 void mqueue_init(void);
 
+/*============================================================================
+ * M2-Step3a: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+queue_id_t mqueue_id_from_obj(void *obj);
+void *mqueue_obj_for_cap(queue_id_t id);
+
 #endif // MQUEUE_H

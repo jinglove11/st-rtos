@@ -81,4 +81,18 @@ int32_t sem_get_count(sem_id_t sem_id);
  */
 void sem_init(void);
 
+/*============================================================================
+ * M2-Step3a: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+/* cap_resolve(CAP_OBJ_SEMAPHORE) 拿到的 void* 即 &sem_pool[id] (kobject_header
+ * 在 offset 0)。本 helper 把它转回 sem_id 供 syscall 层使用。
+ * 这是 semaphore.c 的 sem_pool static 暴露给 syscall.c 的唯一通道。 */
+sem_id_t sem_id_from_obj(void *obj);
+
+/* 反向: sem_id → &sem_pool[id],供 syscall 层 cap_create_for_gen 使用。
+ * 返回的指针在 sem_delete + 重新 alloc 后值不变但 generation 变了,
+ * 所以 cap_create_for_gen 必须立即调用并把当前 hdr.generation 一并传入。 */
+void *sem_obj_for_cap(sem_id_t id);
+
 #endif // SEMAPHORE_H

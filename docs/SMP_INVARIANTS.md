@@ -81,4 +81,9 @@ cap_pool_lock / task_lock / mem_lock / timer_lock / bh_lock
 - **无 CPU affinity**：所有任务可跑在任意核，无 cache locality 优化
 - **全局 ready_list**：两核每次切任务都串行化（粗粒度但正确）
 - **stats_task_switch 在 sched_unlock 外**：读 TCB 字段无锁（统计容错）
-- **task_get_tcb 读路径无锁**：依赖 generation + volatile（M2 对象 generation 改进）
+- **task_get_tcb 读路径无锁**：依赖 generation + volatile（M2-Step3c task 对象
+  generation 改进；当前 M2-Step3a 已为 sem/mutex/mqueue/event/timer 嵌入
+  `kobject_header_t`，cap_get_entry 在 cap_pool_lock 下 volatile 读
+  `hdr.generation` 做 cross-check，与本条读模式一致）
+- **M2-Step3a 局限**：`kobject_header_t` 只覆盖 5 个简单对象，endpoint/channel/
+  task/irq/memblock/mmio/shm/reply 尚未迁移（Step3b/3c/3d 做）

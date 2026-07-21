@@ -191,6 +191,12 @@ mutex_id_t mutex_create(void) {
     }
 
     mutex_t *mutex = &mutex_pool[id];
+    /* M2-Step3a: 初始化对象 header (首次分配 generation=1,复用保留 bumped 值) */
+    if (mutex->hdr.generation == 0) {
+        kobj_header_init(&mutex->hdr, CAP_OBJ_MUTEX);
+    } else {
+        mutex->hdr.obj_type = CAP_OBJ_MUTEX;
+    }
     mutex->owner = KERN_INVALID_ID;
     mutex->lock_count = 0;
     mutex->owner_original_prio = 0;
@@ -229,14 +235,32 @@ kern_err_t mutex_delete(mutex_id_t mutex_id) {
 
     // 清零并释放
 #if CAP_ENABLE
-    /* M2-Step1: 撤销所有任务持有的指向此 mutex 的 cap,避免悬空句柄 */
-    (void)cap_revoke_object((void *)(uintptr_t)(mutex_id + 1), CAP_OBJ_MUTEX);
+    /* M2-Step1+3a: 撤销所有任务持有的指向此 mutex 的 cap。Step3a 改真指针。 */
+    (void)cap_revoke_object(mutex, CAP_OBJ_MUTEX);
 #endif
+    /* M2-Step3a: bump generation 跨 memset 保留 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&mutex->hdr);
     memset(mutex, 0, sizeof(mutex_t));
+    mutex->hdr.obj_type   = CAP_OBJ_MUTEX;
+    mutex->hdr.generation = next_gen;
     free_mutex_id(mutex_id);
 
     irq_spin_unlock(&mux_lock, crit);
     return KERN_OK;
+}
+
+/* M2-Step3a: cap 路径 id ↔ 对象指针 转换 (header 在 offset 0)。 */
+mutex_id_t mutex_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    mutex_t *mutex = (mutex_t *)obj;
+    mutex_id_t id = (mutex_id_t)(mutex - mutex_pool);
+    if (id < 0 || id >= KERN_MAX_MUTEXES) return KERN_INVALID_ID;
+    return id;
+}
+
+void *mutex_obj_for_cap(mutex_id_t id) {
+    if (id < 0 || id >= KERN_MAX_MUTEXES) return NULL;
+    return (void *)&mutex_pool[id];
 }
 
 kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {

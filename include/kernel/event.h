@@ -111,4 +111,11 @@ uint32_t event_get(event_id_t event_id);
  */
 void event_init(void);
 
+/*============================================================================
+ * M2-Step3a: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+event_id_t event_id_from_obj(void *obj);
+void *event_obj_for_cap(event_id_t id);
+
 #endif // EVENT_H

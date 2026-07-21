@@ -529,12 +529,30 @@ static void process_cmd_delete(timer_id_t timer_id) {
 
     /* 清零并释放 */
 #if CAP_ENABLE
-    /* M2-Step1: 撤销所有任务持有的指向此 timer 的 cap,避免悬空句柄 */
-    (void)cap_revoke_object((void *)(uintptr_t)(timer_id + 1), CAP_OBJ_TIMER);
+    /* M2-Step1+3a: 撤销所有任务持有的指向此 timer 的 cap。Step3a 改真指针。 */
+    (void)cap_revoke_object(timer, CAP_OBJ_TIMER);
 #endif
+    /* M2-Step3a: bump generation 跨 memset 保留 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&timer->hdr);
     memset(timer, 0, sizeof(timer_t));
+    timer->hdr.obj_type   = CAP_OBJ_TIMER;
+    timer->hdr.generation = next_gen;
     timer->state = TIMER_STATE_DELETED;
     free_timer_id(timer_id);
+}
+
+/* M2-Step3a: cap 路径 id ↔ 对象指针 转换。 */
+timer_id_t timer_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    timer_t *timer = (timer_t *)obj;
+    timer_id_t id = (timer_id_t)(timer - timer_pool);
+    if (id < 0 || id >= KERN_TIMER_MAX) return KERN_INVALID_ID;
+    return id;
+}
+
+void *timer_obj_for_cap(timer_id_t id) {
+    if (id < 0 || id >= KERN_TIMER_MAX) return NULL;
+    return (void *)&timer_pool[id];
 }
 
 static void process_command(timer_cmd_t *cmd) {
@@ -668,7 +686,14 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     }
 
     timer_t *timer = &timer_pool[id];
+    /* M2-Step3a: 跨 memset 保留 generation (process_cmd_delete 已 bump)。
+     * 首次分配 generation=0 → 初始化为 1; 复用时保留 bumped 值。 */
+    uint16_t saved_gen = timer->hdr.generation;
     memset(timer, 0, sizeof(timer_t));
+    kobj_header_init(&timer->hdr, CAP_OBJ_TIMER);
+    if (saved_gen != 0) {
+        timer->hdr.generation = saved_gen;
+    }
 
     timer->id = id;
     timer->callback = callback;

@@ -218,8 +218,12 @@ static int sys_sem_create(uint32_t a1, uint32_t a2, uint32_t a3,
     sem_id_t id = sem_create(a2, a1);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_SEMAPHORE,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    /* M2-Step3a: cap.object 用真指针 &sem_pool[id],obj_generation 取当前
+     * hdr.generation — 对象 slot 复用 + bump generation 后,旧 cap 在
+     * cap_get_entry cross-check 失败,满足 M2 验收 #1 (stale-cap-on-reuse)。 */
+    void *obj = sem_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_SEMAPHORE, CAP_FULL, obj_gen);
     if (cap < 0) { sem_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -233,7 +237,7 @@ static int sys_sem_wait(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_SEMAPHORE, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return sem_wait_syscall((sem_id_t)((uintptr_t)obj - 1), a2);
+    return sem_wait_syscall(sem_id_from_obj(obj), a2);
 #else
     return sem_wait_syscall((sem_id_t)a1, a2);
 #endif
@@ -245,7 +249,7 @@ static int sys_sem_post(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_SEMAPHORE, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return sem_post((sem_id_t)((uintptr_t)obj - 1));
+    return sem_post(sem_id_from_obj(obj));
 #else
     return sem_post((sem_id_t)a1);
 #endif
@@ -257,7 +261,7 @@ static int sys_sem_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_SEMAPHORE, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    sem_id_t id = (sem_id_t)((uintptr_t)obj - 1);
+    sem_id_t id = sem_id_from_obj(obj);
     kern_err_t ret = sem_delete(id);
     cap_delete((cap_id_t)a1);
     return ret;
@@ -277,8 +281,10 @@ static int sys_mutex_create(uint32_t a1, uint32_t a2, uint32_t a3,
     mutex_id_t id = mutex_create();
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_MUTEX,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    /* M2-Step3a: 真指针 + obj_generation 启用 cross-check */
+    void *obj = mutex_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_MUTEX, CAP_FULL, obj_gen);
     if (cap < 0) { /* mutex_delete(id); */ return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -292,7 +298,7 @@ static int sys_mutex_lock(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MUTEX, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return mutex_lock_syscall((mutex_id_t)((uintptr_t)obj - 1), a2);
+    return mutex_lock_syscall(mutex_id_from_obj(obj), a2);
 #else
     return mutex_lock_syscall((mutex_id_t)a1, a2);
 #endif
@@ -304,7 +310,7 @@ static int sys_mutex_unlock(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MUTEX, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return mutex_unlock((mutex_id_t)((uintptr_t)obj - 1));
+    return mutex_unlock(mutex_id_from_obj(obj));
 #else
     return mutex_unlock((mutex_id_t)a1);
 #endif
@@ -321,8 +327,9 @@ static int sys_mqueue_create(uint32_t a1, uint32_t a2, uint32_t a3,
     queue_id_t id = mqueue_create(a1, a2);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_MQUEUE,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    void *obj = mqueue_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_MQUEUE, CAP_FULL, obj_gen);
     if (cap < 0) { /* mqueue_delete(id); */ return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -346,7 +353,7 @@ static int sys_mqueue_send(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return mqueue_send_syscall((queue_id_t)((uintptr_t)obj - 1), msg, a3);
+    return mqueue_send_syscall(mqueue_id_from_obj(obj), msg, a3);
 #else
     return mqueue_send_syscall((queue_id_t)a1, msg, a3);
 #endif
@@ -364,7 +371,7 @@ static int sys_mqueue_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
         void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_READ);
         if (!obj) return KERN_ERR_CAP;
-        return mqueue_recv_syscall((queue_id_t)((uintptr_t)obj - 1),
+        return mqueue_recv_syscall(mqueue_id_from_obj(obj),
                                    (void *)(uintptr_t)a2, a3);
 #else
         return mqueue_recv_syscall((queue_id_t)a1, (void *)(uintptr_t)a2, a3);
@@ -375,7 +382,7 @@ static int sys_mqueue_recv(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    kern_err_t ret = mqueue_recv((queue_id_t)((uintptr_t)obj - 1), msg, a3);
+    kern_err_t ret = mqueue_recv(mqueue_id_from_obj(obj), msg, a3);
 #else
     kern_err_t ret = mqueue_recv((queue_id_t)a1, msg, a3);
 #endif
@@ -396,8 +403,9 @@ static int sys_event_create(uint32_t a1, uint32_t a2, uint32_t a3,
     event_id_t id = event_create(a1);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_EVENT,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    void *obj = event_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_EVENT, CAP_FULL, obj_gen);
     if (cap < 0) { /* event_delete(id); */ return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -411,7 +419,7 @@ static int sys_event_wait(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_EVENT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return event_wait_syscall((event_id_t)((uintptr_t)obj - 1), a2, 0, a3);
+    return event_wait_syscall(event_id_from_obj(obj), a2, 0, a3);
 #else
     return event_wait_syscall((event_id_t)a1, a2, 0, a3);
 #endif
@@ -423,7 +431,7 @@ static int sys_event_set(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_EVENT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return event_set((event_id_t)((uintptr_t)obj - 1), a2);
+    return event_set(event_id_from_obj(obj), a2);
 #else
     return event_set((event_id_t)a1, a2);
 #endif
@@ -435,7 +443,7 @@ static int sys_mutex_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MUTEX, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    mutex_id_t id = (mutex_id_t)((uintptr_t)obj - 1);
+    mutex_id_t id = mutex_id_from_obj(obj);
     kern_err_t ret = mutex_delete(id);
     cap_delete((cap_id_t)a1);
     return ret;
@@ -450,7 +458,7 @@ static int sys_mqueue_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_MQUEUE, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    queue_id_t id = (queue_id_t)((uintptr_t)obj - 1);
+    queue_id_t id = mqueue_id_from_obj(obj);
     kern_err_t ret = mqueue_delete(id);
     cap_delete((cap_id_t)a1);
     return ret;
@@ -465,7 +473,7 @@ static int sys_event_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_EVENT, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    event_id_t id = (event_id_t)((uintptr_t)obj - 1);
+    event_id_t id = event_id_from_obj(obj);
     kern_err_t ret = event_delete(id);
     cap_delete((cap_id_t)a1);
     return ret;
@@ -480,7 +488,7 @@ static int sys_event_clear(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_EVENT, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return event_clear((event_id_t)((uintptr_t)obj - 1), a2);
+    return event_clear(event_id_from_obj(obj), a2);
 #else
     return event_clear((event_id_t)a1, a2);
 #endif
@@ -492,7 +500,7 @@ static int sys_event_get(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_EVENT, CAP_READ);
     if (!obj) return KERN_ERR_CAP;
-    return (int)event_get((event_id_t)((uintptr_t)obj - 1));
+    return (int)event_get(event_id_from_obj(obj));
 #else
     return (int)event_get((event_id_t)a1);
 #endif
@@ -944,8 +952,9 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
                                  (void *)a3, a4);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_TIMER,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    void *obj = timer_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_TIMER, CAP_FULL, obj_gen);
     if (cap < 0) return KERN_ERR_RESOURCE;
     return (int)cap;
 #else
@@ -961,7 +970,7 @@ static int sys_timer_start(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TIMER, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return timer_start((timer_id_t)((uintptr_t)obj - 1), a2);
+    return timer_start(timer_id_from_obj(obj), a2);
 #else
     return timer_start((timer_id_t)a1, a2);
 #endif
@@ -975,7 +984,7 @@ static int sys_timer_bind(uint32_t a1, uint32_t a2, uint32_t a3,
     if (!timer_obj) return KERN_ERR_CAP;
     void *ep_obj = cap_resolve((cap_id_t)a2, CAP_OBJ_ENDPOINT, CAP_WRITE);
     if (!ep_obj) return KERN_ERR_CAP;
-    return timer_bind_endpoint((timer_id_t)((uintptr_t)timer_obj - 1),
+    return timer_bind_endpoint(timer_id_from_obj(timer_obj),
                                (ep_id_t)((uintptr_t)ep_obj - 1),
                                a3);
 #else

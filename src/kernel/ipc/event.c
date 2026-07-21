@@ -98,6 +98,12 @@ event_id_t event_create(uint32_t initial_flags) {
     }
 
     event_t *evt = &event_pool[id];
+    /* M2-Step3a: 初始化对象 header */
+    if (evt->hdr.generation == 0) {
+        kobj_header_init(&evt->hdr, CAP_OBJ_EVENT);
+    } else {
+        evt->hdr.obj_type = CAP_OBJ_EVENT;
+    }
     evt->flags = initial_flags;
     evt->in_use = 1;
     wait_queue_init(&evt->wait_queue);
@@ -132,14 +138,32 @@ kern_err_t event_delete(event_id_t event_id) {
 
     // 清零并释放
 #if CAP_ENABLE
-    /* M2-Step1: 撤销所有任务持有的指向此 event 的 cap,避免悬空句柄 */
-    (void)cap_revoke_object((void *)(uintptr_t)(event_id + 1), CAP_OBJ_EVENT);
+    /* M2-Step1+3a: 撤销所有任务持有的指向此 event 的 cap。Step3a 改真指针。 */
+    (void)cap_revoke_object(evt, CAP_OBJ_EVENT);
 #endif
+    /* M2-Step3a: bump generation 跨 memset 保留 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&evt->hdr);
     memset(evt, 0, sizeof(event_t));
+    evt->hdr.obj_type   = CAP_OBJ_EVENT;
+    evt->hdr.generation = next_gen;
     free_event_id(event_id);
 
     irq_spin_unlock(&event_lock, crit);
     return KERN_OK;
+}
+
+/* M2-Step3a: cap 路径 id ↔ 对象指针 转换。 */
+event_id_t event_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    event_t *evt = (event_t *)obj;
+    event_id_t id = (event_id_t)(evt - event_pool);
+    if (id < 0 || id >= KERN_MAX_EVENTS) return KERN_INVALID_ID;
+    return id;
+}
+
+void *event_obj_for_cap(event_id_t id) {
+    if (id < 0 || id >= KERN_MAX_EVENTS) return NULL;
+    return (void *)&event_pool[id];
 }
 
 kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,

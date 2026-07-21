@@ -87,4 +87,11 @@ void mutex_init(void);
  */
 int mutex_deadlock_check(void);
 
+/*============================================================================
+ * M2-Step3a: cap 路径 id ↔ 对象指针 转换
+ *============================================================================*/
+
+mutex_id_t mutex_id_from_obj(void *obj);
+void *mutex_obj_for_cap(mutex_id_t id);
+
 #endif // MUTEX_H

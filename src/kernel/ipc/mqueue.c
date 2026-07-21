@@ -174,6 +174,12 @@ queue_id_t mqueue_create(uint32_t msg_size, uint32_t capacity) {
 
     mqueue_t *mq = &mqueue_pool[id];
 
+    /* M2-Step3a: 初始化对象 header */
+    if (mq->hdr.generation == 0) {
+        kobj_header_init(&mq->hdr, CAP_OBJ_MQUEUE);
+    } else {
+        mq->hdr.obj_type = CAP_OBJ_MQUEUE;
+    }
     mq->buffer = mqueue_buffers[id];
     mq->msg_size = (uint16_t)msg_size;
     mq->capacity = (uint16_t)capacity;
@@ -236,13 +242,31 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
     // 清零并释放
 #if CAP_ENABLE
     /* M2-Step1: 撤销所有任务持有的指向此 mqueue 的 cap,避免悬空句柄 */
-    (void)cap_revoke_object((void *)(uintptr_t)(queue_id + 1), CAP_OBJ_MQUEUE);
+    (void)cap_revoke_object(mq, CAP_OBJ_MQUEUE);
 #endif
+    /* M2-Step3a: bump generation 跨 memset 保留 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&mq->hdr);
     memset(mq, 0, sizeof(mqueue_t));
+    mq->hdr.obj_type   = CAP_OBJ_MQUEUE;
+    mq->hdr.generation = next_gen;
     free_mqueue_id(queue_id);
 
     irq_spin_unlock(&mqueue_lock, crit);
     return KERN_OK;
+}
+
+/* M2-Step3a: cap 路径 id ↔ 对象指针 转换。 */
+queue_id_t mqueue_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    mqueue_t *mq = (mqueue_t *)obj;
+    queue_id_t id = (queue_id_t)(mq - mqueue_pool);
+    if (id < 0 || id >= KERN_MAX_MQUEUES) return KERN_INVALID_ID;
+    return id;
+}
+
+void *mqueue_obj_for_cap(queue_id_t id) {
+    if (id < 0 || id >= KERN_MAX_MQUEUES) return NULL;
+    return (void *)&mqueue_pool[id];
 }
 
 kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {

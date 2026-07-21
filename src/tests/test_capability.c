@@ -7,6 +7,7 @@
 #include "kernel.h"
 #include "ipc_transfer.h"
 #include "mem.h"
+#include "semaphore.h"   /* M2-Step3a: sem_create/sem_obj_for_cap */
 #include <string.h>
 #if CAP_RESTART_SUBSET
 #include "cap_subset.h"
@@ -359,6 +360,96 @@ static void test_cap_stale_generation(void) {
     TEST_ASSERT(ptr == &obj2, "new generation resolves");
 
     cap_delete(new_cap);
+}
+
+/*============================================================================
+ * Test 17b: M2-Step3a — 对象 slot 复用后旧 cap 失效 (stale-cap-on-reuse)
+ *
+ * 这是 M2 验收 #1: "旧 task cap 在 task id 复用后必须返回 stale-cap 错误"
+ * 在 sem 对象上的具体化。test_cap_stale_generation 测的是 cap slot
+ * generation (cap_id 复用),本测试测的是对象 generation (sem_id 复用)。
+ *
+ * 场景:
+ *   1. 创建 sem_A → cap_A (cap.object = &sem_pool[id], obj_generation = 1)
+ *   2. 删除 sem_A → cap_A 被 cap_revoke_object 撤销, sem_pool[id].generation = 2
+ *   3. 创建 sem_B (slot 复用同一 id) → cap_B (obj_generation = 2)
+ *   4. 即使我们手工把 cap_A 重新插入 cap_pool (绕过 revoke),它也无效 ——
+ *      cap_get_entry cross-check 检测到 obj_generation(1) != hdr.generation(2)
+ *============================================================================*/
+static void test_cap_object_stale_on_reuse(void) {
+    test_section("Test 17b: object slot reuse invalidates stale cap (M2-Step3a)");
+
+#if CAP_ENABLE
+    /* 用 sem 池的第一个 slot,便于控制复用。
+     * 注意:测试运行时其他模块可能占用 sem 池,所以不能假定 id=0;
+     * 改用"删除后再创建必复用同一 slot"的不变量。 */
+    sem_id_t sem_a = sem_create(0, 1);
+    TEST_ASSERT(sem_a >= 0, "M2-Step3a: sem A created");
+    if (sem_a < 0) return;
+
+    /* 通过 cap_create_for_gen 直接拿带 obj_generation 的 cap,模拟 sys_sem_create */
+    void *obj_a = sem_obj_for_cap(sem_a);
+    TEST_ASSERT(obj_a != NULL, "M2-Step3a: sem A obj pointer non-null");
+    uint16_t gen_a = ((const kobject_header_t *)obj_a)->generation;
+    TEST_ASSERT_EQ(1, (int)gen_a, "M2-Step3a: sem A generation = 1 (first alloc)");
+
+    cap_id_t cap_a = cap_create_for_gen(NULL, obj_a, CAP_OBJ_SEMAPHORE,
+                                        CAP_FULL, gen_a);
+    TEST_ASSERT(cap_a != ((cap_id_t)-1), "M2-Step3a: cap A created with obj_generation");
+
+    /* cap_a 应该能正常 resolve */
+    void *resolved = cap_resolve(cap_a, CAP_OBJ_SEMAPHORE, CAP_READ);
+    TEST_ASSERT(resolved == obj_a, "M2-Step3a: cap A resolves to sem A");
+
+    /* 删除 sem A: cap_revoke_object 撤销 cap_a, sem.hdr.generation bump 到 2 */
+    kern_err_t err = sem_delete(sem_a);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "M2-Step3a: sem A deleted");
+
+    /* cap_a 已被 cap_revoke_object 撤销,cap_resolve 直接返回 NULL */
+    resolved = cap_resolve(cap_a, CAP_OBJ_SEMAPHORE, CAP_READ);
+    TEST_ASSERT(resolved == NULL, "M2-Step3a: cap A revoked after sem A delete");
+
+    /* 创建 sem B: 必复用同一 slot (sem_a), generation = 2 */
+    sem_id_t sem_b = sem_create(0, 1);
+    TEST_ASSERT(sem_b >= 0, "M2-Step3a: sem B created");
+    /* 验证 slot 复用 */
+    TEST_ASSERT_EQ((int)sem_a, (int)sem_b,
+                   "M2-Step3a: sem B reuses sem A slot (id identical)");
+
+    void *obj_b = sem_obj_for_cap(sem_b);
+    uint16_t gen_b = ((const kobject_header_t *)obj_b)->generation;
+    TEST_ASSERT_EQ(2, (int)gen_b,
+                   "M2-Step3a: sem B generation = 2 (after bump on delete)");
+
+    /* 模拟"漏撤"场景:手工造一个用旧 gen_a 的 cap (跟 cap_a 同 object 指针,
+     * 但 obj_generation=1)。即使 cap slot 是新的,cap_get_entry cross-check
+     * 必须拒绝 (obj_generation 1 != hdr.generation 2)。
+     * 这就是 M2 验收 #1 防御的攻击面:cap_revoke_object 跑过一次后,攻击者
+     * 拿到旧 cap 副本 (比如 derived child 的拷贝) 仍不能越权访问新对象。 */
+    cap_id_t stale_cap = cap_create_for_gen(NULL, obj_b, CAP_OBJ_SEMAPHORE,
+                                            CAP_FULL, gen_a);
+    TEST_ASSERT(stale_cap != ((cap_id_t)-1),
+                "M2-Step3a: stale_cap created (simulating missed revoke)");
+    void *stale_resolved = cap_resolve(stale_cap, CAP_OBJ_SEMAPHORE, CAP_READ);
+    TEST_ASSERT(stale_resolved == NULL,
+                "M2-Step3a: stale cap (obj_generation=1) rejected on gen-2 object");
+
+    /* 对照:正确 obj_generation 的 cap 能 resolve */
+    cap_id_t fresh_cap = cap_create_for_gen(NULL, obj_b, CAP_OBJ_SEMAPHORE,
+                                            CAP_FULL, gen_b);
+    TEST_ASSERT(fresh_cap != ((cap_id_t)-1), "M2-Step3a: fresh cap created");
+    void *fresh_resolved = cap_resolve(fresh_cap, CAP_OBJ_SEMAPHORE, CAP_READ);
+    TEST_ASSERT(fresh_resolved == obj_b,
+                "M2-Step3a: fresh cap (obj_generation=2) resolves to sem B");
+
+    /* cleanup */
+    cap_delete(fresh_cap);
+    /* stale_cap 仍可 cap_delete (它本身 cap slot 有效,只是 cross-check 拒绝) */
+    cap_delete(stale_cap);
+    sem_delete(sem_b);
+#else
+    test_skip("CAP_ENABLE off");
+#endif
 }
 
 /*============================================================================
@@ -1050,6 +1141,7 @@ static void test_capability_module(void) {
     test_cap_id0_roundtrip();
     test_cap_no_permission();
     test_cap_stale_generation();
+    test_cap_object_stale_on_reuse();
     test_cap_revoke_cascade();
     test_cap_delete_preserves_children();
     test_cap_cspace_required_for_user();
