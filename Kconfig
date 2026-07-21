@@ -756,11 +756,12 @@ config CAP_MAX_COUNT
 config KERN_TASK_CAP_SLOTS
     int "Capability slots per task"
     depends on CAP_ENABLE
-    default 32
+    default 64
     range 8 64
     help
       每个任务 TCB 内的 capability slot 数量。
-      必须与 tcb_t.cap_set[] 的静态大小保持一致。
+      M2-#4: 默认 64 (历史 32→64),由 capabilities uint64 位图驱动。
+      必须与 tcb_t.cap_set[] 的静态大小保持一致 (静态 assert 强制)。
 
 endmenu
 

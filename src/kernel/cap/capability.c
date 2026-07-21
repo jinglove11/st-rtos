@@ -114,7 +114,7 @@ static int cap_task_has(tcb_t *task, cap_id_t cap) {
     }
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        if ((task->capabilities & (uint32_t)BIT(i)) != 0 &&
+        if ((task->capabilities & (uint64_t)BIT(i)) != 0 &&
             task->cap_set[i] == cap) {
             return 1;
         }
@@ -137,7 +137,7 @@ static kern_err_t cap_task_add(tcb_t *task, cap_id_t cap) {
     }
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        uint32_t bit = (uint32_t)BIT(i);
+        uint64_t bit = (uint64_t)BIT(i);
         if ((task->capabilities & bit) == 0) {
             task->cap_set[i] = cap;
             task->capabilities |= bit;
@@ -154,7 +154,7 @@ static void cap_task_remove(tcb_t *task, cap_id_t cap) {
     }
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        uint32_t bit = (uint32_t)BIT(i);
+        uint64_t bit = (uint64_t)BIT(i);
         if ((task->capabilities & bit) != 0 && task->cap_set[i] == cap) {
             task->capabilities &= ~bit;
             task->cap_set[i] = 0;
@@ -771,7 +771,7 @@ cap_id_t cap_self_find_slot(tcb_t *owner, uint8_t obj_type, uint8_t index) {
     cap_id_t found = KERN_INVALID_ID;
 
     for (int i = 0; i < CAP_TASK_CSPACE_SLOTS; i++) {
-        uint32_t bit = (uint32_t)BIT(i);
+        uint64_t bit = (uint64_t)BIT(i);
         if ((owner->capabilities & bit) == 0) {
             continue;
         }

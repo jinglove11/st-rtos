@@ -602,6 +602,69 @@ static void test_cap_cspace_extended_slots(void) {
 }
 
 /*============================================================================
+ * Test 21b: M2-#4 — CSpace 扩容到 64 slot,验证 >32 的 slot 可用
+ *
+ * 历史 CSpace 是 32 slot (uint32 bitmap)。M2-#4 扩到 64 (uint64 bitmap)。
+ * 本测试填充 48 个 slot (跨过旧的 32 边界),验证 slot 33-47 可用,
+ * 且 capabilities 位图的高 32 位 (bit 32-63) 正确置位。
+ *============================================================================*/
+static void test_cap_cspace_over_32_slots(void) {
+    test_section("Test 21b: CSpace slots beyond 32 (M2-#4 64-slot)");
+
+    /* KERN_TASK_CAP_SLOTS 必须 >= 48 才能跑这个测试 */
+    if (KERN_TASK_CAP_SLOTS < 48) {
+        test_skip("KERN_TASK_CAP_SLOTS < 48");
+        return;
+    }
+
+    task_id_t tid = task_create("capcs48", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "create task for >32 slot test");
+    tcb_t *tcb = task_get_tcb(tid);
+    TEST_ASSERT(tcb != NULL, "get >32 slot task TCB");
+    if (tcb == NULL) {
+        (void)task_delete(tid);
+        return;
+    }
+    /* cap_task_add 只对 USER 任务登记 cap_set;手工设 attrs 让它走完整路径 */
+    tcb->attrs = TASK_ATTR_USER;
+
+    /* 填充 48 个 slot (绕过 32 边界)。cap_pool 上限是 CAP_MAX_COUNT=128,够。 */
+    int dummy_obj = 0;
+    cap_id_t caps[48];
+    int filled = 0;
+    for (int i = 0; i < 48; i++) {
+        caps[i] = cap_create_for(tcb, &dummy_obj, CAP_OBJ_SEMAPHORE, CAP_READ);
+        if (caps[i] == ((cap_id_t)-1)) {
+            break;
+        }
+        filled++;
+    }
+    TEST_ASSERT_EQ(48, filled, "M2-#4: filled 48 slots (cross 32 boundary)");
+
+    /* 验证高 32 位被置位 (bit 32-47)。capabilities 是 uint64,高 32 位
+     * 应该有 (1<<0)|(1<<1)|...|(1<<15) = 0xFFFF 在高 word。 */
+    TEST_ASSERT((tcb->capabilities >> 32) != 0,
+                "M2-#4: high 32 bits of capabilities bitmap set");
+
+    /* slot 40 应该被填充 */
+    TEST_ASSERT((tcb->capabilities & ((uint64_t)BIT(40))) != 0,
+                "M2-#4: slot 40 populated");
+
+    /* cap_resolve 应能 resolve slot 40 的 cap */
+    void *ptr = cap_lookup_for(tcb, caps[40], CAP_OBJ_SEMAPHORE, CAP_READ);
+    TEST_ASSERT(ptr == &dummy_obj, "M2-#4: slot 40 cap resolves");
+
+    /* cleanup */
+    for (int i = 0; i < filled; i++) {
+        cap_delete(caps[i]);
+    }
+    TEST_ASSERT_EQ(0, (int)tcb->capabilities,
+                   "M2-#4: all slots cleared after delete");
+
+    (void)task_delete(tid);
+}
+
+/*============================================================================
  * Test 22: revoke all caps for one object without touching another object
  *============================================================================*/
 
@@ -1147,6 +1210,7 @@ static void test_capability_module(void) {
     test_cap_cspace_required_for_user();
     test_cap_cspace_install_and_revoke();
     test_cap_cspace_extended_slots();
+    test_cap_cspace_over_32_slots();
     test_cap_revoke_object();
     test_cap_copy_to_task();
     test_cap_move_to_task();

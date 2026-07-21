@@ -105,7 +105,7 @@ IRQ_THREADED_STACK_SIZE=256
 # ---- Capability ----
 CAP_ENABLE=y
 CAP_MAX_COUNT=32
-KERN_TASK_CAP_SLOTS=32
+KERN_TASK_CAP_SLOTS=64
 
 # ---- Fault (capture but no verbose dump) ----
 FAULT_ENABLE=y

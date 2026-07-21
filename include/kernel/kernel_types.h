@@ -183,8 +183,12 @@ typedef struct tcb {
 
     // --- 能力 ---
 #if CAP_ENABLE
-    uint32_t    capabilities;         // 能力位图
-    cap_id_t    cap_set[32];         // 持有的能力集 (Phase 2)
+    /* M2-#4: CSpace 扩容 32→64 slot/task。
+     * capabilities 位图 uint32→uint64 (支持 64 slot);
+     * cap_set[] 用 KERN_TASK_CAP_SLOTS 配置驱动 (Kconfig range 8-64)。
+     * 128 slot 留待 mint/copy 大量派生时再加 uint64[2] 两级。 */
+    uint64_t    capabilities;         // 能力位图 (64 bit)
+    cap_id_t    cap_set[KERN_TASK_CAP_SLOTS];  // 持有的能力集
 #endif
 
     // --- 统计信息 ---
@@ -407,7 +411,9 @@ typedef struct {
 #define ALIGN_DOWN(x, align)   ((x) & ~((align) - 1))
 
 #ifndef BIT
-#define BIT(n)                 (1UL << (n))
+/* M2-#4: 1ULL 支持 n >= 32 (CSpace 64 slot bitmap 等)。
+ * 32 位 ARM 上 unsigned long=32 位,BIT(32+) 是 UB。改用 1ULL。 */
+#define BIT(n)                 (1ULL << (n))
 #endif
 #define SET_BIT(x, n)          ((x) |= BIT(n))
 #define CLR_BIT(x, n)          ((x) &= ~BIT(n))

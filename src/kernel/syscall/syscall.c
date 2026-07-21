@@ -1417,7 +1417,7 @@ static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
     int granted = 0;
     if (caller != NULL && (caller->attrs & TASK_ATTR_USER) != 0) {
         for (int i = 0; i < KERN_TASK_CAP_SLOTS; i++) {
-            uint32_t bit = (uint32_t)BIT(i);
+            uint64_t bit = (uint64_t)BIT(i);
             if ((caller->capabilities & bit) == 0) {
                 continue;
             }
