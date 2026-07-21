@@ -391,12 +391,14 @@ uint32_t mem_get_fail_count(void) {
 #if CAP_ENABLE
 
 typedef struct {
+    kobject_header_t hdr;   /* M2-Step3d */
     void  *base;
     size_t size;
     uint8_t aligned;   /* base 是否用 kmalloc_aligned 分配 (map 需 32 对齐) */
 } kmem_object_t;
 
 typedef struct {
+    kobject_header_t hdr;   /* M2-Step3d */
     uintptr_t base;
     size_t    size;
     uint8_t   width;
@@ -404,6 +406,7 @@ typedef struct {
 } kmmio_object_t;
 
 typedef struct {
+    kobject_header_t hdr;   /* M2-Step3d */
     void  *base;
     size_t size;
     uint8_t in_use;
@@ -440,7 +443,13 @@ static int kmmio_width_valid(uint8_t width) {
 static kmmio_object_t *kmmio_alloc_object(void) {
     for (uint32_t i = 0; i < KMMIO_OBJECT_MAX; i++) {
         if (!kmmio_objects[i].in_use) {
+            /* M2-Step3d: 跨 memset 保留 generation */
+            uint16_t saved_gen = kmmio_objects[i].hdr.generation;
             memset(&kmmio_objects[i], 0, sizeof(kmmio_objects[i]));
+            kobj_header_init(&kmmio_objects[i].hdr, CAP_OBJ_MMIO);
+            if (saved_gen != 0) {
+                kmmio_objects[i].hdr.generation = saved_gen;
+            }
             kmmio_objects[i].in_use = 1U;
             return &kmmio_objects[i];
         }
@@ -450,7 +459,10 @@ static kmmio_object_t *kmmio_alloc_object(void) {
 
 static void kmmio_free_object(kmmio_object_t *mmio) {
     if (mmio != NULL) {
+        uint16_t next_gen = kobj_header_prepare_reuse(&mmio->hdr);
         memset(mmio, 0, sizeof(*mmio));
+        mmio->hdr.obj_type   = CAP_OBJ_MMIO;
+        mmio->hdr.generation = next_gen;
     }
 }
 
@@ -460,7 +472,13 @@ static int kshm_is_mpu_compliant(size_t size);
 static kshm_object_t *kshm_alloc_object(void) {
     for (uint32_t i = 0; i < KSHM_OBJECT_MAX; i++) {
         if (!kshm_objects[i].in_use) {
+            /* M2-Step3d: 跨 memset 保留 generation */
+            uint16_t saved_gen = kshm_objects[i].hdr.generation;
             memset(&kshm_objects[i], 0, sizeof(kshm_objects[i]));
+            kobj_header_init(&kshm_objects[i].hdr, CAP_OBJ_SHM);
+            if (saved_gen != 0) {
+                kshm_objects[i].hdr.generation = saved_gen;
+            }
             kshm_objects[i].in_use = 1U;
             return &kshm_objects[i];
         }
@@ -470,7 +488,10 @@ static kshm_object_t *kshm_alloc_object(void) {
 
 static void kshm_free_object(kshm_object_t *shm) {
     if (shm != NULL) {
+        uint16_t next_gen = kobj_header_prepare_reuse(&shm->hdr);
         memset(shm, 0, sizeof(*shm));
+        shm->hdr.obj_type   = CAP_OBJ_SHM;
+        shm->hdr.generation = next_gen;
     }
 }
 
@@ -519,6 +540,8 @@ cap_id_t kmem_alloc_cap(size_t size, uint8_t rights) {
         return KERN_INVALID_ID;
     }
     memset(mem, 0, sizeof(*mem));
+    /* M2-Step3d: heap 对象,初始化 generation=1 */
+    kobj_header_init(&mem->hdr, CAP_OBJ_MEMBLOCK);
 
     /* 用 kmalloc_aligned(32):sys_mem_map 要求 base 32 对齐 (MPU region)。
      * 与 kshm_create_aligned_cap 一致。 */
@@ -531,7 +554,13 @@ cap_id_t kmem_alloc_cap(size_t size, uint8_t rights) {
     mem->aligned = 1U;
 
     (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, kmem_cap_cleanup);
-    cap_id_t cap = cap_create(mem, CAP_OBJ_MEMBLOCK, rights, 0);
+    /* owner 用 current task (user task 调 sys_mem_alloc 时, cap 归它;
+     * task 死亡 cap_revoke_all 才能撤掉,触发 cleanup hook 释放内存)。
+     * 历史代码传 NULL (owner=0=kernel) 是 bug:user task 死亡时 memblock
+     * 不被 revoke,内存泄漏。M2-Step3d 顺便修复。 */
+    tcb_t *cur = sched_get_current();
+    cap_id_t cap = cap_create_for_gen(cur, mem, CAP_OBJ_MEMBLOCK, rights,
+                                      mem->hdr.generation);
     if (cap == KERN_INVALID_ID) {
         kmem_cap_cleanup(mem, CAP_OBJ_MEMBLOCK);
         return KERN_INVALID_ID;
@@ -688,7 +717,8 @@ kern_err_t kmmio_create_cap(uintptr_t base, size_t size, uint8_t width,
     mmio->width = width;
 
     (void)cap_register_cleanup(CAP_OBJ_MMIO, kmem_cap_cleanup);
-    cap_id_t cap = cap_create_for(NULL, mmio, CAP_OBJ_MMIO, rights);
+    cap_id_t cap = cap_create_for_gen(NULL, mmio, CAP_OBJ_MMIO, rights,
+                                      mmio->hdr.generation);
     if (cap == KERN_INVALID_ID) {
         kmmio_free_object(mmio);
         return KERN_ERR_RESOURCE;
@@ -726,7 +756,8 @@ kern_err_t kmmio_create_cap_for(tcb_t *owner, uintptr_t base, size_t size,
     mmio->width = width;
 
     (void)cap_register_cleanup(CAP_OBJ_MMIO, kmem_cap_cleanup);
-    cap_id_t cap = cap_create_for(owner, mmio, CAP_OBJ_MMIO, rights);
+    cap_id_t cap = cap_create_for_gen(owner, mmio, CAP_OBJ_MMIO, rights,
+                                      mmio->hdr.generation);
     if (cap == KERN_INVALID_ID) {
         kmmio_free_object(mmio);
         return KERN_ERR_RESOURCE;
@@ -785,7 +816,7 @@ cap_id_t kshm_create_cap(size_t size, uint8_t rights) {
 
     (void)cap_register_cleanup(CAP_OBJ_SHM, kmem_cap_cleanup);
     (void)cap_register_revoke_hook(CAP_OBJ_SHM, kmem_cap_revoke_hook);
-    cap_id_t cap = cap_create_for(NULL, shm, CAP_OBJ_SHM, rights);
+    cap_id_t cap = cap_create_for_gen(NULL, shm, CAP_OBJ_SHM, rights, shm->hdr.generation);
     if (cap == KERN_INVALID_ID) {
         kmem_cap_cleanup(shm, CAP_OBJ_SHM);
         return KERN_INVALID_ID;
@@ -826,7 +857,7 @@ cap_id_t kshm_create_aligned_cap(size_t size, uint8_t rights) {
 
     (void)cap_register_cleanup(CAP_OBJ_SHM, kmem_cap_cleanup);
     (void)cap_register_revoke_hook(CAP_OBJ_SHM, kmem_cap_revoke_hook);
-    cap_id_t cap = cap_create_for(NULL, shm, CAP_OBJ_SHM, rights);
+    cap_id_t cap = cap_create_for_gen(NULL, shm, CAP_OBJ_SHM, rights, shm->hdr.generation);
     if (cap == KERN_INVALID_ID) {
         kmem_cap_cleanup(shm, CAP_OBJ_SHM);
         return KERN_INVALID_ID;

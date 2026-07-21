@@ -51,6 +51,7 @@ typedef struct {
 
 #if CAP_ENABLE
 typedef struct {
+    kobject_header_t hdr;       /* M2-Step3d: 对象 header */
     ep_id_t     ep_id;
     task_id_t   server_id;
     tcb_t      *sender;
@@ -166,6 +167,10 @@ static void endpoint_bind_reply_cap(ep_id_t ep_id, tcb_t *server,
     endpoint_invalidate_reply_cap(ep_id, server->id);
 
     endpoint_reply_t *reply = &ep_reply_objects[ep_id][server->id];
+    /* M2-Step3d: 每次 bind 都 bump generation,使上次的 reply cap 失效
+     * (上次的 reply cap 是一次性的,bind 新 request 后旧的应拒绝)。 */
+    reply->hdr.obj_type   = CAP_OBJ_REPLY;
+    reply->hdr.generation = kobj_header_prepare_reuse(&reply->hdr);
     reply->ep_id = ep_id;
     reply->server_id = server->id;
     reply->sender = sender;
@@ -173,7 +178,8 @@ static void endpoint_bind_reply_cap(ep_id_t ep_id, tcb_t *server,
     reply->active = 1;
     reply->used = 0;
     reply->bind_error = KERN_OK;
-    reply->cap = cap_create_for(server, reply, CAP_OBJ_REPLY, CAP_WRITE);
+    reply->cap = cap_create_for_gen(server, reply, CAP_OBJ_REPLY, CAP_WRITE,
+                                    reply->hdr.generation);
     if (reply->cap == KERN_INVALID_ID) {
         reply->active = 0;
         reply->used = 1;

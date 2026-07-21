@@ -59,6 +59,7 @@ typedef struct {
 } irq_notify_binding_t;
 
 typedef struct {
+    kobject_header_t hdr;       /* M2-Step3d: 对象 header */
     int16_t irq_num;
     uint8_t in_use;
 } irq_cap_object_t;
@@ -154,7 +155,13 @@ static void irq_record_event(int16_t irq, uint8_t action,
 static irq_cap_object_t *irq_cap_alloc_object(void) {
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (!irq_cap_objects[i].in_use) {
+            /* M2-Step3d: 跨 memset 保留 generation (free 时已 bump) */
+            uint16_t saved_gen = irq_cap_objects[i].hdr.generation;
             memset(&irq_cap_objects[i], 0, sizeof(irq_cap_objects[i]));
+            kobj_header_init(&irq_cap_objects[i].hdr, CAP_OBJ_IRQ);
+            if (saved_gen != 0) {
+                irq_cap_objects[i].hdr.generation = saved_gen;
+            }
             irq_cap_objects[i].in_use = 1U;
             return &irq_cap_objects[i];
         }
@@ -164,7 +171,11 @@ static irq_cap_object_t *irq_cap_alloc_object(void) {
 
 static void irq_cap_free_object(irq_cap_object_t *obj) {
     if (obj != NULL) {
+        /* M2-Step3d: bump generation 跨 memset 保留 */
+        uint16_t next_gen = kobj_header_prepare_reuse(&obj->hdr);
         memset(obj, 0, sizeof(*obj));
+        obj->hdr.obj_type   = CAP_OBJ_IRQ;
+        obj->hdr.generation = next_gen;
     }
 }
 
@@ -537,7 +548,9 @@ kern_err_t kirq_create_cap(int16_t irq, uint8_t rights, cap_id_t *out_cap) {
     obj->irq_num = irq;
 
     irq_cap_register_hooks();
-    cap_id_t cap = cap_create_for(NULL, obj, CAP_OBJ_IRQ, rights);
+    /* M2-Step3d: 启用 obj_generation cross-check */
+    cap_id_t cap = cap_create_for_gen(NULL, obj, CAP_OBJ_IRQ, rights,
+                                      obj->hdr.generation);
     if (cap == KERN_INVALID_ID) {
         irq_cap_free_object(obj);
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
