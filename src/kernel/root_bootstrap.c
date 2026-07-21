@@ -101,7 +101,7 @@ kern_err_t root_bootstrap_prepare(tcb_t *root_task) {
     root_bootstrap_init();
 
     cap_id_t task_cap = cap_create_for(root_task,
-                                       (void *)(uintptr_t)(root_task->id + 1),
+                                       task_obj_for_cap(root_task->id),
                                        CAP_OBJ_TASK, CAP_FULL);
     if (task_cap < 0) {
         root_bootstrap_init();
@@ -217,7 +217,7 @@ kern_err_t root_bootstrap_create_service(const char *name,
     }
 
     cap_id_t cap = cap_create_for(root_task,
-                                  (void *)(uintptr_t)(tid + 1),
+                                  task_obj_for_cap(tid),
                                   CAP_OBJ_TASK, CAP_FULL);
     if (cap < 0) {
         (void)task_delete(tid);
@@ -249,7 +249,7 @@ kern_err_t root_bootstrap_start_service(cap_id_t task_cap) {
         return KERN_ERR_CAP;
     }
 
-    task_id_t tid = (task_id_t)((uintptr_t)obj - 1U);
+    task_id_t tid = task_id_from_obj(obj);
     if (tid == root_bootstrap.task_id) {
         return KERN_ERR_PARAM;
     }
@@ -279,7 +279,7 @@ kern_err_t root_bootstrap_create_service_endpoint(cap_id_t service_task_cap,
         return KERN_ERR_CAP;
     }
 
-    task_id_t service_id = (task_id_t)((uintptr_t)obj - 1U);
+    task_id_t service_id = task_id_from_obj(obj);
     if (service_id == root_bootstrap.task_id) {
         return KERN_ERR_PARAM;
     }

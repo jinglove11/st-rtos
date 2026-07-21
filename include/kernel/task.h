@@ -232,4 +232,15 @@ task_id_t task_create_user(const char   *name,
                             uint8_t      priority,
                             uint32_t     stack_size);
 
+/*============================================================================
+ * M2-Step3c: cap 路径 id ↔ 对象指针 转换
+ *
+ * 注意: task 的 hdr 在 tcb_t 的 offset 0 (sp 在 offset 12,asm 用 OFF_SP)。
+ * 所以 cap.object = &task_pool[id] 即 &tcb_t,header 在 offset 0,cap_get_entry
+ * cross-check 直接读 hdr.generation。
+ *============================================================================*/
+
+task_id_t task_id_from_obj(void *obj);
+void *task_obj_for_cap(task_id_t id);
+
 #endif // TASK_H

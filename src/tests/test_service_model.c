@@ -1122,7 +1122,7 @@ static void test_root_bootstrap_initial_task_cap(void) {
 
         void *resolved = cap_lookup_for(root, info.caps[0].cap,
                                         CAP_OBJ_TASK, CAP_MANAGE);
-        TEST_ASSERT_EQ((uintptr_t)(tid + 1), (uintptr_t)resolved,
+        TEST_ASSERT_EQ((int)tid, (int)task_id_from_obj(resolved),
                        "root task cap resolves task id object");
 
         TEST_ASSERT_EQ((int)CAP_OBJ_ENDPOINT, (int)info.caps[1].obj_type,
@@ -1291,7 +1291,7 @@ static void test_root_bootstrap_create_service(void) {
     tcb_t *root = task_get_tcb(root_id);
     void *resolved = cap_lookup_for(root, service_cap,
                                     CAP_OBJ_TASK, CAP_MANAGE);
-    TEST_ASSERT_EQ((uintptr_t)(service_id + 1), (uintptr_t)resolved,
+    TEST_ASSERT_EQ((int)service_id, (int)task_id_from_obj(resolved),
                    "root service cap resolves service task id");
 
     if (service_id >= 0) {

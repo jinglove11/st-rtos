@@ -140,8 +140,11 @@ static int sys_task_create(uint32_t a1, uint32_t a2, uint32_t a3,
 
 #if CAP_ENABLE
     tcb_t *cur = sched_get_current();
-    cap_id_t cap = cap_create((void *)(uintptr_t)(id + 1), CAP_OBJ_TASK,
-                              CAP_FULL, (uint8_t)(cur ? cur->id : 0));
+    /* M2-Step3c: 真指针 &task_pool[id] + obj_generation 启用 cross-check
+     * (满足 M2 验收 #1: stale task cap 在 id 复用后失效) */
+    void *obj = task_obj_for_cap(id);
+    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_TASK, CAP_FULL, obj_gen);
     if (cap < 0) { task_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
 #else
@@ -155,7 +158,7 @@ static int sys_task_start(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    return task_start((task_id_t)((uintptr_t)obj - 1));
+    return task_start(task_id_from_obj(obj));
 #else
     return task_start((task_id_t)a1);
 #endif
@@ -167,7 +170,7 @@ static int sys_task_suspend(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    return task_suspend((task_id_t)((uintptr_t)obj - 1));
+    return task_suspend(task_id_from_obj(obj));
 #else
     return task_suspend((task_id_t)a1);
 #endif
@@ -179,7 +182,7 @@ static int sys_task_resume(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    return task_resume((task_id_t)((uintptr_t)obj - 1));
+    return task_resume(task_id_from_obj(obj));
 #else
     return task_resume((task_id_t)a1);
 #endif
@@ -191,7 +194,7 @@ static int sys_task_delete(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_TASK, CAP_MANAGE);
     if (!obj) return KERN_ERR_CAP;
-    task_id_t id = (task_id_t)((uintptr_t)obj - 1);
+    task_id_t id = task_id_from_obj(obj);
     kern_err_t ret = task_delete(id);
     if (ret == KERN_OK) {
         cap_delete((cap_id_t)a1);
@@ -1441,10 +1444,12 @@ static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
     (void)granted;  /* degraded mode (no cap) is non-fatal */
 
     /* Mint a management TASK cap for the CALLER so it can start/manage the
-     * restarted task — mirrors sys_task_create's contract. */
-    cap_id_t mgr_cap = cap_create_for(caller,
-                                      (void *)(uintptr_t)(id + 1),
-                                      CAP_OBJ_TASK, CAP_FULL);
+     * restarted task — mirrors sys_task_create's contract.
+     * M2-Step3c: 真指针 + obj_generation */
+    void *task_obj = task_obj_for_cap(id);
+    uint16_t task_gen = ((const kobject_header_t *)task_obj)->generation;
+    cap_id_t mgr_cap = cap_create_for_gen(caller, task_obj,
+                                          CAP_OBJ_TASK, CAP_FULL, task_gen);
     if (mgr_cap < 0) {
         task_delete(id);
         return KERN_ERR_RESOURCE;
@@ -1491,7 +1496,7 @@ static int sys_task_set_policy(uint32_t a1, uint32_t a2, uint32_t a3,
     if (obj == NULL) {
         return KERN_ERR_CAP;
     }
-    task_id_t tid = (task_id_t)((uintptr_t)obj - 1);
+    task_id_t tid = task_id_from_obj(obj);
     return (int)task_set_sched_policy(tid, (uint8_t)a2);
 #elif RT_SCHED
     return (int)task_set_sched_policy((task_id_t)a1, (uint8_t)a2);

@@ -96,7 +96,7 @@ SVC_Handler:
     /* r2 still holds byte offset */
     ldr     r0, =_next_task
     ldr     r0, [r0, r2]           /* _next_task[cpu_id] */
-    ldr     r1, [r0]               /* R1 = first_task->sp */
+    ldr     r1, [r0, #OFF_SP]     /* R1 = first_task->sp */
 
     ldmia   r1!, {r4-r11}
     msr     psp, r1
@@ -141,7 +141,7 @@ SVC_Handler:
     ldr     r4, [r3, r5]           /* _current_task[cpu_id] */
     cmp     r4, #0
     beq     1f
-    str     r12, [r4]              /* TCB->sp = PSP */
+    str     r12, [r4, #OFF_SP]    /* TCB->sp = PSP */
     /* Save PSPLIM alongside R4-R11 so blocked syscalls switch cleanly. */
     mrs     r2, psplim
     str     r2, [r4, #OFF_SP_LIMIT]
@@ -175,7 +175,7 @@ SVC_Handler:
     ldr     r4, [r3, r5]           /* _current_task[cpu_id] */
     cmp     r4, #0
     beq     2f
-    ldr     r1, [r4]
+    ldr     r1, [r4, #OFF_SP]
     /* Restore PSPLIM before clobbering r4 with the saved R4-R11. */
     ldr     r2, [r4, #OFF_SP_LIMIT]
     msr     psplim, r2
@@ -232,7 +232,7 @@ SVC_Handler:
     msr     control, r2
     isb
 
-    ldr     r1, [r0]               /* next->sp */
+    ldr     r1, [r0, #OFF_SP]     /* next->sp */
     ldmia   r1!, {r4-r11}
     msr     psp, r1
 

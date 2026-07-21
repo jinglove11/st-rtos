@@ -204,9 +204,12 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
     root_bootstrap_cleanup_task(tcb);
     cap_revoke_all((uint8_t)tcb->id);
     /* M2: 撤销其他任务持有的指向此 task 的 cap。
-     * 防止 task id 复用后旧 cap 控制无关新 task (陈旧授权)。 */
+     * 防止 task id 复用后旧 cap 控制无关新 task (陈旧授权)。
+     * M2-Step3c: 改用真指针 &tcb (header 在 offset 0)。 */
     extern kern_err_t cap_revoke_object(void *object, uint8_t obj_type);
-    cap_revoke_object((void *)(uintptr_t)(tcb->id + 1), CAP_OBJ_TASK);
+    cap_revoke_object(tcb, CAP_OBJ_TASK);
+    /* M2-Step3c: bump generation 跨 memset 保留 (task_create memset 会清掉) */
+    tcb->hdr.generation = kobj_header_prepare_reuse(&tcb->hdr);
 #endif
 
     task_wake_joiners(tcb, join_result);
@@ -402,7 +405,15 @@ task_id_t task_create(const char   *name,
     tcb_t *tcb = &task_pool[id];
 
     // 初始化 TCB
+    /* M2-Step3c: 跨 memset 保留 generation。task 池复用 id 时,上次
+     * task_cleanup_resources 已 bump 了 hdr.generation,这里恢复。
+     * 首次分配 generation=0 → kobj_header_init 设 1。 */
+    uint16_t saved_gen = tcb->hdr.generation;
     memset(tcb, 0, sizeof(tcb_t));
+    kobj_header_init(&tcb->hdr, CAP_OBJ_TASK);
+    if (saved_gen != 0) {
+        tcb->hdr.generation = saved_gen;
+    }
     tcb->id = id;
     tcb->priority = priority;
     tcb->base_priority = priority;
@@ -703,6 +714,20 @@ tcb_t *task_get_tcb(task_id_t task_id) {
     }
 
     return tcb;
+}
+
+/* M2-Step3c: cap 路径 id ↔ 对象指针 转换 (tcb_t.hdr 在 offset 0)。 */
+task_id_t task_id_from_obj(void *obj) {
+    if (obj == NULL) return KERN_INVALID_ID;
+    tcb_t *tcb = (tcb_t *)obj;
+    task_id_t id = (task_id_t)(tcb - task_pool);
+    if (id < 0 || id >= KERNEL_MAX_TASKS) return KERN_INVALID_ID;
+    return id;
+}
+
+void *task_obj_for_cap(task_id_t id) {
+    if (id < 0 || id >= KERNEL_MAX_TASKS) return NULL;
+    return (void *)&task_pool[id];
 }
 
 task_id_t task_get_next(task_id_t task_id) {

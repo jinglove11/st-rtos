@@ -123,7 +123,13 @@ typedef struct {
 #endif
 
 typedef struct tcb {
-    // --- 上下文保存区 (汇编访问, 必须在最前面) ---
+    /* M2-Step3c: kobject_header_t 在 offset 0。
+     * sp 移到 hdr 之后 (offset 12),asm 用 [rX, #OFF_SP] 访问
+     * (tcb_offsets.inc 自动同步)。这是 cap_get_entry cross-check
+     * "hdr 在 object 指针的 offset 0" 不变量的唯一例外处理方式。 */
+    kobject_header_t hdr;
+
+    // --- 上下文保存区 (汇编访问, OFF_SP=12 不是 0) ---
     void       *sp;                   // 栈指针
 
     // --- 基本信息 ---

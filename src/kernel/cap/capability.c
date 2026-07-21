@@ -673,7 +673,7 @@ kern_err_t cap_transfer_to_task_cap(cap_id_t cap, cap_id_t task_cap) {
     if (obj == NULL) {
         return KERN_ERR_CAP;
     }
-    task_id_t tid = (task_id_t)((uintptr_t)obj - 1);
+    task_id_t tid = task_id_from_obj(obj);
     tcb_t *target = task_get_tcb(tid);
     if (target == NULL) {
         return KERN_ERR_PARAM;

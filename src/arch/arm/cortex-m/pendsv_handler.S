@@ -62,7 +62,7 @@ PendSV_Handler:
 
     mrs     r1, psp
     stmdb   r1!, {r4-r11}
-    str     r1, [r0]               /* TCB->sp = PSP */
+    str     r1, [r0, #OFF_SP]     /* TCB->sp = PSP */
 
     /* Save current PSPLIM so it is restored on context-in. */
     mrs     r2, psplim
@@ -92,7 +92,7 @@ PendSV_Handler:
     msr     control, r2
     isb
 
-    ldr     r1, [r0]               /* next->sp */
+    ldr     r1, [r0, #OFF_SP]     /* next->sp */
 
     ldmia   r1!, {r4-r11}
     msr     psp, r1
