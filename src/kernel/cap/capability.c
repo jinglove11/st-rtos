@@ -85,11 +85,22 @@ static void cap_flush_deferred(void) {
                 cap_revoke_hook_table[d->obj_type](d->cap, d->object, d->obj_type);
             }
         } else {
-            /* cleanup hook (仅当 refcount==0) */
-            if (d->obj_type < CAP_OBJ_TYPE_MAX &&
-                cap_cleanup_table[d->obj_type] != NULL &&
+            /* cleanup hook (仅当 refcount==0)。
+             * 深派生树 revoke 时多个 cap_clear_slot defer 同一 object 的
+             * cleanup。第一个执行后 object 被释放,后续同 object 的 entry
+             * 不能再调 cleanup (dangling)。用 obj_type=0xFF 标记去重。 */
+            if (d->obj_type >= CAP_OBJ_TYPE_MAX) {
+                continue;
+            }
+            if (cap_cleanup_table[d->obj_type] != NULL &&
                 cap_object_refcount(d->object, d->obj_type) == 0) {
                 cap_cleanup_table[d->obj_type](d->object, d->obj_type);
+                for (uint8_t j = i + 1; j < n; j++) {
+                    if (cap_deferred_queue[cpu][j].kind == 0 &&
+                        cap_deferred_queue[cpu][j].object == d->object) {
+                        cap_deferred_queue[cpu][j].obj_type = 0xFF;
+                    }
+                }
             }
         }
     }

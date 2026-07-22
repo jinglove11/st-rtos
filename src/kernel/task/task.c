@@ -213,8 +213,8 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
      * M2-Step3c: 改用真指针 &tcb (header 在 offset 0)。 */
     extern kern_err_t cap_revoke_object(void *object, uint8_t obj_type);
     cap_revoke_object(tcb, CAP_OBJ_TASK);
-    /* M2-Step3c: bump generation 跨 memset 保留 (task_create memset 会清掉) */
-    tcb->hdr.generation = kobj_header_prepare_reuse(&tcb->hdr);
+    /* generation bump 不在此做 — task_delete 的 memset 会清零;
+     * 由 task_delete 在 memset 后写回。 */
 #endif
 
     task_wake_joiners(tcb, join_result);
@@ -693,7 +693,12 @@ kern_err_t task_delete(task_id_t task_id) {
 
     // 先撤销可见性，再清零 TCB，避免扫描路径看到半清理槽位
     free_task_id(task_id);
+    /* 跨 memset bump generation:task_create 复用此 slot 时 saved_gen
+     * 非 0 → 用新 generation → 旧 task cap cross-check 失效 (M2 验收 A1)。 */
+    uint16_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
     memset(tcb, 0, sizeof(tcb_t));
+    tcb->hdr.obj_type   = CAP_OBJ_TASK;
+    tcb->hdr.generation = next_gen;
 
     irq_spin_unlock(&task_lock, crit);
     return KERN_OK;
