@@ -128,6 +128,20 @@ kern_err_t cap_get_type(cap_id_t cap, uint8_t *out_type);
 kern_err_t cap_get_rights_for(tcb_t *owner, cap_id_t cap, uint8_t *out_rights);
 kern_err_t cap_get_rights(cap_id_t cap, uint8_t *out_rights);
 cap_id_t cap_derive_for(tcb_t *owner, cap_id_t cap, uint8_t subset_rights);
+
+/*============================================================================
+ * M2-#8: cap transfer 事务语义
+ *
+ * copy/move/revoke 各自在单次 CAP_LOCK 临界区内完成全操作 (capability.c)。
+ * 失败路径在解锁前 cap_clear_slot 回滚 → 源/目标均无半提交状态。
+ * ipc_transfer_caps (多 cap 批量) 用 staged[] + ipc_rollback_caps 实现跨
+ * cap 的 all-or-nothing。
+ *
+ * 当前没有显式 begin/commit/rollback API —— 事务边界 = CAP_LOCK acquire/
+ * release。M2 验收 #2 (CSpace 满原子失败) 由 test_cap_copy_atomic_on_full
+ * 覆盖。若未来需要跨 subsystem 事务 (如 cap + 内存分配原子),再加显式
+ * transaction API。
+ *============================================================================*/
 cap_id_t cap_copy_to(tcb_t *src, cap_id_t cap, tcb_t *dst, uint8_t rights);
 kern_err_t cap_move_to(tcb_t *src, cap_id_t cap, tcb_t *dst, cap_id_t *out_dst);
 kern_err_t cap_revoke_for(tcb_t *owner, cap_id_t cap);

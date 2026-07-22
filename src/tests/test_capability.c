@@ -518,6 +518,71 @@ static void test_cap_mint_badge(void) {
 }
 
 /*============================================================================
+ * Test 17d: M2 验收 A1 — 旧 task cap 在 task id 复用后必须 stale
+ *
+ * 这是验收 #1 的字面条目:task 而非 sem。
+ * 流程: task_A 拿 task_cap_A → task_delete(A) → task_B 复用 A 的 id →
+ *       旧 task_cap_A 必须失效 (cap_resolve 返回 NULL)。
+ *============================================================================*/
+static void cap_test_task_A1(void *arg) { (void)arg; }
+
+static void test_cap_task_id_reuse_stale(void) {
+    test_section("Test 17d: task id reuse invalidates stale task cap (A1)");
+
+#if CAP_ENABLE
+    task_id_t a = task_create("A1_a", cap_test_task_A1, NULL, 10, 512);
+    TEST_ASSERT(a >= 0, "A1: task A created");
+    if (a < 0) return;
+
+    /* 取 task A 的真实 generation cap (跟 sys_task_create 一致) */
+    void *obj_a = task_obj_for_cap(a);
+    uint16_t gen_a = ((const kobject_header_t *)obj_a)->generation;
+    cap_id_t cap_a = cap_create_for_gen(NULL, obj_a, CAP_OBJ_TASK, CAP_FULL, gen_a);
+    TEST_ASSERT(cap_a > 0, "A1: task cap A created");
+
+    TEST_ASSERT(cap_resolve(cap_a, CAP_OBJ_TASK, CAP_MANAGE) == obj_a,
+                "A1: task cap A resolves initially");
+
+    /* 删除 task A: cap_revoke_object 撤销 cap_a + hdr.generation bump */
+    kern_err_t err = task_delete(a);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "A1: task A deleted");
+
+    /* cap_a 已被 revoke,resolve 失败 */
+    TEST_ASSERT(cap_resolve(cap_a, CAP_OBJ_TASK, CAP_MANAGE) == NULL,
+                "A1: task cap A revoked after delete");
+
+    /* 创建 task B: 必须复用 A 的 id (task_pool 按 bitmap first-fit) */
+    task_id_t b = task_create("A1_b", cap_test_task_A1, NULL, 10, 512);
+    TEST_ASSERT(b >= 0, "A1: task B created");
+    TEST_ASSERT_EQ((int)a, (int)b,
+                   "A1: task B reuses task A's id (slot recycle)");
+
+    void *obj_b = task_obj_for_cap(b);
+    uint16_t gen_b = ((const kobject_header_t *)obj_b)->generation;
+    TEST_ASSERT(gen_b != gen_a, "A1: task B has bumped generation");
+
+    /* 模拟"漏撤":构造一个旧 gen_a 的 cap 指向 obj_b。
+     * 即使 cap slot 有效,cross-check 必须拒绝 (obj_gen 不匹配)。 */
+    cap_id_t stale = cap_create_for_gen(NULL, obj_b, CAP_OBJ_TASK, CAP_FULL, gen_a);
+    TEST_ASSERT(stale > 0, "A1: stale cap (old gen) created");
+    TEST_ASSERT(cap_resolve(stale, CAP_OBJ_TASK, CAP_MANAGE) == NULL,
+                "A1: stale task cap (old generation) rejected on reused id");
+
+    /* 对照:新 gen 的 cap 正常 resolve */
+    cap_id_t fresh = cap_create_for_gen(NULL, obj_b, CAP_OBJ_TASK, CAP_FULL, gen_b);
+    TEST_ASSERT(fresh > 0, "A1: fresh cap (new gen) created");
+    TEST_ASSERT(cap_resolve(fresh, CAP_OBJ_TASK, CAP_MANAGE) == obj_b,
+                "A1: fresh task cap resolves to task B");
+
+    cap_delete(fresh);
+    cap_delete(stale);
+    (void)task_delete(b);
+#else
+    test_skip("CAP_ENABLE off");
+#endif
+}
+
+/*============================================================================
  * Test 17d: M2-#8 — copy/move 事务原子性 (CSpace 满时回滚)
  *
  * 验收 #2: "CSpace 满时 cap transfer 原子失败,源和目标均无半提交状态"。
@@ -1175,6 +1240,57 @@ static void test_cap_cleanup_callback(void) {
 }
 
 /*============================================================================
+ * Test 25b: M2 验收 A3 — revoke 大型派生树后 cleanup 只调一次
+ *
+ * 构造深度 + 广度派生树 (root → child1 → grandchild; root → child2 →
+ * grandchild2...),revoke root,cleanup 必须恰好调一次 (refcount 归零)。
+ *============================================================================*/
+static int cap_cleanup_deep_count;
+static void cap_cleanup_deep_fn(void *object, uint8_t obj_type) {
+    (void)object; (void)obj_type;
+    cap_cleanup_deep_count++;
+}
+
+static void test_cap_revoke_deep_tree_cleanup_once(void) {
+    test_section("Test 25b: deep derive tree cleanup once (A3)");
+
+#if CAP_ENABLE
+    int root_obj = 0xC0FFEE;
+    /* root 持 GRANT,可派生 */
+    cap_id_t root = cap_create(&root_obj, CAP_OBJ_MEMBLOCK,
+                               CAP_FULL, 1);
+    TEST_ASSERT(root > 0, "A3: root cap created");
+    (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, cap_cleanup_deep_fn);
+    cap_cleanup_deep_count = 0;
+
+    /* 派生: root → child[0..4], 每个 child 再派生 grandchild。
+     * 共 1 root + 5 child + 5 grandchild = 11 caps 指向同一 object。
+     * 加上 root 自身 = 12 caps。但 cleanup 看 cap_pool 里指向该 object
+     * 的 in_use cap 数,所以 revoke 整棵树后 refcount 应归 0。 */
+    cap_id_t children[5];
+    cap_id_t grandchildren[5];
+    for (int i = 0; i < 5; i++) {
+        children[i] = cap_derive(root, CAP_FULL);
+        TEST_ASSERT(children[i] > 0, "A3: child cap derived");
+        grandchildren[i] = cap_derive(children[i], CAP_FULL);
+        TEST_ASSERT(grandchildren[i] > 0, "A3: grandchild cap derived");
+    }
+
+    /* revoke root:整棵树 (children + grandchildren) 都应被撤销 */
+    kern_err_t err = cap_revoke(root);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "A3: revoke root");
+
+    /* cleanup 必须恰好调 1 次 (refcount 归零才 cleanup) */
+    TEST_ASSERT_EQ(1, cap_cleanup_deep_count,
+                   "A3: cleanup called exactly once after deep tree revoke");
+
+    (void)cap_register_cleanup(CAP_OBJ_MEMBLOCK, NULL);
+#else
+    test_skip("CAP_ENABLE off");
+#endif
+}
+
+/*============================================================================
  * Test 27: MMIO cap lifecycle
  *============================================================================*/
 
@@ -1341,6 +1457,7 @@ static void test_capability_module(void) {
     test_cap_stale_generation();
     test_cap_object_stale_on_reuse();
     test_cap_mint_badge();
+    test_cap_task_id_reuse_stale();
     test_cap_copy_atomic_on_full();
     test_cap_revoke_cascade();
     test_cap_delete_preserves_children();
@@ -1356,6 +1473,7 @@ static void test_capability_module(void) {
     test_ipc_cap_move_success();
     test_cap_object_refcount();
     test_cap_cleanup_callback();
+    test_cap_revoke_deep_tree_cleanup_once();
     test_mmio_cap_lifecycle();
 #if CAP_RESTART_SUBSET
     test_cap_derive_for_restart_strips_grant();
