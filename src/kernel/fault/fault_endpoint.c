@@ -10,6 +10,7 @@
 #include "bh.h"
 #include "hal.h"
 #include "kernel.h"
+#include "spinlock.h"
 #include <string.h>
 
 /*============================================================================
@@ -26,6 +27,7 @@ uint32_t kern_fault_dropped_count = 0;
 static fault_event_t fault_ring[KERN_FAULT_RING_SIZE];
 static volatile uint32_t fault_ring_head = 0;  /* writer advances */
 static volatile uint32_t fault_ring_tail = 0;  /* reader advances */
+static irq_spinlock_t fault_ring_lock;
 
 static int16_t fault_bh_id = -1;
 
@@ -45,23 +47,18 @@ static void fault_bh_handler(void *arg) {
         return;
     }
 
-    /* Hold the crit lock across the WHOLE drain. endpoint_notify() does its
-     * own crit management internally and PRIMASK save/restore is reentrant,
-     * so nesting is safe. Keeping the lock means the producer (kern_fault_notify,
-     * in Handler mode) cannot mutate fault_ring_tail via its overwrite branch
-     * mid-drain — eliminating a lost-update race on the tail index. The cost
-     * is that endpoint_notify runs with IRQs masked, but it never blocks and
-     * its waitqueue wakeup only arms PendSV (fired on crit exit). */
-    uint32_t crit = hal_enter_critical();
-
-    while (fault_ring_tail != fault_ring_head) {
+    for (;;) {
+        uint32_t crit = irq_spin_lock(&fault_ring_lock);
+        if (fault_ring_tail == fault_ring_head) {
+            irq_spin_unlock(&fault_ring_lock, crit);
+            break;
+        }
         fault_event_t snapshot = fault_ring[fault_ring_tail];
         fault_ring_tail = (fault_ring_tail + 1U) % KERN_FAULT_RING_SIZE;
+        irq_spin_unlock(&fault_ring_lock, crit);
 
         (void)endpoint_notify(kern_fault_ep, &snapshot);
     }
-
-    hal_exit_critical(crit);
 }
 
 /*============================================================================
@@ -73,6 +70,7 @@ void kern_fault_endpoint_init(void) {
         return;  /* already initialized */
     }
 
+    irq_spin_init_rank(&fault_ring_lock, LOCKDEP_RANK_OBJECT);
     kern_fault_ep = endpoint_create(KERN_FAULT_EP_NAME,
                                     (uint16_t)sizeof(fault_event_t),
                                     KERN_FAULT_EP_PENDING);
@@ -88,9 +86,11 @@ void kern_fault_endpoint_init(void) {
         fault_bh_id = -1;
     }
 
+    uint32_t crit = irq_spin_lock(&fault_ring_lock);
     fault_ring_head = 0;
     fault_ring_tail = 0;
     kern_fault_dropped_count = 0;
+    irq_spin_unlock(&fault_ring_lock, crit);
 }
 
 /*============================================================================
@@ -108,6 +108,8 @@ void kern_fault_notify(uint32_t fault_type,
     if (kern_fault_ep == KERN_INVALID_ID) {
         return;
     }
+
+    uint32_t crit = irq_spin_lock(&fault_ring_lock);
 
     uint32_t head = fault_ring_head;
     uint32_t next = (head + 1U) % KERN_FAULT_RING_SIZE;
@@ -143,6 +145,7 @@ void kern_fault_notify(uint32_t fault_type,
     }
 
     fault_ring_head = next;
+    irq_spin_unlock(&fault_ring_lock, crit);
 
     if (fault_bh_id >= 0) {
         (void)bh_schedule(fault_bh_id);

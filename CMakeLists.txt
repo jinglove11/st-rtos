@@ -102,6 +102,7 @@ add_custom_command(
             --include ${CMAKE_CURRENT_LIST_DIR}/include/kernel
     DEPENDS ${CMAKE_CURRENT_LIST_DIR}/tools/gen_tcb_offsets.c
             ${CMAKE_CURRENT_LIST_DIR}/include/kernel/kernel_types.h
+            ${CMAKE_CURRENT_LIST_DIR}/include/kernel/kernel_config.h
             ${CMAKE_CURRENT_LIST_DIR}/scripts/gen_tcb_offsets.py
     VERBATIM
 )

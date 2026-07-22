@@ -265,7 +265,7 @@ static void endpoint_cancel_sender(ep_id_t ep_id, endpoint_t *ep, tcb_t *sender)
  *============================================================================*/
 
 void endpoint_init(void) {
-    irq_spin_init(&ep_lock);
+    irq_spin_init_rank(&ep_lock, LOCKDEP_RANK_OBJECT);
     memset(ep_pool, 0, sizeof(ep_pool));
     ep_used_bitmap = 0;
     memset(ep_client_msg, 0, sizeof(ep_client_msg));
@@ -456,6 +456,13 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
         return;
     }
 
+    uint32_t crit = irq_spin_lock(&ep_lock);
+    if (ep < &ep_pool[0] || ep >= &ep_pool[KERN_MAX_ENDPOINTS] ||
+        !ep->in_use) {
+        irq_spin_unlock(&ep_lock, crit);
+        return;
+    }
+
     wait_queue_remove_safe(&ep->recv_waiters, tcb);
     wait_queue_remove_safe(&ep->send_waiters, tcb);
     wait_queue_remove_safe(&ep->reply_waiters, tcb);
@@ -487,6 +494,7 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
             ep_last_receiver_gen[ep_id] = 0;
         }
     }
+    irq_spin_unlock(&ep_lock, crit);
 }
 
 static int endpoint_deliver_to_syscall_recv(ep_id_t ep_id,

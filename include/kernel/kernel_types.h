@@ -72,6 +72,18 @@ typedef enum {
     TASK_STATE_TERMINATED  = 5,  // 已终止
 } task_state_t;
 
+/* M1 SMP ownership model.  KERN_CPU_NONE is used while a task has not yet
+ * been assigned to a run queue.  Migration state changes are deliberately
+ * explicit so a TCB can never be runnable on two CPUs at the same time. */
+#define KERN_CPU_NONE            UINT8_MAX
+#define KERN_CPU_AFFINITY_ALL    ((1UL << SMP_MAX_CPUS) - 1UL)
+
+typedef enum {
+    TASK_MIGRATION_STABLE       = 0,
+    TASK_MIGRATION_MIGRATING    = 1,
+    TASK_MIGRATION_READY_REMOTE = 2,
+} task_migration_state_t;
+
 /* 任务属性 */
 #define TASK_ATTR_PRIVILEGED   0x00   // 内核任务 (特权模式)
 #define TASK_ATTR_USER         0x01   // 用户任务 (非特权模式)
@@ -157,6 +169,10 @@ typedef struct tcb {
     uint32_t    time_slice_reload;    // 时间片重载值
     uint32_t    total_ticks;          // 总运行时间 (统计用)
     uint32_t    wake_tick;            // 唤醒时间 (用于延时)
+    uint32_t    affinity_mask;        // 允许运行的 CPU 位图
+    uint8_t     cpu_owner;            // 所属运行队列/CPU，KERN_CPU_NONE=未分配
+    uint8_t     migration_state;      // task_migration_state_t
+    uint8_t     _smp_pad[2];          // 4 字节对齐
 
     // --- 阻塞信息 ---
     block_reason_t block_reason;      // 阻塞原因
@@ -165,6 +181,7 @@ typedef struct tcb {
 
     /* --- join 支持 --- */
     void       *exit_value;           // task_exit 存储的返回值
+    void       *join_value;           // 作为 joiner 时的返回值快照
     struct tcb *joiners;              // 等待此任务结束的链表头
     struct tcb *join_next;            // joiner 链表的 next 指针
     uint32_t    reclaim_at;           // 延迟回收时间戳 (tick), 0=不需要回收

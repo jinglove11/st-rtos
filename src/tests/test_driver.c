@@ -2104,6 +2104,20 @@ static void test_uart_driver_resource_attach(void) {
                        "driver attach client retval OK");
     }
 
+    /* The server is now blocked waiting for its second request, so its copied
+     * resource cap is observably live on both UP and SMP.  After replying to
+     * GET_RESOURCES it is allowed to exit immediately on the other CPU. */
+    void *mmio_obj = NULL;
+    if (mmio_cap > 0) {
+        mmio_obj = cap_resolve(mmio_cap, CAP_OBJ_MMIO, CAP_READ);
+    }
+    TEST_ASSERT(mmio_obj != NULL,
+                "driver attach MMIO object resolves");
+    if (mmio_obj != NULL) {
+        TEST_ASSERT_EQ(2, (int)cap_object_refcount(mmio_obj, CAP_OBJ_MMIO),
+                       "driver attach server holds MMIO cap");
+    }
+
     drv_msg_t msg;
     driver_msg_init(&msg, DRV_OP_IOCTL, 301);
     msg.command = DRV_IOCTL_GET_RESOURCES;
@@ -2118,17 +2132,6 @@ static void test_uart_driver_resource_attach(void) {
                 "driver attach records MMIO resource");
     TEST_ASSERT((msg.result & DRV_RESOURCE_BIT_IRQ) == 0,
                 "driver attach leaves IRQ resource clear");
-
-    void *mmio_obj = NULL;
-    if (mmio_cap > 0) {
-        mmio_obj = cap_resolve(mmio_cap, CAP_OBJ_MMIO, CAP_READ);
-    }
-    TEST_ASSERT(mmio_obj != NULL,
-                "driver attach MMIO object resolves");
-    if (mmio_obj != NULL) {
-        TEST_ASSERT_EQ(2, (int)cap_object_refcount(mmio_obj, CAP_OBJ_MMIO),
-                       "driver attach server holds MMIO cap");
-    }
 
     retval = NULL;
     if (server_id >= 0) {
@@ -2889,6 +2892,18 @@ static void test_uart_driver_irq_resource_attach(void) {
     TEST_ASSERT_EQ((int)DRV_RESOURCE_IRQ, (int)msg.result,
                    "UART IRQ attach result is IRQ");
 
+    /* Check ownership while the server is blocked awaiting request #2. */
+    void *irq_obj = NULL;
+    if (irq_resource_cap > 0) {
+        irq_obj = cap_resolve(irq_resource_cap, CAP_OBJ_IRQ, CAP_READ);
+    }
+    TEST_ASSERT(irq_obj != NULL,
+                "driver IRQ attach object resolves");
+    if (irq_obj != NULL) {
+        TEST_ASSERT_EQ(2, (int)cap_object_refcount(irq_obj, CAP_OBJ_IRQ),
+                       "driver IRQ attach server holds IRQ cap");
+    }
+
     driver_msg_init(&msg, DRV_OP_IOCTL, 501);
     msg.command = DRV_IOCTL_GET_RESOURCES;
     if (err == KERN_OK) {
@@ -2902,17 +2917,6 @@ static void test_uart_driver_irq_resource_attach(void) {
                 "UART IRQ attach records IRQ resource");
     TEST_ASSERT((msg.result & DRV_RESOURCE_BIT_MMIO) == 0,
                 "UART IRQ attach leaves MMIO resource clear");
-
-    void *irq_obj = NULL;
-    if (irq_resource_cap > 0) {
-        irq_obj = cap_resolve(irq_resource_cap, CAP_OBJ_IRQ, CAP_READ);
-    }
-    TEST_ASSERT(irq_obj != NULL,
-                "driver IRQ attach object resolves");
-    if (irq_obj != NULL) {
-        TEST_ASSERT_EQ(2, (int)cap_object_refcount(irq_obj, CAP_OBJ_IRQ),
-                       "driver IRQ attach server holds IRQ cap");
-    }
 
     void *retval = NULL;
     if (server_id >= 0) {

@@ -151,7 +151,7 @@ FreeRTOS 这类传统 RTOS 通常提供小而稳定的调度、队列、信号�
 
 ## 配置预设
 
-仓库内置 4 个 defconfig 预设，满足从最小固件到全特性镜像的不同场景：
+仓库内置 4 个通用 defconfig 预设和 1 个 RP2350 SMP 验收预设：
 
 | 预设 | 文件 | 目标 | 估计 footprint |
 | --- | --- | --- | --- |
@@ -159,6 +159,7 @@ FreeRTOS 这类传统 RTOS 通常提供小而稳定的调度、队列、信号�
 | **default** | `configs/default_defconfig` | 开发 + 测试基线（2867/2867 PASS） | ~120-180KB flash / ~32-48KB RAM |
 | **release** | `configs/release_defconfig` | 生产：去 test/shell/trace，保留 IPC/cap/fault | ~60-90KB flash / ~16-24KB RAM |
 | **full** | `configs/full_defconfig` | 所有子系统 ON（包括未实装的 Phase 2-9 占位） | ~300-800KB flash / ~64-128KB RAM |
+| **rp2350_smp** | `configs/rp2350_smp_defconfig` | M1 双核验收；sem/endpoint 跨核各 100 万轮 | 实验配置，不用于 release |
 
 切换：
 
@@ -166,6 +167,19 @@ FreeRTOS 这类传统 RTOS 通常提供小而稳定的调度、队列、信号�
 cp configs/<preset>_defconfig .config
 python3 scripts/menuconfig.py genconfig
 ```
+
+双核 M1 验收也可直接使用 `make rp2350_smp_defconfig`。生产
+`release_defconfig` 仍保持 `SMP=n`。
+
+双核镜像烧录后，可让串口门禁先确认 100 万轮压力模块全部通过，再持续做
+shell 活性探测并监控 panic/fault/reset。30 分钟门禁示例：
+
+```bash
+make test-smp-soak PORT=/dev/ttyACM0 DURATION=1800
+```
+
+8 小时和 24 小时分别使用 `DURATION=28800`、`DURATION=86400`；日志默认写到
+`/tmp/my-rtos-smp-soak.log`。
 
 每个 `CONFIG_*` 的细节见 [`docs/kconfig/INDEX.md`](docs/kconfig/INDEX.md)（共 123 个
 配置项，每个都有独立页面）。

@@ -10,8 +10,8 @@
  * sys_call5(num, a1, a2, a3, a4, a5)     → + a4, a5 on stack
  * sys_call6(num, a1, a2, a3, a4, a5, a6) → + a4, a5, a6 on stack
  *
- * 统一栈布局 (svc 硬件帧 + padding = 固定偏移):
- *   PSP+64: a4, PSP+68: a5, PSP+72: a6
+ * 相对 handler 保存后的 PSP，basic frame 下 a4/a5/a6 位于
+ * +64/+68/+72；extended FP frame 下三者整体再后移 72 字节。
  *
  * Wrappers push 16 bytes before SVC so PSP remains 8-byte aligned and the
  * Cortex-M exception entry does not insert an alignment padding word.

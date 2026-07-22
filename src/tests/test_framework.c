@@ -259,6 +259,12 @@ void test_run_all_modules(void) {
 
         module_count++;
         current_module = module->name;
+        /* Print the entry marker before taking resource locks or invoking the
+         * module.  On hardware this makes a hard hang attributable to the
+         * exact module instead of leaving only the suite banner visible. */
+        test_print("[RUN] ");
+        test_print(module->name);
+        test_print("\r\n");
         test_resource_snapshot_t before = test_resource_snapshot();
         module->func();
         test_resource_snapshot_t after = test_resource_snapshot();
@@ -293,17 +299,6 @@ static void test_runner_task(void *arg) {
             test_print("\r\n");
             (void)panic_log_clear();
         }
-    }
-#endif
-
-#if SMP
-    /* Launch core1 BEFORE the test suite so SMP tests can verify dual-core
-     * operation. Core1 enters the scheduler and picks from the shared
-     * ready_list. Non-SMP tests are unaffected (core1 runs idle). */
-    {
-        extern void smp_init_core1(void);
-        smp_init_core1();
-        task_delay(10);  /* let core1 initialize */
     }
 #endif
 

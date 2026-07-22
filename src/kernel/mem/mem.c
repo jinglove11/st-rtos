@@ -186,7 +186,7 @@ static void try_merge_with_next(mem_block_t *block) {
 }
 
 void mem_init(void) {
-    irq_spin_init(&mem_lock);
+    irq_spin_init_rank(&mem_lock, LOCKDEP_RANK_RESOURCE);
 #if MEM_DYNAMIC
     size_t heap_size = MEM_HEAP_SIZE;
 

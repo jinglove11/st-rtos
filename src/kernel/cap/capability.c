@@ -25,6 +25,7 @@
  * SMP 下两核同时操作 cap_pool 互斥。
  * 用法: uint32_t crit = CAP_LOCK(); ... CAP_UNLOCK(crit); */
 static irq_spinlock_t cap_pool_lock;
+static cap_entry_t cap_pool[CAP_MAX_COUNT_VAL];
 
 /* M2-#9: cleanup/revoke hook table (前向声明,供 deferred 队列引用)。
  * 真正定义在下方。 */
@@ -40,80 +41,150 @@ static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
  * 未来 hook 可能会。
  *
  * 修复: cap_clear_slot 把需要调的 hook 记到 pending 队列 (不直接调)。
- * CAP_UNLOCK 宏在释放 cap_pool_lock 后自动 flush 队列 (锁外执行 hook)。
- * pending 队列是 per-CPU (避免两核竞争同一队列),足够大覆盖单次
- * cap_clear_slot 调用 (max 1 revoke + 1 cleanup)。
+ * 最外层 irq_spin_unlock 在所有子系统锁释放后 flush 队列。仅仅离开
+ * cap_pool_lock 还不够：调用者可能仍持有 ep_lock 等对象锁，此时执行
+ * IRQ cleanup 会形成 OBJECT -> REGISTRY 的锁序反转。
+ * pending 队列由 cap_pool_lock 保护。不能使用 per-CPU 队列：
+ * CAP_UNLOCK 恢复中断后任务可在 flush 前迁核，会把旧 CPU 的
+ * hook 永久留在队列中。单一 FIFO 队列再加一个非阻塞 drainer
+ * 锁，保证 SMP 下 hook 不丢失、不并发，且 revoke hook 总在
+ * 同对象的 cleanup 前执行。
  *============================================================================*/
-#define CAP_DEFERRED_MAX 4
+#define CAP_DEFERRED_MAX (CAP_MAX_COUNT_VAL * 2U)
 typedef struct {
     void     *object;
     uint8_t   obj_type;
     uint8_t   kind;        /* 0=cleanup, 1=revoke_hook */
-    cap_id_t  cap;        /* revoke_hook 用 */
+    cap_id_t  cap;         /* revoke_hook 用 */
+    cap_cleanup_fn_t cleanup_fn;
+    cap_revoke_hook_fn_t revoke_fn;
 } cap_deferred_t;
 
-/* per-CPU deferred queue。SMP_MAX_CPUS 在 kernel_types.h 已 fallback 到 1。 */
-static cap_deferred_t cap_deferred_queue[SMP_MAX_CPUS][CAP_DEFERRED_MAX];
-static uint8_t cap_deferred_count[SMP_MAX_CPUS];
+static cap_deferred_t cap_deferred_queue[CAP_DEFERRED_MAX];
+static uint16_t cap_deferred_head;
+static uint16_t cap_deferred_count;
+static spinlock_t cap_deferred_flush_lock;
+static uint32_t cap_deferred_pending;
+static uint32_t cap_deferred_owner_cpu;
+
+#define CAP_DEFERRED_OWNER_NONE UINT32_MAX
 
 static void cap_defer_hook(void *object, uint8_t obj_type, uint8_t kind, cap_id_t cap) {
-    uint32_t cpu = hal_get_cpu_id();
-    if (cpu >= SMP_MAX_CPUS) cpu = 0;
-    uint8_t i = cap_deferred_count[cpu];
-    if (i < CAP_DEFERRED_MAX) {
-        cap_deferred_queue[cpu][i].object   = object;
-        cap_deferred_queue[cpu][i].obj_type = obj_type;
-        cap_deferred_queue[cpu][i].kind     = kind;
-        cap_deferred_queue[cpu][i].cap      = cap;
-        cap_deferred_count[cpu] = i + 1;
+    cap_cleanup_fn_t cleanup_fn = NULL;
+    cap_revoke_hook_fn_t revoke_fn = NULL;
+
+    /* cap_defer_hook is only called while cap_pool_lock is held.  Snapshot the
+     * registered callback now, so an event cannot accidentally use a callback
+     * registered later for an unrelated object at the same stack address. */
+    if (obj_type >= CAP_OBJ_TYPE_MAX) {
+        return;
     }
-    /* 队列满:静默丢弃 (CAP_DEFERRED_MAX=4 足够单次 cap_clear_slot,正常不会满) */
+    if (kind == 0U) {
+        cleanup_fn = cap_cleanup_table[obj_type];
+        if (cleanup_fn == NULL) {
+            return;
+        }
+    } else {
+        revoke_fn = cap_revoke_hook_table[obj_type];
+        if (revoke_fn == NULL) {
+            return;
+        }
+    }
+
+    if (cap_deferred_count < CAP_DEFERRED_MAX) {
+        uint16_t i = (uint16_t)((cap_deferred_head + cap_deferred_count) %
+                                CAP_DEFERRED_MAX);
+        cap_deferred_queue[i].object     = object;
+        cap_deferred_queue[i].obj_type   = obj_type;
+        cap_deferred_queue[i].kind       = kind;
+        cap_deferred_queue[i].cap        = cap;
+        cap_deferred_queue[i].cleanup_fn = cleanup_fn;
+        cap_deferred_queue[i].revoke_fn  = revoke_fn;
+        cap_deferred_count++;
+        __atomic_store_n(&cap_deferred_pending, 1U, __ATOMIC_RELEASE);
+    }
+#if KERN_DEBUG_ENABLE
+    else {
+        extern void kern_panic(const char *msg);
+        kern_panic("cap deferred queue overflow");
+    }
+#endif
 }
 
-/* 锁外 flush:执行所有 pending hook。由 CAP_UNLOCK 自动调用。 */
-static void cap_flush_deferred(void) {
+/* Execute pending callbacks only at a safe point with no ranked lock held.
+ * Hardware IRQ/PendSV/SysTick contexts leave the work pending: cleanup hooks
+ * may allocate, unmap or acquire ordinary kernel locks.  Thread mode and SVC
+ * are valid synchronous kernel-call contexts. */
+void cap_deferred_poll(void) {
+    if (__atomic_load_n(&cap_deferred_pending, __ATOMIC_ACQUIRE) == 0U) {
+        return;
+    }
+
+    uint32_t ipsr;
+    __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    if (ipsr != 0U && ipsr != 11U) { /* 11 = SVCall */
+        return;
+    }
+
     uint32_t cpu = hal_get_cpu_id();
-    if (cpu >= SMP_MAX_CPUS) cpu = 0;
-    uint8_t n = cap_deferred_count[cpu];
-    cap_deferred_count[cpu] = 0;
-    for (uint8_t i = 0; i < n; i++) {
-        cap_deferred_t *d = &cap_deferred_queue[cpu][i];
-        if (d->kind == 1) {
-            /* revoke hook */
-            if (d->obj_type < CAP_OBJ_TYPE_MAX &&
-                cap_revoke_hook_table[d->obj_type] != NULL) {
-                cap_revoke_hook_table[d->obj_type](d->cap, d->object, d->obj_type);
-            }
+    if (cpu >= SMP_MAX_CPUS) {
+        cpu = 0U;
+    }
+
+    /* A nested cap operation from one of our own callbacks must return to the
+     * outer drainer.  A different CPU, however, waits for/acquires the drainer
+     * so synchronous cap_delete/revoke calls do not return before their
+     * cleanup hook has actually freed the object (observable for SHM memory
+     * accounting).  Polling is only entered with no ranked lock held, making
+     * this cross-core serialization safe. */
+    for (;;) {
+        if (spin_trylock(&cap_deferred_flush_lock) == 0) {
+            __atomic_store_n(&cap_deferred_owner_cpu, cpu, __ATOMIC_RELEASE);
+            break;
+        }
+        if (__atomic_load_n(&cap_deferred_owner_cpu, __ATOMIC_ACQUIRE) == cpu) {
+            return;
+        }
+        __asm volatile("yield");
+    }
+
+    for (;;) {
+        cap_deferred_t d;
+        uint32_t crit = irq_spin_lock(&cap_pool_lock);
+        if (cap_deferred_count == 0U) {
+            /* Clear pending while cap_pool_lock excludes producers, then drop
+             * the drainer before CAP unlock.  The unlock's recursive poll sees
+             * pending=0; a later producer necessarily publishes pending=1. */
+            __atomic_store_n(&cap_deferred_pending, 0U, __ATOMIC_RELEASE);
+            __atomic_store_n(&cap_deferred_owner_cpu,
+                             CAP_DEFERRED_OWNER_NONE, __ATOMIC_RELEASE);
+            spin_unlock(&cap_deferred_flush_lock);
+            irq_spin_unlock(&cap_pool_lock, crit);
+            return;
+        }
+        d = cap_deferred_queue[cap_deferred_head];
+        cap_deferred_head = (uint16_t)((cap_deferred_head + 1U) %
+                                       CAP_DEFERRED_MAX);
+        cap_deferred_count--;
+        irq_spin_unlock(&cap_pool_lock, crit);
+
+        if (d.kind == 1U) {
+            d.revoke_fn(d.cap, d.object, d.obj_type);
         } else {
-            /* cleanup hook (仅当 refcount==0)。
-             * 深派生树 revoke 时多个 cap_clear_slot defer 同一 object 的
-             * cleanup。第一个执行后 object 被释放,后续同 object 的 entry
-             * 不能再调 cleanup (dangling)。用 obj_type=0xFF 标记去重。 */
-            if (d->obj_type >= CAP_OBJ_TYPE_MAX) {
-                continue;
-            }
-            if (cap_cleanup_table[d->obj_type] != NULL &&
-                cap_object_refcount(d->object, d->obj_type) == 0) {
-                cap_cleanup_table[d->obj_type](d->object, d->obj_type);
-                for (uint8_t j = i + 1; j < n; j++) {
-                    if (cap_deferred_queue[cpu][j].kind == 0 &&
-                        cap_deferred_queue[cpu][j].object == d->object) {
-                        cap_deferred_queue[cpu][j].obj_type = 0xFF;
-                    }
-                }
-            }
+            d.cleanup_fn(d.object, d.obj_type);
         }
     }
 }
 
 #define CAP_LOCK()   irq_spin_lock(&cap_pool_lock)
-/* M2-#9: CAP_UNLOCK 释放锁后自动 flush 延迟 hook (锁外执行) */
-#define CAP_UNLOCK(crit) do { irq_spin_unlock(&cap_pool_lock, crit); cap_flush_deferred(); } while (0)
+/* irq_spin_unlock polls the global deferred FIFO only at the outermost safe
+ * point.  If CAP_LOCK is nested under a subsystem lock, its saved PRIMASK is
+ * one and the outer lock's eventual unlock performs the drain. */
+#define CAP_UNLOCK(crit) irq_spin_unlock(&cap_pool_lock, crit)
 
 typedef char cap_slot_bits_fit[(CAP_MAX_COUNT_VAL <= (1U << CAP_SLOT_BITS)) ? 1 : -1];
 typedef char cap_shm_type_registered[(CAP_OBJ_SHM < CAP_OBJ_TYPE_MAX) ? 1 : -1];
 
-static cap_entry_t cap_pool[CAP_MAX_COUNT_VAL];
 /* cap_cleanup_table / cap_revoke_hook_table 已在上方 M2-#9 deferred 队列前声明 */
 
 #define CAP_TASK_CSPACE_SLOTS \
@@ -367,8 +438,18 @@ static void cap_clear_slot(int slot) {
     cap_pool[slot].first_child = CAP_NO_SLOT;
     cap_pool[slot].next_sibling = CAP_NO_SLOT;
 
-    /* M2-#9: cleanup hook 延迟到 CAP_UNLOCK 后执行 */
-    if (obj_type < CAP_OBJ_TYPE_MAX) {
+    /* Only the removal of the last cap queues cleanup.  This decision is made
+     * atomically under cap_pool_lock, avoiding duplicate callbacks for a deep
+     * derive tree and ensuring every revoke hook is queued before cleanup. */
+    int has_ref = 0;
+    for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
+        if (cap_pool[i].in_use && cap_pool[i].object == object &&
+            cap_pool[i].obj_type == obj_type) {
+            has_ref = 1;
+            break;
+        }
+    }
+    if (!has_ref && obj_type < CAP_OBJ_TYPE_MAX) {
         cap_defer_hook(object, obj_type, 0, cap);  /* kind=0=cleanup */
     }
 }
@@ -381,7 +462,13 @@ static void cap_revoke_slot_tree(int slot) {
 }
 
 void cap_init(void) {
-    irq_spin_init(&cap_pool_lock);
+    irq_spin_init_rank(&cap_pool_lock, LOCKDEP_RANK_RESOURCE);
+    spin_init(&cap_deferred_flush_lock);
+    cap_deferred_head = 0;
+    cap_deferred_count = 0;
+    __atomic_store_n(&cap_deferred_pending, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&cap_deferred_owner_cpu, CAP_DEFERRED_OWNER_NONE,
+                     __ATOMIC_RELAXED);
     memset(cap_pool, 0, sizeof(cap_pool));
     memset(cap_cleanup_table, 0, sizeof(cap_cleanup_table));
     memset(cap_revoke_hook_table, 0, sizeof(cap_revoke_hook_table));
@@ -446,28 +533,39 @@ cap_id_t cap_create(void *object, uint8_t obj_type, uint8_t rights, uint8_t owne
     }
 
     cap_id_t cap = cap_create_for_gen(NULL, object, obj_type, rights, 0);
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry != NULL) {
         entry->owner = owner;
+    } else {
+        cap = CAP_INVALID;
     }
+    CAP_UNLOCK(crit);
     return cap;
 }
 
 void *cap_lookup_for(tcb_t *owner, cap_id_t cap, uint8_t obj_type, uint8_t required_rights) {
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL) {
+        CAP_UNLOCK(crit);
         return NULL;
     }
     if (entry->obj_type != obj_type) {
+        CAP_UNLOCK(crit);
         return NULL;
     }
     if ((entry->rights & required_rights) != required_rights) {
+        CAP_UNLOCK(crit);
         return NULL;
     }
     if (!cap_owner_allowed(owner, cap, entry)) {
+        CAP_UNLOCK(crit);
         return NULL;
     }
-    return entry->object;
+    void *object = entry->object;
+    CAP_UNLOCK(crit);
+    return object;
 }
 
 void *cap_resolve(cap_id_t cap, uint8_t obj_type, uint8_t required_rights) {
@@ -475,15 +573,18 @@ void *cap_resolve(cap_id_t cap, uint8_t obj_type, uint8_t required_rights) {
 }
 
 kern_err_t cap_get_type_for(tcb_t *owner, cap_id_t cap, uint8_t *out_type) {
-    cap_entry_t *entry = cap_get_entry(cap);
     if (out_type == NULL) {
         return KERN_ERR_PARAM;
     }
+    uint32_t crit = CAP_LOCK();
+    cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL || !cap_owner_allowed(owner, cap, entry)) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
 
     *out_type = entry->obj_type;
+    CAP_UNLOCK(crit);
     return KERN_OK;
 }
 
@@ -493,15 +594,18 @@ kern_err_t cap_get_type(cap_id_t cap, uint8_t *out_type) {
 
 kern_err_t cap_get_rights_for(tcb_t *owner, cap_id_t cap,
                               uint8_t *out_rights) {
-    cap_entry_t *entry = cap_get_entry(cap);
     if (out_rights == NULL) {
         return KERN_ERR_PARAM;
     }
+    uint32_t crit = CAP_LOCK();
+    cap_entry_t *entry = cap_get_entry(cap);
     if (entry == NULL || !cap_owner_allowed(owner, cap, entry)) {
+        CAP_UNLOCK(crit);
         return KERN_ERR_CAP;
     }
 
     *out_rights = entry->rights;
+    CAP_UNLOCK(crit);
     return KERN_OK;
 }
 
@@ -674,16 +778,20 @@ cap_id_t cap_derive_for_restart(tcb_t *supervisor,
      * helpers cap_get_entry / cap_owner_allowed / cap_init_child_slot /
      * cap_link_child / cap_task_add / cap_clear_slot / cap_slot_of / cap_encode.
      * Declared publicly via cap_subset.h. */
+    uint32_t crit = CAP_LOCK();
     cap_entry_t *parent = cap_get_entry(parent_cap);
     if (parent == NULL || new_task == NULL || new_task->id < 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
     /* Supervisor must authorize the derive and hold CAP_GRANT on the parent. */
     if (!cap_owner_allowed(supervisor, parent_cap, parent)) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
     if ((parent->rights & CAP_GRANT) == 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -692,6 +800,7 @@ cap_id_t cap_derive_for_restart(tcb_t *supervisor,
 
     int child_slot = cap_init_child_slot(parent, effective);
     if (child_slot < 0) {
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -705,6 +814,8 @@ cap_id_t cap_derive_for_restart(tcb_t *supervisor,
     cap_id_t child_cap = cap_encode((uint16_t)child_slot,
                                     cap_pool[child_slot].generation);
     if (child_cap == CAP_INVALID) {
+        cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
@@ -715,9 +826,11 @@ cap_id_t cap_derive_for_restart(tcb_t *supervisor,
      * restart target simply won't receive the handle — which is correct. */
     if (cap_task_add(new_task, child_cap) != KERN_OK) {
         cap_clear_slot(child_slot);
+        CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
 
+    CAP_UNLOCK(crit);
     return child_cap;
 }
 #endif /* CAP_RESTART_SUBSET */
@@ -886,6 +999,7 @@ kern_err_t cap_revoke_object(void *object, uint8_t obj_type) {
 
 uint16_t cap_object_refcount(void *object, uint8_t obj_type) {
     uint16_t refs = 0;
+    uint32_t crit = CAP_LOCK();
 
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         if (cap_pool[i].in_use &&
@@ -895,6 +1009,7 @@ uint16_t cap_object_refcount(void *object, uint8_t obj_type) {
         }
     }
 
+    CAP_UNLOCK(crit);
     return refs;
 }
 
@@ -958,6 +1073,7 @@ cap_id_t cap_self_find_slot(tcb_t *owner, uint8_t obj_type, uint8_t index) {
 
 uint16_t cap_free_count(void) {
     uint16_t free_count = 0;
+    uint32_t crit = CAP_LOCK();
 
     for (int i = 0; i < CAP_MAX_COUNT_VAL; i++) {
         if (!cap_pool[i].in_use &&
@@ -967,6 +1083,7 @@ uint16_t cap_free_count(void) {
         }
     }
 
+    CAP_UNLOCK(crit);
     return free_count;
 }
 
@@ -975,7 +1092,9 @@ kern_err_t cap_register_cleanup(uint8_t obj_type, cap_cleanup_fn_t cleanup) {
         return KERN_ERR_PARAM;
     }
 
+    uint32_t crit = CAP_LOCK();
     cap_cleanup_table[obj_type] = cleanup;
+    CAP_UNLOCK(crit);
     return KERN_OK;
 }
 
@@ -985,7 +1104,9 @@ kern_err_t cap_register_revoke_hook(uint8_t obj_type,
         return KERN_ERR_PARAM;
     }
 
+    uint32_t crit = CAP_LOCK();
     cap_revoke_hook_table[obj_type] = hook;
+    CAP_UNLOCK(crit);
     return KERN_OK;
 }
 

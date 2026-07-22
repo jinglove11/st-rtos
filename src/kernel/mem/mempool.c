@@ -10,6 +10,7 @@
 #include "stats.h"
 #include "scheduler.h"
 #include "hal.h"
+#include "spinlock.h"
 #include <string.h>
 
 #ifndef TRACE_MEM_ALLOC
@@ -39,6 +40,7 @@ typedef struct mem_pool {
 
 static mem_pool_t pools[POOL_MAX_COUNT];
 static uint32_t pool_used_bitmap = 0;
+static irq_spinlock_t mempool_lock;
 
 static uint8_t mempool_current_task_id(void) {
     tcb_t *current = sched_get_current();
@@ -77,11 +79,11 @@ static void mempool_record_event(pool_id_t pool_id, uint8_t action,
 }
 
 static uint32_t crit_enter(void) {
-    return hal_irq_save();
+    return irq_spin_lock(&mempool_lock);
 }
 
 static void crit_exit(uint32_t primask) {
-    hal_irq_restore(primask);
+    irq_spin_unlock(&mempool_lock, primask);
 }
 
 static pool_id_t alloc_pool_id(void) {
@@ -101,6 +103,7 @@ static void free_pool_id(pool_id_t id) {
 }
 
 void mempool_init(void) {
+    irq_spin_init_rank(&mempool_lock, LOCKDEP_RANK_REGISTRY);
     memset(pools, 0, sizeof(pools));
     pool_used_bitmap = 0;
 }

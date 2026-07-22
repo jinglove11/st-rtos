@@ -186,6 +186,12 @@ void sched_remove_ready(tcb_t *tcb);
  */
 void sched_reinsert_by_priority(tcb_t *tcb);
 
+/** Stop a READY/RUNNING task on its owner CPU before external state teardown. */
+kern_err_t sched_quiesce_task(tcb_t *tcb);
+
+/** Start the core0-pinned deferred timeout/reclaim worker. */
+void sched_timeout_service_start(void);
+
 /*============================================================================
  * 阻塞与唤醒接口
  *============================================================================*/
@@ -318,6 +324,18 @@ int sched_need_switch(void);
  */
 uint32_t sched_get_tick_count(void);
 
+/**
+ * @brief Convert a blocking API timeout to the TCB wake_tick encoding.
+ *
+ * wake_tick == 0 is reserved for an indefinite wait.  Both zero (the
+ * sched_block legacy convention) and KERN_WAIT_FOREVER therefore produce no
+ * deadline; finite timeouts become an absolute scheduler tick.
+ *
+ * @param timeout Relative timeout in ticks.
+ * @return Absolute wake tick, or zero for an indefinite wait.
+ */
+uint32_t sched_timeout_deadline(uint32_t timeout);
+
 /*============================================================================
  * 时钟滴答处理接口
  *============================================================================*/
@@ -336,6 +354,14 @@ uint32_t sched_get_tick_count(void);
  * @see hal_systick_handler()
  */
 void sched_tick_handler(void);
+
+#if SMP
+/** Called by the SIO FIFO interrupt on the target CPU. */
+void sched_handle_ipi(uint32_t reasons);
+
+/** Publish/unpublish a CPU to the scheduler load balancer. */
+void sched_set_cpu_online(uint32_t cpu, int online);
+#endif
 
 /*============================================================================
  * 调度器统计接口（可选）

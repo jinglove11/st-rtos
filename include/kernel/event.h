@@ -117,5 +117,6 @@ void event_init(void);
 
 event_id_t event_id_from_obj(void *obj);
 void *event_obj_for_cap(event_id_t id);
+void event_cleanup_task(void *event_obj, tcb_t *tcb);
 
 #endif // EVENT_H

@@ -21,6 +21,7 @@
  * 16. 任务自删除保护
  * 17. 递归锁
  * 18. 任务 ID 分配
+ * 19. 单核 RUNNING 状态不变量
  */
 
 #include "test_framework.h"
@@ -29,6 +30,32 @@
 #include "semaphore.h"
 #include "mutex.h"
 #include <string.h>
+
+#if !SMP
+/*============================================================================
+ * 测试 0: 单核系统只能有一个 RUNNING TCB
+ *============================================================================*/
+
+static void test_single_core_running_invariant(void) {
+    test_section("Test 0: Single-core running invariant");
+
+    uint64_t used = task_get_used_bitmap();
+    int running = 0;
+
+    for (task_id_t id = 0; id < KERNEL_MAX_TASKS; id++) {
+        if ((used & (1ULL << id)) == 0) {
+            continue;
+        }
+
+        tcb_t *tcb = task_get_tcb(id);
+        if (tcb != NULL && tcb->state == TASK_STATE_RUNNING) {
+            running++;
+        }
+    }
+
+    TEST_ASSERT_EQ(1, running, "UP kernel has exactly one running task");
+}
+#endif
 
 /*============================================================================
  * 测试 1: 任务创建与基本调度
@@ -805,6 +832,9 @@ static void test_task_id_alloc(void) {
  * 执行所有调度器相关测试。
  */
 static void test_scheduler_module(void) {
+#if !SMP
+    test_single_core_running_invariant();
+#endif
     test_task_create();
     test_priority_preempt();
     test_round_robin();

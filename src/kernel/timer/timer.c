@@ -556,6 +556,7 @@ void *timer_obj_for_cap(timer_id_t id) {
 }
 
 static void process_command(timer_cmd_t *cmd) {
+    uint32_t crit = irq_spin_lock(&timer_lock);
     switch (cmd->type) {
         case TIMER_CMD_START:
             process_cmd_start(cmd->timer_id, cmd->param);
@@ -573,6 +574,7 @@ static void process_command(timer_cmd_t *cmd) {
             process_cmd_delete(cmd->timer_id);
             break;
     }
+    irq_spin_unlock(&timer_lock, crit);
 }
 
 #endif /* TIMER_ENABLE */
@@ -586,10 +588,16 @@ static void process_command(timer_cmd_t *cmd) {
 static void process_expired_timers(void) {
     uint32_t now = sched_get_tick_count();
 
-    while (timer_heap.size > 0) {
+    for (;;) {
+        uint32_t crit = irq_spin_lock(&timer_lock);
+        if (timer_heap.size == 0) {
+            irq_spin_unlock(&timer_lock, crit);
+            break;
+        }
         timer_t *timer = timer_heap.timers[0];
 
         if ((int32_t)(timer->expire - now) > 0) {
+            irq_spin_unlock(&timer_lock, crit);
             break;  /* 最近的定时器还未到期 */
         }
 
@@ -597,23 +605,32 @@ static void process_expired_timers(void) {
         heap_pop(&timer_heap);
         timer->state = TIMER_STATE_RUNNING;
 
-        if (timer->notify_bound) {
+        uint8_t notify_bound = timer->notify_bound;
+        ep_id_t notify_ep = timer->notify_ep;
+        uint32_t notify_badge = timer->notify_badge;
+        timer_id_t timer_id = timer->id;
+        timer_callback_t callback = timer->callback;
+        void *callback_arg = timer->arg;
+        irq_spin_unlock(&timer_lock, crit);
+
+        if (notify_bound) {
             uint8_t notify_msg[KERN_EP_MSG_SIZE];
             memset(notify_msg, 0, sizeof(notify_msg));
-            ((uint32_t *)notify_msg)[0] = timer->notify_badge;
-            ((uint32_t *)notify_msg)[1] = (uint32_t)timer->id;
-            (void)endpoint_notify(timer->notify_ep, notify_msg);
+            ((uint32_t *)notify_msg)[0] = notify_badge;
+            ((uint32_t *)notify_msg)[1] = (uint32_t)timer_id;
+            (void)endpoint_notify(notify_ep, notify_msg);
         }
 
         /* 回调执行 (内核测试用,user 任务被 sys_timer_create 拒绝)。
          * Phase H2:timer_svc 保留内核特权 (需响应 SysTick + 回调),
          * 和 bh_svc/irq_N 同为内核 TCB 一部分。 */
-        if (timer->callback) {
-            timer->callback(timer->arg);
+        if (callback) {
+            callback(callback_arg);
         }
-        timer_record_event(timer->id, TRACE_TIMER_FIRE, KERN_OK);
+        timer_record_event(timer_id, TRACE_TIMER_FIRE, KERN_OK);
 
         /* 周期定时器重新插入（除非回调中请求了停止） */
+        crit = irq_spin_lock(&timer_lock);
         if (!timer->one_shot && !timer->stop_pending && !timer->delete_pending &&
             timer->state == TIMER_STATE_RUNNING) {
             timer->expire = now + timer->period;
@@ -626,6 +643,7 @@ static void process_expired_timers(void) {
             timer->state = TIMER_STATE_IDLE;
             timer->stop_pending = 0;
         }
+        irq_spin_unlock(&timer_lock, crit);
     }
 }
 
@@ -644,6 +662,7 @@ static void timer_service_task(void *arg) {
 
     while (1) {
         /* 计算等待时间 */
+        uint32_t crit = irq_spin_lock(&timer_lock);
         if (timer_heap.size > 0) {
             uint32_t now = sched_get_tick_count();
             int32_t diff = (int32_t)(timer_heap.timers[0]->expire - now);
@@ -653,8 +672,15 @@ static void timer_service_task(void *arg) {
                 timeout = 0;  /* 已到期 */
             }
         } else {
-            timeout = 100;  /* 堆空时定期轮询 */
+            /*
+             * 没有活动定时器时只需等待控制命令。旧的 100-tick 轮询会
+             * 让 timer_svc 永久执行“超时唤醒 -> 重新入队”，既浪费调度
+             * 开销，也扩大 Cortex-M 异常返回和 SMP wait-queue 的竞态窗口。
+             * mqueue 发送命令本身会唤醒接收者，因此这里应真正无限等待。
+             */
+            timeout = KERN_WAIT_FOREVER;
         }
+        irq_spin_unlock(&timer_lock, crit);
 
         /* 等待命令或超时 */
         kern_err_t err = mqueue_recv(cmd_queue, &cmd, timeout);
@@ -758,9 +784,8 @@ kern_err_t timer_start(timer_id_t timer_id, uint32_t delay) {
         return KERN_ERR_PARAM;
     }
 
-    kern_err_t err = send_command(TIMER_CMD_START, timer_id, delay);
     irq_spin_unlock(&timer_lock, crit);
-    return err;
+    return send_command(TIMER_CMD_START, timer_id, delay);
 #else
     (void)timer_id;
     (void)delay;
@@ -779,9 +804,8 @@ kern_err_t timer_stop(timer_id_t timer_id) {
     }
 
     timer->stop_pending = 1;
-    kern_err_t err = send_command(TIMER_CMD_STOP, timer_id, 0);
     irq_spin_unlock(&timer_lock, crit);
-    return err;
+    return send_command(TIMER_CMD_STOP, timer_id, 0);
 #else
     (void)timer_id;
     return KERN_ERR;
@@ -798,9 +822,8 @@ kern_err_t timer_reset(timer_id_t timer_id) {
         return KERN_ERR_PARAM;
     }
 
-    kern_err_t err = send_command(TIMER_CMD_RESET, timer_id, 0);
     irq_spin_unlock(&timer_lock, crit);
-    return err;
+    return send_command(TIMER_CMD_RESET, timer_id, 0);
 #else
     (void)timer_id;
     return KERN_ERR;
@@ -817,9 +840,8 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
         return KERN_ERR_PARAM;
     }
 
-    kern_err_t err = send_command(TIMER_CMD_CHANGE_PERIOD, timer_id, new_period);
     irq_spin_unlock(&timer_lock, crit);
-    return err;
+    return send_command(TIMER_CMD_CHANGE_PERIOD, timer_id, new_period);
 #else
     (void)timer_id;
     (void)new_period;
@@ -830,17 +852,15 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
                                uint32_t badge) {
 #if TIMER_ENABLE && IPC_ENDPOINT
+    if (!endpoint_exists(ep_id)) {
+        return KERN_ERR_PARAM;
+    }
     uint32_t crit = irq_spin_lock(&timer_lock);
     timer_t *timer = timer_get(timer_id);
     if (timer == NULL || timer->delete_pending) {
         irq_spin_unlock(&timer_lock, crit);
         return KERN_ERR_PARAM;
     }
-    if (!endpoint_exists(ep_id)) {
-        irq_spin_unlock(&timer_lock, crit);
-        return KERN_ERR_PARAM;
-    }
-
     timer->notify_ep = ep_id;
     timer->notify_badge = badge;
     timer->notify_bound = 1;
@@ -910,7 +930,7 @@ int timer_is_active(timer_id_t timer_id) {
 
 void timer_init(void) {
 #if TIMER_ENABLE
-    irq_spin_init(&timer_lock);
+    irq_spin_init_rank(&timer_lock, LOCKDEP_RANK_OBJECT);
     memset(timer_pool, 0, sizeof(timer_pool));
     timer_used_bitmap = 0;
 

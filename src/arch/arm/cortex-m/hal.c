@@ -75,6 +75,11 @@ extern void multicore_reset_core1(void);
  */
 static volatile uint32_t systick_count = 0;
 
+/* Cortex-M Floating-Point Context Control Register. */
+#define FPU_FPCCR_ADDR          0xE000EF34UL
+#define FPU_FPCCR_ASPEN         (1UL << 31)
+#define FPU_FPCCR_LSPEN         (1UL << 30)
+
 #if TARGET_BOARD == BOARD_RP2350_PICO2
 static uint32_t ram_vectors[128] __attribute__((aligned(256)));
 extern uint32_t __vectors[];
@@ -99,6 +104,20 @@ void _default_handler(void) {
  */
 void hal_cpu_init(void) {
 #if TARGET_BOARD == BOARD_RP2350_PICO2
+#if !SMP
+    /*
+     * A debugger reset (and some flash workflows) can reset core0 without
+     * stopping core1.  If the previous image was SMP-enabled, that stale
+     * core1 continues consuming the new UP kernel's shared ready queue and
+     * indexes its single-entry per-CPU arrays with cpu_id == 1.  Reset it
+     * into the SDK's boot-ROM launch wait before any kernel state exists.
+     * SMP builds deliberately leave this to smp_init_core1().
+     */
+    if (sio_hw->cpuid == 0U) {
+        multicore_reset_core1();
+    }
+#endif
+
     const uint32_t *flash_vectors = __vectors;
     for (uint32_t i = 0; i < (16U + BOARD_IRQ_COUNT); i++) {
         ram_vectors[i] = flash_vectors[i];
@@ -108,12 +127,42 @@ void hal_cpu_init(void) {
     __asm volatile("isb");
 #endif
 
+    /* Configure deterministic FP exception frames before kernel C code runs. */
+    hal_fpu_context_init();
+
     /* 初始化中断优先级 */
     hal_interrupt_priority_init();
 
 #if MPU_ENABLE
     /* 使能 MPU 内存保护 (微内核安全基础) */
     mpu_init();
+#endif
+}
+
+void hal_fpu_context_init(void) {
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    volatile uint32_t *fpccr = (volatile uint32_t *)FPU_FPCCR_ADDR;
+
+    /*
+     * Keep ASPEN enabled, but disable lazy preservation.  A context switch
+     * must see either a complete basic frame or a complete extended frame;
+     * it must never carry a deferred frame that still points at a discarded
+     * bootstrap/other-task stack.  Eager stacking costs 72 bytes only for
+     * tasks that actually own an FP context and makes the layout deterministic
+     * on both RP2350 cores.
+     */
+    *fpccr = (*fpccr | FPU_FPCCR_ASPEN) & ~FPU_FPCCR_LSPEN;
+    __asm volatile("dsb" ::: "memory");
+    __asm volatile("isb" ::: "memory");
+
+    /* The bootstrap thread's FP registers are not part of any RTOS task. */
+    __asm volatile(
+        "mrs r0, control\n"
+        "bic r0, r0, #4\n"
+        "msr control, r0\n"
+        "dsb\n"
+        "isb\n"
+        ::: "r0", "memory");
 #endif
 }
 
@@ -312,9 +361,10 @@ void hal_exit_lowpower(void) {
  * @return 0（单核 CPU）
  */
 uint32_t hal_get_cpu_id(void) {
-#if TARGET_BOARD == BOARD_RP2350_PICO2
+#if TARGET_BOARD == BOARD_RP2350_PICO2 && SMP
     return sio_hw->cpuid;
 #else
+    /* A UP kernel has exactly one per-CPU slot, regardless of the SoC. */
     return 0;
 #endif
 }

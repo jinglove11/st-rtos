@@ -2,12 +2,8 @@
  * @file test_smp.c
  * @brief Core completion #7 S5 — SMP dual-core parallel execution test
  *
- * Verifies that core1 is running and both cores execute tasks concurrently.
- * Uses a shared counter incremented by a worker task — if the counter
- * increases faster with two cores than one, parallelism is proven.
- *
- * Also checks that core1 has a non-NULL _current_task and that the idle
- * task runs on at least one core.
+ * Verifies CPU ownership/affinity, pinned parallel execution and cross-core
+ * semaphore ping-pong through the scheduler IPI path.
  */
 
 #include "test_framework.h"
@@ -15,30 +11,53 @@
 #include "task.h"
 #include "scheduler.h"
 #include "hal.h"
+#include "semaphore.h"
+#include "endpoint.h"
+#include "capability.h"
 
 #if SMP && TEST_MODULE_SMP
 
 #include <stdint.h>
 
+/* A stress test must fail with a useful phase/result instead of making the
+ * complete suite look dead forever.  These bounds do not reduce iteration
+ * counts or concurrency: they only turn a lost wakeup/deadlock into a
+ * deterministic failure that lets the remaining diagnostics run. */
+#define SMP_OPERATION_TIMEOUT_TICKS  5000U
+#define SMP_JOIN_TIMEOUT_TICKS      60000U
+#define SMP_TASK_CHURN_MAX_ATTEMPTS \
+    (SMP_POOL_STRESS_ITERATIONS + KERNEL_MAX_TASKS)
+
+static kern_err_t smp_join_bounded(task_id_t task, void **retval,
+                                   uint32_t timeout) {
+    kern_err_t err = task_join(task, retval, timeout);
+    if (err != KERN_OK && err != KERN_ERR_FAULT &&
+        task_get_state(task) != TASK_STATE_TERMINATED) {
+        (void)task_delete(task);
+    }
+    return err;
+}
+
 /*============================================================================
  * Shared state for parallel execution proof
  *============================================================================*/
 
-static volatile uint32_t smp_counter;
-static volatile int smp_worker_done;
+typedef struct {
+    volatile uint32_t iterations;
+    volatile uint32_t observed_cpu;
+} smp_worker_result_t;
+
+static smp_worker_result_t smp_worker_result[2];
 
 static void smp_worker_task(void *arg) {
-    (void)arg;
-    /* Busy-increment a shared counter for a fixed number of iterations.
-     * Each iteration yields so both cores get a chance. */
+    uint32_t index = (uint32_t)(uintptr_t)arg;
+    smp_worker_result[index].observed_cpu = hal_get_cpu_id();
     for (uint32_t i = 0; i < 10000U; i++) {
-        __asm volatile("dmb");
-        smp_counter++;
+        smp_worker_result[index].iterations++;
         if ((i & 0xFFU) == 0U) {
             task_yield();
         }
     }
-    smp_worker_done = 1;
 }
 
 /*============================================================================
@@ -55,6 +74,11 @@ static void test_core1_running(void) {
         /* core1 may be running the idle task (id == -1) if no other task
          * is available — that still proves core1 is alive. */
         TEST_ASSERT(c1->id == -1 || c1->id >= 0, "core1 current task has valid id or idle");
+        TEST_ASSERT_EQ(1, c1->cpu_owner, "core1 current task owned by core1");
+        TEST_ASSERT((c1->affinity_mask & (1UL << 1)) != 0U,
+                    "core1 current task affinity includes core1");
+        TEST_ASSERT_EQ(TASK_MIGRATION_STABLE, c1->migration_state,
+                       "core1 current task migration stable");
     }
 }
 
@@ -65,13 +89,13 @@ static void test_core1_running(void) {
 static void test_parallel_execution(void) {
     test_section("Test 2: parallel task execution");
 
-    smp_counter = 0;
-    smp_worker_done = 0;
+    smp_worker_result[0] = (smp_worker_result_t){0};
+    smp_worker_result[1] = (smp_worker_result_t){0};
 
-    /* Spawn two worker tasks — the scheduler may assign them to different
-     * cores. Even if both run on core0, the counter should increase. */
-    task_id_t t1 = task_create("smp_w1", smp_worker_task, NULL, 9, 1024);
-    task_id_t t2 = task_create("smp_w2", smp_worker_task, NULL, 9, 1024);
+    task_id_t t1 = task_create("smp_w1", smp_worker_task,
+                               (void *)(uintptr_t)0U, 9, 1024);
+    task_id_t t2 = task_create("smp_w2", smp_worker_task,
+                               (void *)(uintptr_t)1U, 9, 1024);
     TEST_ASSERT(t1 >= 0 && t2 >= 0, "two workers created");
     if (t1 < 0 || t2 < 0) {
         if (t1 >= 0) task_delete(t1);
@@ -79,26 +103,491 @@ static void test_parallel_execution(void) {
         return;
     }
 
+    TEST_ASSERT_EQ(KERN_OK, task_set_affinity(t1, 1UL << 0),
+                   "worker 1 pinned to core0");
+    TEST_ASSERT_EQ(KERN_OK, task_set_affinity(t2, 1UL << 1),
+                   "worker 2 pinned to core1");
+
     task_start(t1);
     task_start(t2);
 
     /* Wait for both workers to finish. */
-    kern_err_t e1 = task_join(t1, NULL, 5000);
-    kern_err_t e2 = task_join(t2, NULL, 5000);
+    kern_err_t e1 = smp_join_bounded(t1, NULL, SMP_JOIN_TIMEOUT_TICKS);
+    kern_err_t e2 = smp_join_bounded(t2, NULL, SMP_JOIN_TIMEOUT_TICKS);
     TEST_ASSERT_EQ((int)KERN_OK, (int)e1, "worker 1 joined");
     TEST_ASSERT_EQ((int)KERN_OK, (int)e2, "worker 2 joined");
 
-    /* Counter should be 20000 (2 workers × 10000 each). */
-    test_print_num("[smp] counter = ", (int32_t)smp_counter);
-    TEST_ASSERT(smp_counter >= 20000U, "counter >= 20000 (both workers ran)");
+    TEST_ASSERT_EQ(10000, smp_worker_result[0].iterations,
+                   "core0 worker completed all iterations");
+    TEST_ASSERT_EQ(10000, smp_worker_result[1].iterations,
+                   "core1 worker completed all iterations");
+    TEST_ASSERT_EQ(0, smp_worker_result[0].observed_cpu,
+                   "worker 1 executed on core0");
+    TEST_ASSERT_EQ(1, smp_worker_result[1].observed_cpu,
+                   "worker 2 executed on core1");
+    (void)task_delete(t1);
+    (void)task_delete(t2);
 }
 
 /*============================================================================
- * Test 3: both cores have distinct current tasks after workload
+ * Test 3: cross-core semaphore ping-pong exercises remote wakeup/IPI
+ *============================================================================*/
+
+#ifndef SMP_STRESS_ITERATIONS
+#define SMP_STRESS_ITERATIONS 10000U
+#endif
+
+#define SMP_PING_PONG_ITERATIONS ((uint32_t)SMP_STRESS_ITERATIONS)
+
+static sem_id_t smp_ping_sem[2];
+static volatile uint32_t smp_ping_count[2];
+static volatile uint32_t smp_ping_cpu[2];
+
+static void smp_ping_task(void *arg) {
+    uint32_t index = (uint32_t)(uintptr_t)arg;
+    uint32_t peer = index ^ 1U;
+    smp_ping_cpu[index] = hal_get_cpu_id();
+
+    for (uint32_t i = 0; i < SMP_PING_PONG_ITERATIONS; i++) {
+        if (sem_wait(smp_ping_sem[index],
+                     SMP_OPERATION_TIMEOUT_TICKS) != KERN_OK) {
+            return;
+        }
+        smp_ping_count[index]++;
+        (void)sem_post(smp_ping_sem[peer]);
+    }
+}
+
+static void test_cross_core_ping_pong(void) {
+    test_section("Test 3: cross-core IPI ping-pong");
+
+    smp_ping_count[0] = smp_ping_count[1] = 0U;
+    smp_ping_cpu[0] = smp_ping_cpu[1] = UINT32_MAX;
+    smp_ping_sem[0] = sem_create(1U, 1U);
+    smp_ping_sem[1] = sem_create(0U, 1U);
+    TEST_ASSERT(smp_ping_sem[0] >= 0 && smp_ping_sem[1] >= 0,
+                "ping-pong semaphores created");
+    if (smp_ping_sem[0] < 0 || smp_ping_sem[1] < 0) {
+        return;
+    }
+
+    task_id_t a = task_create("smp_p0", smp_ping_task,
+                              (void *)(uintptr_t)0U, 9, 1024);
+    task_id_t b = task_create("smp_p1", smp_ping_task,
+                              (void *)(uintptr_t)1U, 9, 1024);
+    TEST_ASSERT(a >= 0 && b >= 0, "ping-pong tasks created");
+    if (a >= 0 && b >= 0) {
+        (void)task_set_affinity(a, 1UL << 0);
+        (void)task_set_affinity(b, 1UL << 1);
+        (void)task_start(a);
+        (void)task_start(b);
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(a, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "core0 ping task joined");
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(b, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "core1 ping task joined");
+        TEST_ASSERT_EQ(SMP_PING_PONG_ITERATIONS, smp_ping_count[0],
+                       "core0 received every ping");
+        TEST_ASSERT_EQ(SMP_PING_PONG_ITERATIONS, smp_ping_count[1],
+                       "core1 received every ping");
+        TEST_ASSERT_EQ(0, smp_ping_cpu[0], "ping task 0 stayed on core0");
+        TEST_ASSERT_EQ(1, smp_ping_cpu[1], "ping task 1 stayed on core1");
+        (void)task_delete(a);
+        (void)task_delete(b);
+    } else {
+        if (a >= 0) (void)task_delete(a);
+        if (b >= 0) (void)task_delete(b);
+    }
+
+    (void)sem_delete(smp_ping_sem[0]);
+    (void)sem_delete(smp_ping_sem[1]);
+}
+
+/*============================================================================
+ * Test 4: cross-core endpoint call/reply ping-pong
+ *============================================================================*/
+
+static ep_id_t smp_ping_ep;
+static volatile uint32_t smp_ep_count[2];
+static volatile uint32_t smp_ep_cpu[2];
+static volatile kern_err_t smp_ep_error[2];
+
+static void smp_ep_server_task(void *arg) {
+    (void)arg;
+    smp_ep_cpu[1] = hal_get_cpu_id();
+
+    for (uint32_t i = 0; i < SMP_PING_PONG_ITERATIONS; i++) {
+        uint32_t msg = 0;
+        kern_err_t err = endpoint_recv(smp_ping_ep, &msg,
+                                       SMP_OPERATION_TIMEOUT_TICKS);
+        if (err != KERN_OK || msg != i) {
+            smp_ep_error[1] = (err != KERN_OK) ? err : KERN_ERR_STATE;
+            return;
+        }
+        msg++;
+        err = endpoint_reply(smp_ping_ep, &msg);
+        if (err != KERN_OK) {
+            smp_ep_error[1] = err;
+            return;
+        }
+        smp_ep_count[1]++;
+    }
+}
+
+static void smp_ep_client_task(void *arg) {
+    (void)arg;
+    smp_ep_cpu[0] = hal_get_cpu_id();
+
+    for (uint32_t i = 0; i < SMP_PING_PONG_ITERATIONS; i++) {
+        uint32_t msg = i;
+        kern_err_t err = endpoint_send(smp_ping_ep, &msg,
+                                       SMP_OPERATION_TIMEOUT_TICKS);
+        if (err != KERN_OK || msg != i + 1U) {
+            smp_ep_error[0] = (err != KERN_OK) ? err : KERN_ERR_STATE;
+            return;
+        }
+        smp_ep_count[0]++;
+    }
+}
+
+static void test_cross_core_endpoint_ping_pong(void) {
+    test_section("Test 4: cross-core endpoint ping-pong");
+
+    smp_ep_count[0] = smp_ep_count[1] = 0U;
+    smp_ep_cpu[0] = smp_ep_cpu[1] = UINT32_MAX;
+    smp_ep_error[0] = smp_ep_error[1] = KERN_OK;
+    smp_ping_ep = endpoint_create("smp_ep", sizeof(uint32_t), 2U);
+    TEST_ASSERT(smp_ping_ep >= 0, "SMP endpoint created");
+    if (smp_ping_ep < 0) return;
+
+    task_id_t server = task_create("smp_es", smp_ep_server_task, NULL, 9, 1024);
+    task_id_t client = task_create("smp_ec", smp_ep_client_task, NULL, 9, 1024);
+    TEST_ASSERT(server >= 0 && client >= 0, "endpoint ping-pong tasks created");
+    if (server >= 0 && client >= 0) {
+        (void)task_set_affinity(server, 1UL << 1);
+        (void)task_set_affinity(client, 1UL << 0);
+        (void)task_start(server);
+        (void)task_start(client);
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(client, NULL,
+                                        SMP_JOIN_TIMEOUT_TICKS),
+                       "endpoint client joined");
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(server, NULL,
+                                        SMP_JOIN_TIMEOUT_TICKS),
+                       "endpoint server joined");
+        TEST_ASSERT_EQ(KERN_OK, smp_ep_error[0], "endpoint client error-free");
+        TEST_ASSERT_EQ(KERN_OK, smp_ep_error[1], "endpoint server error-free");
+        TEST_ASSERT_EQ(SMP_PING_PONG_ITERATIONS, smp_ep_count[0],
+                       "endpoint client completed every call");
+        TEST_ASSERT_EQ(SMP_PING_PONG_ITERATIONS, smp_ep_count[1],
+                       "endpoint server completed every reply");
+        TEST_ASSERT_EQ(0, smp_ep_cpu[0], "endpoint client stayed on core0");
+        TEST_ASSERT_EQ(1, smp_ep_cpu[1], "endpoint server stayed on core1");
+        (void)task_delete(client);
+        (void)task_delete(server);
+    } else {
+        if (server >= 0) (void)task_delete(server);
+        if (client >= 0) (void)task_delete(client);
+    }
+
+    (void)endpoint_delete(smp_ping_ep);
+}
+
+/*============================================================================
+ * Test 5: capability pool derive/lookup/delete from both cores
+ *============================================================================*/
+
+#define SMP_POOL_STRESS_ITERATIONS \
+    ((SMP_PING_PONG_ITERATIONS / 100U) < 100U ? 100U : \
+     (SMP_PING_PONG_ITERATIONS / 100U))
+
+#if CAP_ENABLE
+static uint32_t smp_cap_object[2];
+static volatile uint32_t smp_cap_count[2];
+static volatile uint32_t smp_cap_errors[2];
+
+static void smp_cap_stress_task(void *arg) {
+    uint32_t index = (uint32_t)(uintptr_t)arg;
+
+    for (uint32_t i = 0; i < SMP_POOL_STRESS_ITERATIONS; i++) {
+        cap_id_t root = cap_create(&smp_cap_object[index], CAP_OBJ_SYSTEM,
+                                   CAP_FULL, (uint8_t)task_self());
+        if (root < 0) {
+            smp_cap_errors[index]++;
+            continue;
+        }
+        cap_id_t child = cap_derive(root, CAP_READ);
+        if (child < 0 ||
+            cap_resolve(child, CAP_OBJ_SYSTEM, CAP_READ) !=
+                &smp_cap_object[index]) {
+            smp_cap_errors[index]++;
+        }
+        if (child >= 0) cap_delete(child);
+        cap_delete(root);
+        smp_cap_count[index]++;
+    }
+}
+
+static void test_cross_core_cap_pool(void) {
+    test_section("Test 5: cross-core capability pool stress");
+    smp_cap_count[0] = smp_cap_count[1] = 0U;
+    smp_cap_errors[0] = smp_cap_errors[1] = 0U;
+
+    task_id_t a = task_create("smp_c0", smp_cap_stress_task,
+                              (void *)(uintptr_t)0U, 9, 1024);
+    task_id_t b = task_create("smp_c1", smp_cap_stress_task,
+                              (void *)(uintptr_t)1U, 9, 1024);
+    TEST_ASSERT(a >= 0 && b >= 0, "cap stress tasks created");
+    if (a >= 0 && b >= 0) {
+        (void)task_set_affinity(a, 1UL << 0);
+        (void)task_set_affinity(b, 1UL << 1);
+        (void)task_start(a);
+        (void)task_start(b);
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(a, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "cap stress core0 joined");
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(b, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "cap stress core1 joined");
+        TEST_ASSERT_EQ(0, smp_cap_errors[0], "cap stress core0 error-free");
+        TEST_ASSERT_EQ(0, smp_cap_errors[1], "cap stress core1 error-free");
+        TEST_ASSERT_EQ(SMP_POOL_STRESS_ITERATIONS, smp_cap_count[0],
+                       "cap stress core0 completed");
+        TEST_ASSERT_EQ(SMP_POOL_STRESS_ITERATIONS, smp_cap_count[1],
+                       "cap stress core1 completed");
+        (void)task_delete(a);
+        (void)task_delete(b);
+    } else {
+        if (a >= 0) (void)task_delete(a);
+        if (b >= 0) (void)task_delete(b);
+    }
+}
+#endif
+
+/*============================================================================
+ * Test 6: concurrent task create/exit/join/id-reuse
+ *============================================================================*/
+
+static volatile uint32_t smp_child_runs[2];
+static volatile uint32_t smp_task_churn[2];
+static volatile uint32_t smp_task_errors[2];
+
+static void smp_churn_child(void *arg) {
+    uint32_t index = (uint32_t)(uintptr_t)arg;
+    smp_child_runs[index]++;
+}
+
+static void smp_task_churn_worker(void *arg) {
+    uint32_t index = (uint32_t)(uintptr_t)arg;
+    uint32_t attempts = 0U;
+
+    while (smp_task_churn[index] < SMP_POOL_STRESS_ITERATIONS &&
+           attempts < SMP_TASK_CHURN_MAX_ATTEMPTS) {
+        attempts++;
+        /* A task that exited in the immediately preceding tick intentionally
+         * retains its ID for one tick so a late join-by-ID remains valid.
+         * A transient RESOURCE result is backpressure, not a failed reuse
+         * operation.  The overall attempts bound still catches a pool leak. */
+        task_id_t child = task_create("smp_ch", smp_churn_child,
+                                      (void *)(uintptr_t)index, 10, 512);
+        if (child < 0) {
+            (void)task_delay(1U);
+            continue;
+        }
+
+        kern_err_t join_err = KERN_ERR_STATE;
+        kern_err_t delete_err = KERN_ERR_STATE;
+        if (child >= 0 &&
+            task_set_affinity(child, 1UL << index) == KERN_OK &&
+            task_start(child) == KERN_OK) {
+            join_err = smp_join_bounded(child, NULL,
+                                        SMP_OPERATION_TIMEOUT_TICKS);
+            delete_err = task_delete(child);
+        }
+        /* Reclaim may win the tick boundary immediately after a successful
+         * join; NOEXIST then means the slot was already safely recycled. */
+        if (child < 0 || join_err != KERN_OK ||
+            (delete_err != KERN_OK && delete_err != KERN_ERR_NOEXIST)) {
+            smp_task_errors[index]++;
+            if (child >= 0) (void)task_delete(child);
+            continue;
+        }
+        smp_task_churn[index]++;
+    }
+
+    if (smp_task_churn[index] < SMP_POOL_STRESS_ITERATIONS) {
+        smp_task_errors[index] +=
+            SMP_POOL_STRESS_ITERATIONS - smp_task_churn[index];
+    }
+}
+
+static void test_cross_core_task_reuse(void) {
+    test_section("Test 6: cross-core task slot reuse stress");
+    smp_child_runs[0] = smp_child_runs[1] = 0U;
+    smp_task_churn[0] = smp_task_churn[1] = 0U;
+    smp_task_errors[0] = smp_task_errors[1] = 0U;
+
+    task_id_t a = task_create("smp_t0", smp_task_churn_worker,
+                              (void *)(uintptr_t)0U, 9, 1024);
+    task_id_t b = task_create("smp_t1", smp_task_churn_worker,
+                              (void *)(uintptr_t)1U, 9, 1024);
+    TEST_ASSERT(a >= 0 && b >= 0, "task reuse workers created");
+    if (a >= 0 && b >= 0) {
+        (void)task_set_affinity(a, 1UL << 0);
+        (void)task_set_affinity(b, 1UL << 1);
+        (void)task_start(a);
+        (void)task_start(b);
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(a, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "task reuse core0 joined");
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(b, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "task reuse core1 joined");
+        TEST_ASSERT_EQ(0, smp_task_errors[0], "task reuse core0 error-free");
+        TEST_ASSERT_EQ(0, smp_task_errors[1], "task reuse core1 error-free");
+        TEST_ASSERT_EQ(SMP_POOL_STRESS_ITERATIONS, smp_task_churn[0],
+                       "task reuse core0 completed");
+        TEST_ASSERT_EQ(SMP_POOL_STRESS_ITERATIONS, smp_task_churn[1],
+                       "task reuse core1 completed");
+        TEST_ASSERT_EQ(SMP_POOL_STRESS_ITERATIONS, smp_child_runs[0],
+                       "every core0 child ran once");
+        TEST_ASSERT_EQ(SMP_POOL_STRESS_ITERATIONS, smp_child_runs[1],
+                       "every core1 child ran once");
+        (void)task_delete(a);
+        (void)task_delete(b);
+    } else {
+        if (a >= 0) (void)task_delete(a);
+        if (b >= 0) (void)task_delete(b);
+    }
+}
+
+/*============================================================================
+ * Test 7: deterministic send/delete/timeout/fault interleavings
+ *============================================================================*/
+
+#define SMP_RACE_ITERATIONS \
+    ((SMP_PING_PONG_ITERATIONS / 1000U) < 10U ? 10U : \
+     (SMP_PING_PONG_ITERATIONS / 1000U))
+
+static volatile ep_id_t smp_race_ep;
+static volatile uint32_t smp_race_seed;
+static volatile kern_err_t smp_race_send_result;
+static volatile kern_err_t smp_race_recv_result;
+static volatile kern_err_t smp_race_delete_result;
+
+static int smp_race_ipc_result_ok(kern_err_t err) {
+    return err == KERN_OK || err == KERN_ERR_TIMEOUT ||
+           err == KERN_ERR_NOEXIST || err == KERN_ERR_PARAM;
+}
+
+static void smp_race_recv_task(void *arg) {
+    (void)arg;
+    uint32_t msg = 0U;
+    if ((smp_race_seed & 1U) != 0U) (void)task_delay(1U);
+    smp_race_recv_result = endpoint_recv(smp_race_ep, &msg, 2U);
+    if (smp_race_recv_result == KERN_OK) {
+        msg ^= 0xA5A5A5A5U;
+        (void)endpoint_reply(smp_race_ep, &msg);
+    }
+}
+
+static void smp_race_send_task(void *arg) {
+    (void)arg;
+    uint32_t msg = 0x12345678U;
+    if ((smp_race_seed & 2U) != 0U) (void)task_delay(1U);
+    smp_race_send_result = endpoint_send(smp_race_ep, &msg, 2U);
+}
+
+static void smp_race_delete_task(void *arg) {
+    (void)arg;
+    (void)task_delay(1U + ((smp_race_seed >> 2) & 1U));
+    smp_race_delete_result = endpoint_delete(smp_race_ep);
+}
+
+static void smp_race_fault_task(void *arg) {
+    (void)arg;
+    if ((smp_race_seed & 8U) != 0U) (void)task_delay(1U);
+    (void)task_terminate_with_result(sched_get_current(), KERN_ERR_FAULT);
+    sched_yield();
+    for (;;) __asm volatile("wfi");
+}
+
+static void test_cross_core_event_interleavings(void) {
+    test_section("Test 7: send/delete/timeout/fault interleavings");
+    uint32_t failures = 0U;
+    uint32_t seed = 0x13579BDFU;
+
+    for (uint32_t i = 0; i < SMP_RACE_ITERATIONS; i++) {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        smp_race_seed = seed;
+        smp_race_send_result = KERN_ERR_STATE;
+        smp_race_recv_result = KERN_ERR_STATE;
+        smp_race_delete_result = KERN_ERR_STATE;
+        smp_race_ep = endpoint_create("smp_rx", sizeof(uint32_t), 2U);
+        if (smp_race_ep < 0) {
+            failures++;
+            continue;
+        }
+
+        task_id_t recv = task_create("smp_rr", smp_race_recv_task, NULL, 9, 512);
+        task_id_t send = task_create("smp_rs", smp_race_send_task, NULL, 9, 512);
+        task_id_t del = task_create("smp_rd", smp_race_delete_task, NULL, 8, 512);
+        task_id_t fault = task_create("smp_rf", smp_race_fault_task, NULL, 9, 512);
+        if (recv < 0 || send < 0 || del < 0 || fault < 0) {
+            failures++;
+            if (recv >= 0) (void)task_delete(recv);
+            if (send >= 0) (void)task_delete(send);
+            if (del >= 0) (void)task_delete(del);
+            if (fault >= 0) (void)task_delete(fault);
+            (void)endpoint_delete(smp_race_ep);
+            continue;
+        }
+
+        (void)task_set_affinity(recv, 1UL << 1);
+        (void)task_set_affinity(send, 1UL << 0);
+        (void)task_set_affinity(del, 1UL << (seed & 1U));
+        (void)task_set_affinity(fault, 1UL << ((seed >> 1) & 1U));
+        (void)task_start(recv);
+        (void)task_start(send);
+        (void)task_start(fault);
+        (void)task_start(del);
+
+        kern_err_t recv_join = smp_join_bounded(
+            recv, NULL, SMP_OPERATION_TIMEOUT_TICKS);
+        kern_err_t send_join = smp_join_bounded(
+            send, NULL, SMP_OPERATION_TIMEOUT_TICKS);
+        kern_err_t fault_join = smp_join_bounded(
+            fault, NULL, SMP_OPERATION_TIMEOUT_TICKS);
+        kern_err_t del_join = smp_join_bounded(
+            del, NULL, SMP_OPERATION_TIMEOUT_TICKS);
+        if (recv_join != KERN_OK || send_join != KERN_OK ||
+            del_join != KERN_OK || fault_join != KERN_ERR_FAULT ||
+            !smp_race_ipc_result_ok(smp_race_recv_result) ||
+            !smp_race_ipc_result_ok(smp_race_send_result) ||
+            smp_race_delete_result != KERN_OK) {
+            failures++;
+        }
+
+        (void)task_delete(recv);
+        (void)task_delete(send);
+        (void)task_delete(fault);
+        (void)task_delete(del);
+        if (endpoint_exists(smp_race_ep)) (void)endpoint_delete(smp_race_ep);
+    }
+
+    TEST_ASSERT_EQ(0, failures, "all randomized interleavings completed safely");
+}
+
+/*============================================================================
+ * Test 8: both cores have distinct current tasks after workload
  *============================================================================*/
 
 static void test_dual_core_active(void) {
-    test_section("Test 3: both cores were active");
+    test_section("Test 8: both cores were active");
 
     /* After the parallel test, both _current_task[0] and [1] should be
      * valid (one may be idle). This confirms core1 didn't crash. */
@@ -113,9 +602,25 @@ static void test_dual_core_active(void) {
  *============================================================================*/
 
 static void test_smp_module(void) {
+    test_print("[SMP] 1 core1 state\r\n");
     test_core1_running();
+    test_print("[SMP] 2 pinned parallel workers\r\n");
     test_parallel_execution();
+    test_print("[SMP] 3 semaphore ping-pong\r\n");
+    test_cross_core_ping_pong();
+    test_print("[SMP] 4 endpoint ping-pong\r\n");
+    test_cross_core_endpoint_ping_pong();
+#if CAP_ENABLE
+    test_print("[SMP] 5 capability pool stress\r\n");
+    test_cross_core_cap_pool();
+#endif
+    test_print("[SMP] 6 task-slot reuse stress\r\n");
+    test_cross_core_task_reuse();
+    test_print("[SMP] 7 event interleavings\r\n");
+    test_cross_core_event_interleavings();
+    test_print("[SMP] 8 final core state\r\n");
     test_dual_core_active();
+    test_print("[SMP] complete\r\n");
 }
 
 TEST_MODULE_REGISTER(smp, test_smp_module);

@@ -295,7 +295,7 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
  *============================================================================*/
 
 void channel_init(void) {
-    irq_spin_init(&ch_lock);
+    irq_spin_init_rank(&ch_lock, LOCKDEP_RANK_OBJECT);
     memset(ch_pool, 0, sizeof(ch_pool));
     memset(ch_cap_id_buffers, 0, sizeof(ch_cap_id_buffers));
     memset(ch_cap_count_buffers, 0, sizeof(ch_cap_count_buffers));
@@ -416,6 +416,13 @@ void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {
         return;
     }
 
+    uint32_t crit = irq_spin_lock(&ch_lock);
+    if (ch < &ch_pool[0] || ch >= &ch_pool[KERN_MAX_CHANNELS] ||
+        !ch->in_use) {
+        irq_spin_unlock(&ch_lock, crit);
+        return;
+    }
+
     wait_queue_remove_safe(&ch->a_recv_waiters, tcb);
     wait_queue_remove_safe(&ch->b_recv_waiters, tcb);
     wait_queue_remove_safe(&ch->a_send_waiters, tcb);
@@ -440,6 +447,7 @@ void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {
     if (tcb->id == ch->peer_b) {
         ch->peer_b = KERN_INVALID_ID;
     }
+    irq_spin_unlock(&ch_lock, crit);
 }
 
 kern_err_t channel_connect(ch_id_t ch_id, task_id_t peer_a, task_id_t peer_b) {
@@ -528,12 +536,7 @@ static kern_err_t channel_send_common(ch_id_t ch_id,
         current->block_reason = BLOCK_REASON_CH_SEND;
         current->block_obj = ch;
         current->block_result = KERN_OK;
-        if (timeout > 0) {
-            extern uint32_t sched_get_tick_count(void);
-            current->wake_tick = sched_get_tick_count() + timeout;
-        } else {
-            current->wake_tick = 0;
-        }
+        current->wake_tick = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
         hal_trigger_pendsv();
@@ -681,12 +684,7 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
             sched_remove_ready(current);
         }
         current->state = TASK_STATE_BLOCKED;
-        if (timeout > 0) {
-            extern uint32_t sched_get_tick_count(void);
-            current->wake_tick = sched_get_tick_count() + timeout;
-        } else {
-            current->wake_tick = 0;
-        }
+        current->wake_tick = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
@@ -784,12 +782,7 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
             sched_remove_ready(current);
         }
         current->state = TASK_STATE_BLOCKED;
-        if (timeout > 0) {
-            extern uint32_t sched_get_tick_count(void);
-            current->wake_tick = sched_get_tick_count() + timeout;
-        } else {
-            current->wake_tick = 0;
-        }
+        current->wake_tick = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
@@ -898,12 +891,7 @@ static kern_err_t channel_recv_common(ch_id_t ch_id,
         current->block_reason = is_a ? BLOCK_REASON_CH_RECV : BLOCK_REASON_CH_RECV;
         current->block_obj = ch;
         current->block_result = KERN_OK;
-        if (timeout > 0) {
-            extern uint32_t sched_get_tick_count(void);
-            current->wake_tick = sched_get_tick_count() + timeout;
-        } else {
-            current->wake_tick = 0;
-        }
+        current->wake_tick = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
         hal_trigger_pendsv();
@@ -1060,12 +1048,7 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
             sched_remove_ready(current);
         }
         current->state = TASK_STATE_BLOCKED;
-        if (timeout > 0) {
-            extern uint32_t sched_get_tick_count(void);
-            current->wake_tick = sched_get_tick_count() + timeout;
-        } else {
-            current->wake_tick = 0;
-        }
+        current->wake_tick = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;
@@ -1167,12 +1150,7 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
             sched_remove_ready(current);
         }
         current->state = TASK_STATE_BLOCKED;
-        if (timeout > 0) {
-            extern uint32_t sched_get_tick_count(void);
-            current->wake_tick = sched_get_tick_count() + timeout;
-        } else {
-            current->wake_tick = 0;
-        }
+        current->wake_tick = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
         return KERN_SYSCALL_BLOCKED;

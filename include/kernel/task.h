@@ -117,6 +117,12 @@ kern_err_t task_set_priority(task_id_t task_id, uint8_t priority);
  */
 uint8_t task_get_priority(task_id_t task_id);
 
+/** Restrict a task to a non-empty subset of online/configured CPUs. */
+kern_err_t task_set_affinity(task_id_t task_id, uint32_t affinity_mask);
+
+/** Return the configured CPU affinity mask, or 0 for an invalid task. */
+uint32_t task_get_affinity(task_id_t task_id);
+
 /*============================================================================
  * 调度策略 (RT_SCHED)
  *============================================================================*/
@@ -201,6 +207,7 @@ task_state_t task_get_state(task_id_t task_id);
  * @return 空闲任务 TCB
  */
 tcb_t *task_get_idle(void);
+tcb_t *task_get_idle_cpu(uint32_t cpu);
 
 uint64_t task_get_used_bitmap(void);
 
@@ -208,6 +215,9 @@ uint64_t task_get_used_bitmap(void);
  * @brief 回收已过期的终止任务 (由 tick handler 调用)
  */
 void task_reclaim_expired(void);
+
+/* Scheduler timeout helper: atomically detach a JOIN waiter. */
+void task_cancel_join_wait(tcb_t *tcb);
 
 /*============================================================================
  * 用户任务创建 (Phase 1)

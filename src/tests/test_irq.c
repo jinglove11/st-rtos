@@ -72,6 +72,30 @@ static void irq_user_bind_once_task(void *arg) {
     sys_task_exit((void *)(intptr_t)err);
 }
 
+/* Run the producer as a real task instead of polling from test_runner.
+ *
+ * test_runner has priority 10 while the user task deliberately runs at 13.
+ * Repeated task_delay(1) calls from test_runner are not a readiness handshake:
+ * with the SMP service tasks active, test_runner can wake every tick before the
+ * lower-priority user task has executed sys_irq_bind().  The old test therefore
+ * observed NOEXIST for every early notify, then blocked in task_join; only then
+ * did the user bind and eventually time out because notification had stopped.
+ *
+ * This producer is lower priority than the user task.  Once test_runner joins,
+ * the user runs first, publishes the IRQ binding and blocks in recv; the
+ * producer then delivers the notification.  The retry loop still covers the
+ * legitimate cross-core race where both tasks start simultaneously. */
+static void irq_user_notify_task(void *arg) {
+    int16_t irq = (int16_t)(intptr_t)arg;
+    kern_err_t err = KERN_ERR_NOEXIST;
+
+    for (int i = 0; i < 16 && err != KERN_OK; i++) {
+        (void)task_delay(1);
+        err = irq_notify(irq);
+    }
+    task_exit((void *)(intptr_t)err);
+}
+
 /*============================================================================
  * 测试 1: ISR 池管理
  *============================================================================*/
@@ -87,10 +111,10 @@ static void test_isr_pool(void) {
     uint32_t outer_crit = hal_enter_critical();
     int16_t registered[IRQ_MAX_USER];
     int count = 0;
-    int limit = IRQ_MAX_USER;
-    if (limit > (int)BOARD_IRQ_COUNT) {
-        limit = (int)BOARD_IRQ_COUNT;
-    }
+    /* Walk the board range until the descriptor pool fills.  Kernel-reserved
+     * vectors (notably the SMP SIO FIFO IPI) are deliberately rejected and
+     * must not reduce the number of ordinary descriptor slots exercised. */
+    int limit = (int)BOARD_IRQ_COUNT;
     for (int i = 0; i < limit; i++) {
         kern_err_t err = irq_register((int16_t)i, test_handler_stub, 8);
         if (err == KERN_OK) {
@@ -679,6 +703,7 @@ static void test_irq_user_cap_endpoint_bind(void) {
 
     cap_id_t user_ep_cap = KERN_INVALID_ID;
     cap_id_t user_irq_cap = KERN_INVALID_ID;
+    task_id_t notifier_id = KERN_INVALID_ID;
     tcb_t *user = task_get_tcb(user_id);
     if (user != NULL) {
         user_ep_cap = cap_create_for(user, endpoint_obj_for_cap(ep), CAP_OBJ_ENDPOINT,
@@ -690,30 +715,41 @@ static void test_irq_user_cap_endpoint_bind(void) {
     TEST_ASSERT(user_irq_cap >= 0, "user receives IRQ cap");
 
     if (user_id >= 0 && user_ep_cap >= 0 && user_irq_cap >= 0) {
+        notifier_id = task_create("irq_user_notify", irq_user_notify_task,
+                                  (void *)(intptr_t)TEST_IRQ_USER_BIND,
+                                  14, 512);
+        TEST_ASSERT(notifier_id >= 0, "user IRQ notifier task created");
         err = task_start(user_id);
         TEST_ASSERT_EQ(KERN_OK, err, "user IRQ bind task started");
-    }
-
-    err = KERN_ERR_NOEXIST;
-    if (user_id >= 0) {
-        for (int i = 0; i < 16 && err != KERN_OK; i++) {
-            (void)task_delay(1);
-            err = irq_notify(TEST_IRQ_USER_BIND);
+        if (notifier_id >= 0) {
+            err = task_start(notifier_id);
+            TEST_ASSERT_EQ(KERN_OK, err, "user IRQ notifier task started");
         }
     }
-    TEST_ASSERT_EQ(KERN_OK, err, "user-bound IRQ notification sent");
 
     void *retval = NULL;
     if (user_id >= 0) {
-        err = task_join(user_id, &retval, 1000);
+        err = task_join(user_id, &retval, 2000);
         TEST_ASSERT_EQ(KERN_OK, err, "user IRQ bind task joined");
         TEST_ASSERT_EQ(KERN_OK, (kern_err_t)(intptr_t)retval,
                        "user IRQ bind recv returned OK");
     }
 
+    retval = NULL;
+    if (notifier_id >= 0) {
+        err = task_join(notifier_id, &retval, 2000);
+        TEST_ASSERT_EQ(KERN_OK, err, "user IRQ notifier task joined");
+        TEST_ASSERT_EQ(KERN_OK, (kern_err_t)(intptr_t)retval,
+                       "user-bound IRQ notification sent");
+    }
+
     if (user_id >= 0 &&
         task_get_state(user_id) != TASK_STATE_TERMINATED) {
         (void)task_delete(user_id);
+    }
+    if (notifier_id >= 0 &&
+        task_get_state(notifier_id) != TASK_STATE_TERMINATED) {
+        (void)task_delete(notifier_id);
     }
     if (irq_cap > 0) {
         TEST_ASSERT_EQ(KERN_OK, kirq_delete_cap(irq_cap),

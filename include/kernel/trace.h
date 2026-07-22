@@ -126,12 +126,16 @@ void trace_ipc_event(uint8_t task_id, uint8_t ipc_id, uint8_t action, uint8_t re
  */
 uint16_t trace_get_count(void);
 
+/** Per-CPU diagnostic/test view; avoids unrelated events from the peer CPU. */
+uint16_t trace_get_local_count(void);
+
 /**
  * @brief 获取指定索引的 trace 条目
  * @param index 索引 (0 = 最旧)
  * @return 条目指针，越界返回 NULL
  */
 const trace_entry_t *trace_get_entry(uint16_t index);
+const trace_entry_t *trace_get_local_entry(uint16_t index);
 
 /**
  * @brief 清空 trace buffer
@@ -148,6 +152,9 @@ void trace_clear(void);
 uint16_t trace_filter(uint8_t event,
                       void (*callback)(const trace_entry_t *e, void *ctx),
                       void *ctx);
+uint16_t trace_filter_local(uint8_t event,
+                            void (*callback)(const trace_entry_t *e, void *ctx),
+                            void *ctx);
 
 /**
  * @brief 输出最近的 trace 事件，用于 panic/fault 诊断

@@ -28,8 +28,10 @@
  *     +68       a5
  *     +72       a6
  *
- *   basic frame 时异常帧 R0 地址是 PSP+32，额外参数从 PSP+64 开始。
- *   extended FP frame 时两者再增加 72 字节。
+ *   basic/extended frame 的 core frame 都从异常后 PSP 开始；extended
+ *   frame 的 S0-S15/FPSCR 位于 core frame 之后。保存 R4-R11 后，R0
+ *   地址始终是 PSP+32。额外参数在 basic frame 时从 PSP+64 开始，
+ *   extended frame 时仅额外参数位置再增加 72 字节。
  */
 
     .syntax unified
@@ -41,6 +43,7 @@
     .extern kern_pendsv_handler
     .extern mpu_load_task_regions
 
+#include "kernel_config.h"
 #include "tcb_offsets.inc"
 
 /* SIO_BASE for CPUID read (RP2350) */
@@ -49,9 +52,14 @@
 /* Macro: load CPU id (0 or 1) into \reg, then compute byte offset into a
  * tcb_t* array (cpu_id * 4) into \off. */
 .macro GET_CPU_OFFSET reg, off
+#if SMP
     ldr     \reg, =SIO_BASE
     ldr     \reg, [\reg]            /* sio_hw->cpuid (0 or 1) */
     lsl     \off, \reg, #2          /* byte offset: cpu_id * sizeof(void*) */
+#else
+    movs    \reg, #0
+    movs    \off, #0                /* UP has one per-CPU array entry */
+#endif
 .endm
 
     .section .text
@@ -71,9 +79,6 @@ SVC_Handler:
     ite     eq
     mrseq   r12, msp
     mrsne   r12, psp
-    tst     lr, #0x10
-    it      eq
-    addeq   r12, r12, #72         /* skip extended FP state */
     ldr     r12, [r12, #24]       /* stacked PC */
     ldrb    r12, [r12, #-2]        /* SVC 立即数 */
 
@@ -163,15 +168,16 @@ SVC_Handler:
     mrs     r2, psplim
     str     r2, [r4, #OFF_SP_LIMIT]
 1:
-    add     r7, r12, #32           /* skip saved R4-R11 */
+    add     r7, r12, #32           /* core frame: saved R4-R11 后 */
+    add     r3, r7, #32            /* basic frame 后的 a4 */
     tst     lr, #0x10
     it      eq
-    addeq   r7, r7, #72            /* skip extended FP state */
+    addeq   r3, r3, #72            /* extended FP state 位于 core frame 后 */
 
     /* 从用户栈读取 a4-a6 */
-    ldr     r4, [r7, #32]
-    ldr     r5, [r7, #36]
-    ldr     r6, [r7, #40]
+    ldr     r4, [r3, #0]
+    ldr     r5, [r3, #4]
+    ldr     r6, [r3, #8]
     push    {r4, r5, r6, lr}
 
     /*
@@ -217,9 +223,6 @@ SVC_Handler:
     ite     eq
     mrseq   r12, msp
     mrsne   r12, psp
-    tst     lr, #0x10
-    it      eq
-    addeq   r12, r12, #72
     ldr     r1, =-2               /* KERN_ERR_PARAM */
     str     r1, [r12]              /* stacked R0 */
     bx      lr
@@ -229,9 +232,6 @@ SVC_Handler:
     ite     eq
     mrseq   r12, msp
     mrsne   r12, psp
-    tst     lr, #0x10
-    it      eq
-    addeq   r12, r12, #72
     ldr     r1, =-5               /* KERN_ERR_STATE */
     str     r1, [r12]              /* stacked R0 */
     bx      lr

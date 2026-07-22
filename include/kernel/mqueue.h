@@ -106,5 +106,6 @@ void mqueue_init(void);
 
 queue_id_t mqueue_id_from_obj(void *obj);
 void *mqueue_obj_for_cap(queue_id_t id);
+void mqueue_cleanup_task(void *mqueue_obj, tcb_t *tcb);
 
 #endif // MQUEUE_H

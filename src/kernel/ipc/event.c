@@ -82,7 +82,7 @@ static int event_check(uint32_t current, uint32_t wait, uint32_t opt) {
  *============================================================================*/
 
 void event_init(void) {
-    irq_spin_init(&event_lock);
+    irq_spin_init_rank(&event_lock, LOCKDEP_RANK_OBJECT);
     memset(event_pool, 0, sizeof(event_pool));
     memset(event_wait_info, 0, sizeof(event_wait_info));
     event_used_bitmap = 0;
@@ -166,6 +166,18 @@ void *event_obj_for_cap(event_id_t id) {
     return (void *)&event_pool[id];
 }
 
+void event_cleanup_task(void *event_obj, tcb_t *tcb) {
+    event_t *evt = (event_t *)event_obj;
+    if (evt == NULL || tcb == NULL) return;
+
+    uint32_t crit = irq_spin_lock(&event_lock);
+    if (evt >= &event_pool[0] && evt < &event_pool[KERN_MAX_EVENTS] &&
+        evt->in_use) {
+        (void)wait_queue_remove_safe(&evt->wait_queue, tcb);
+    }
+    irq_spin_unlock(&event_lock, crit);
+}
+
 kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
                       uint32_t timeout, uint32_t *received) {
     if (hal_irq_get_active() >= 0) {
@@ -232,13 +244,7 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
     current->state = TASK_STATE_BLOCKED;
     current->block_result = KERN_OK;
 
-    /* 设置超时唤醒时间 */
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&event_lock, crit);
 
@@ -330,12 +336,7 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
     }
 
     current->state = TASK_STATE_BLOCKED;
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&event_lock, crit);
     return KERN_SYSCALL_BLOCKED;

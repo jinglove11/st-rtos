@@ -11,6 +11,7 @@
 #endif
 #include "hal.h"
 #include "scheduler.h"
+#include "spinlock.h"
 #include <string.h>
 
 #ifndef TRACE_DEV_OPEN
@@ -37,6 +38,7 @@
  *============================================================================*/
 
 static device_t device_pool[DEVICE_MAX];
+static irq_spinlock_t device_lock;
 
 static uint8_t device_current_task_id(void) {
     tcb_t *current = sched_get_current();
@@ -102,6 +104,7 @@ static void device_record_event(device_t *dev, uint8_t action,
  *============================================================================*/
 
 void device_init(void) {
+    irq_spin_init_rank(&device_lock, LOCKDEP_RANK_REGISTRY);
     memset(device_pool, 0, sizeof(device_pool));
 }
 
@@ -112,7 +115,7 @@ device_t *device_alloc(const char *name, device_type_t type) {
         return NULL;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&device_lock);
     for (int i = 0; i < DEVICE_MAX; i++) {
         if (!device_pool[i].in_use) {
             device_t *dev = &device_pool[i];
@@ -121,11 +124,11 @@ device_t *device_alloc(const char *name, device_type_t type) {
             dev->name[DEVICE_NAME_LEN - 1] = '\0';
             dev->type = type;
             dev->in_use = 1;
-            hal_exit_critical(crit);
+            irq_spin_unlock(&device_lock, crit);
             return dev;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&device_lock, crit);
     device_record_event(NULL, TRACE_DEV_OPEN, KERN_ERR_RESOURCE,
                         STATS_COUNTER_QUEUE_FULL);
     return NULL;  /* 池满 */
@@ -133,41 +136,68 @@ device_t *device_alloc(const char *name, device_type_t type) {
 
 void device_free(device_t *dev) {
     if (!dev) return;
-    if (dev->open_count > 0) return;
-    device_record_event(dev, TRACE_DEV_REMOVE, KERN_OK, STATS_COUNTER_DELETE);
+    uint32_t crit = irq_spin_lock(&device_lock);
+    if (!dev->in_use || dev->open_count > 0) {
+        irq_spin_unlock(&device_lock, crit);
+        return;
+    }
     memset(dev, 0, sizeof(device_t));
+    irq_spin_unlock(&device_lock, crit);
+    device_record_event(dev, TRACE_DEV_REMOVE, KERN_OK, STATS_COUNTER_DELETE);
 }
 
 device_t *device_find(const char *name) {
     if (!name) return NULL;
 
+    uint32_t crit = irq_spin_lock(&device_lock);
     for (int i = 0; i < DEVICE_MAX; i++) {
         if (device_pool[i].in_use &&
             strcmp(device_pool[i].name, name) == 0) {
+            irq_spin_unlock(&device_lock, crit);
             return &device_pool[i];
         }
     }
+    irq_spin_unlock(&device_lock, crit);
     return NULL;
 }
 
 device_t *device_get_by_index(uint16_t index) {
     if (index >= DEVICE_MAX) return NULL;
-    if (!device_pool[index].in_use) return NULL;
-    return &device_pool[index];
+    uint32_t crit = irq_spin_lock(&device_lock);
+    device_t *dev = device_pool[index].in_use ? &device_pool[index] : NULL;
+    irq_spin_unlock(&device_lock, crit);
+    return dev;
 }
 
 kern_err_t device_probe(const char *name, device_type_t type, dev_ops_t *ops,
                         void *priv, uint32_t irq_num) {
     if (!name || !ops) return KERN_ERR_PARAM;
-    if (device_find(name)) return KERN_ERR_BUSY;
-
-    device_t *dev = device_alloc(name, type);
-    if (!dev) return KERN_ERR_RESOURCE;
-
+    device_t *dev = NULL;
+    uint32_t crit = irq_spin_lock(&device_lock);
+    for (int i = 0; i < DEVICE_MAX; i++) {
+        if (device_pool[i].in_use &&
+            strcmp(device_pool[i].name, name) == 0) {
+            irq_spin_unlock(&device_lock, crit);
+            return KERN_ERR_BUSY;
+        }
+        if (dev == NULL && !device_pool[i].in_use) {
+            dev = &device_pool[i];
+        }
+    }
+    if (dev == NULL) {
+        irq_spin_unlock(&device_lock, crit);
+        return KERN_ERR_RESOURCE;
+    }
+    memset(dev, 0, sizeof(*dev));
+    strncpy(dev->name, name, DEVICE_NAME_LEN - 1);
+    dev->name[DEVICE_NAME_LEN - 1] = '\0';
+    dev->type = type;
     dev->ops = ops;
     dev->priv = priv;
     dev->irq_num = irq_num;
     dev->events = 0;
+    dev->in_use = 1;
+    irq_spin_unlock(&device_lock, crit);
 
 #if VFS_ENABLE
     kern_err_t err = devfs_register_device(name, dev);
@@ -212,29 +242,37 @@ kern_err_t device_remove(const char *name) {
 }
 
 kern_err_t device_notify_events(device_t *dev, uint32_t events) {
-    if (!dev || !dev->in_use) return KERN_ERR_NOEXIST;
+    if (!dev) return KERN_ERR_NOEXIST;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&device_lock);
+    if (!dev->in_use) {
+        irq_spin_unlock(&device_lock, crit);
+        return KERN_ERR_NOEXIST;
+    }
     dev->events |= events;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&device_lock, crit);
     return KERN_OK;
 }
 
 kern_err_t device_clear_events(device_t *dev, uint32_t events) {
-    if (!dev || !dev->in_use) return KERN_ERR_NOEXIST;
+    if (!dev) return KERN_ERR_NOEXIST;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&device_lock);
+    if (!dev->in_use) {
+        irq_spin_unlock(&device_lock, crit);
+        return KERN_ERR_NOEXIST;
+    }
     dev->events &= ~events;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&device_lock, crit);
     return KERN_OK;
 }
 
 uint32_t device_get_events(device_t *dev) {
-    if (!dev || !dev->in_use) return 0;
+    if (!dev) return 0;
 
-    uint32_t crit = hal_enter_critical();
-    uint32_t events = dev->events;
-    hal_exit_critical(crit);
+    uint32_t crit = irq_spin_lock(&device_lock);
+    uint32_t events = dev->in_use ? dev->events : 0U;
+    irq_spin_unlock(&device_lock, crit);
     return events;
 }
 

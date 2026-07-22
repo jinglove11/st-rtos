@@ -27,6 +27,7 @@
     .extern kern_pendsv_handler
     .extern mpu_load_task_regions
 
+#include "kernel_config.h"
 #include "tcb_offsets.inc"
 
 /* SIO_BASE for CPUID read (RP2350) */
@@ -41,9 +42,14 @@
 /* Macro: load CPU id (0 or 1) into \reg, then compute byte offset into a
  * tcb_t* array (cpu_id * 4) into \off. */
 .macro GET_CPU_OFFSET reg, off
+#if SMP
     ldr     \reg, =SIO_BASE
     ldr     \reg, [\reg]            /* sio_hw->cpuid (0 or 1) */
     lsl     \off, \reg, #2          /* byte offset: cpu_id * sizeof(void*) */
+#else
+    movs    \reg, #0
+    movs    \off, #0                /* UP has one per-CPU array entry */
+#endif
 .endm
 
 PendSV_Handler:

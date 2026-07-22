@@ -20,7 +20,13 @@
 
 static void root_dummy_task(void *arg) {
     (void)arg;
-    task_exit(NULL);
+    /* root_bootstrap_create() creates a USER task.  Calling the kernel-only
+     * task_exit() directly from it faults as soon as the peer CPU actually
+     * schedules the task.  Stay alive through the user syscall ABI until the
+     * test explicitly deletes this placeholder service. */
+    for (;;) {
+        (void)sys_task_delay(1000);
+    }
 }
 
 static void service_ipc_task(void *arg) {
@@ -1354,9 +1360,14 @@ static void test_root_bootstrap_start_service(void) {
                    "root service start via cap OK");
 
     if (service_id >= 0) {
-        TEST_ASSERT_EQ((int)TASK_STATE_READY,
-                       (int)task_get_state(service_id),
-                       "root service task is ready after start");
+        task_state_t state = task_get_state(service_id);
+        /* In SMP the peer core may run the task between task_start() and this
+         * observation.  READY, RUNNING and BLOCKED all prove it left CREATED;
+         * requiring exactly READY is a UP-only timing assumption. */
+        TEST_ASSERT(state == TASK_STATE_READY ||
+                    state == TASK_STATE_RUNNING ||
+                    state == TASK_STATE_BLOCKED,
+                    "root service task started on SMP");
     }
 
     err = root_bootstrap_start_service(service_cap);

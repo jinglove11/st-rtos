@@ -55,6 +55,71 @@ static void test_mqueue_delete(void) {
 }
 
 /*============================================================================
+ * Test 2b: mqueue KERN_WAIT_FOREVER 使用无期限调度等待
+ *============================================================================*/
+
+static queue_id_t test_mq_forever;
+static volatile kern_err_t test_mq_forever_result;
+static volatile uint32_t test_mq_forever_value;
+
+static void mqueue_forever_waiter(void *arg) {
+    (void)arg;
+
+    uint32_t value = 0;
+    test_mq_forever_result = mqueue_recv(test_mq_forever, &value,
+                                         KERN_WAIT_FOREVER);
+    test_mq_forever_value = value;
+}
+
+static void test_mqueue_wait_forever(void) {
+    test_section("Test 2b: mqueue wait forever");
+
+    test_mq_forever = mqueue_create(sizeof(uint32_t), 1);
+    TEST_ASSERT(test_mq_forever >= 0, "mqueue created for forever wait");
+    if (test_mq_forever < 0) {
+        return;
+    }
+
+    test_mq_forever_result = KERN_ERR_TIMEOUT;
+    test_mq_forever_value = 0;
+
+    task_id_t waiter = task_create("mq_forever", mqueue_forever_waiter,
+                                   NULL, 10, 0);
+    TEST_ASSERT(waiter >= 0, "mqueue forever waiter created");
+    if (waiter < 0) {
+        (void)mqueue_delete(test_mq_forever);
+        return;
+    }
+
+    (void)task_start(waiter);
+    task_delay(5);
+
+    tcb_t *waiter_tcb = task_get_tcb(waiter);
+    TEST_ASSERT(waiter_tcb != NULL, "mqueue forever waiter TCB exists");
+    if (waiter_tcb != NULL) {
+        TEST_ASSERT_EQ((int)TASK_STATE_BLOCKED, (int)waiter_tcb->state,
+                       "mqueue forever waiter remains blocked");
+        TEST_ASSERT_EQ(0, (int)waiter_tcb->wake_tick,
+                       "mqueue forever waiter has no deadline");
+    }
+
+    uint32_t value = 0xA55A1234u;
+    kern_err_t err = mqueue_send(test_mq_forever, &value, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "send wakes mqueue forever waiter");
+
+    err = task_join(waiter, NULL, 100);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "mqueue forever waiter joined");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)test_mq_forever_result,
+                   "mqueue forever receive succeeds");
+    TEST_ASSERT_EQ((int)value, (int)test_mq_forever_value,
+                   "mqueue forever receive copies message");
+
+    (void)mqueue_delete(test_mq_forever);
+}
+
+/*============================================================================
  * Test 3: event_delete 正常工作
  *============================================================================*/
 
@@ -1015,6 +1080,7 @@ static void test_ipc_upgrade_module(void) {
     /* syscall 补全 */
     test_mutex_delete();
     test_mqueue_delete();
+    test_mqueue_wait_forever();
     test_event_delete();
     test_event_clear();
     test_event_get();

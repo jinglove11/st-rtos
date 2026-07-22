@@ -16,6 +16,10 @@
 #include "spinlock.h"
 #include "endpoint.h"
 #include "channel.h"
+#include "semaphore.h"
+#include "mutex.h"
+#include "mqueue.h"
+#include "event.h"
 /* Phase F4: vfs.h 移除 (内核 VFS 已删) */
 #include "mem.h"
 #include "root_bootstrap.h"
@@ -30,8 +34,6 @@ typedef char tcb_state_offset_in_first_cacheline[(offsetof(tcb_t, state) < 64) ?
 
 /* Return to Thread mode using PSP, with a basic (non-FP) hardware frame. */
 #define TASK_INITIAL_EXC_RETURN 0xFFFFFFFDUL
-#define EXC_RETURN_BASIC_FRAME (1UL << 4)
-#define FP_EXTENDED_FRAME_SIZE 72U
 
 // 简单的数字转字符串
 static void int_to_str(int n, char *buf) {
@@ -92,12 +94,20 @@ static uint8_t idle_stacks[SMP_MAX_CPUS][IDLE_STACK_SIZE_ACTUAL]
  * the saved PSP when both cores become idle at the same time. */
 static tcb_t idle_tasks[SMP_MAX_CPUS];
 
-/* 任务使用位图 */
-uint64_t task_used_bitmap = 0;
+/*
+ * 任务使用位图按 32 位原子访问单元保存。RP2350 是 32 位内核，直接并发
+ * 读写 uint64_t 会撕裂；池内增删仍由 task_lock 串行化，查询路径则只需
+ * 读取包含目标 ID 的单个 word。
+ */
+static uint32_t task_used_words[2] = {0, 0};
 
 /* Spinlock protecting task_pool, task_used_bitmap, and exit_retain tables.
  * In single-core mode this is uncontended (degrades to IRQ disable). */
 static irq_spinlock_t task_lock;
+
+/* A terminated TCB remains published while task-owned resources are cleaned
+ * outside task_lock.  Deleters/reclaimers must not reuse the slot meanwhile. */
+#define TASK_RECLAIM_CLEANING UINT32_MAX
 
 typedef char task_bitmap_covers_config[(KERNEL_MAX_TASKS <= 64) ? 1 : -1];
 
@@ -144,7 +154,9 @@ static void idle_task_func(void *arg) {
 // 查找空闲任务 ID。调用者负责在提交 bitmap 前持有临界区。
 static task_id_t find_free_task_id(void) {
     for (int i = 0; i < KERNEL_MAX_TASKS; i++) {
-        if (!(task_used_bitmap & (1ULL << i))) {
+        uint32_t word = (uint32_t)i >> 5;
+        uint32_t bit = 1u << ((uint32_t)i & 31u);
+        if ((task_used_words[word] & bit) == 0) {
             return (task_id_t)i;
         }
     }
@@ -153,32 +165,51 @@ static task_id_t find_free_task_id(void) {
 
 static void mark_task_id_used(task_id_t id) {
     if (id >= 0 && id < KERNEL_MAX_TASKS) {
-        task_used_bitmap |= (1ULL << id);
+        uint32_t uid = (uint32_t)id;
+        task_used_words[uid >> 5] |= 1u << (uid & 31u);
     }
 }
 
 // 释放任务 ID
 static void free_task_id(task_id_t id) {
     if (id >= 0 && id < KERNEL_MAX_TASKS) {
-        task_used_bitmap &= ~(1ULL << id);
+        uint32_t uid = (uint32_t)id;
+        task_used_words[uid >> 5] &= ~(1u << (uid & 31u));
     }
 }
 
 static int task_id_is_used(task_id_t id) {
-    return (id >= 0 && id < KERNEL_MAX_TASKS &&
-            (task_used_bitmap & (1ULL << id)) != 0);
+    if (id < 0 || id >= KERNEL_MAX_TASKS) {
+        return 0;
+    }
+    uint32_t uid = (uint32_t)id;
+    return (task_used_words[uid >> 5] & (1u << (uid & 31u))) != 0;
 }
 
-static void task_wake_joiners(tcb_t *tcb, kern_err_t result) {
-    tcb_t *j = tcb->joiners;
+static void task_cleanup_resources(tcb_t *tcb);
 
+/* Caller holds task_lock.  Detach the list before publishing a reclaimable
+ * target state, so a woken joiner can never race task_delete() against a TCB
+ * that still owns joiners. */
+static tcb_t *task_detach_joiners_locked(tcb_t *tcb) {
+    tcb_t *j = tcb->joiners;
+    void *exit_value = tcb->exit_value;
+    tcb->joiners = NULL;
+
+    for (tcb_t *it = j; it != NULL; it = it->join_next) {
+        it->join_value = exit_value;
+    }
+
+    return j;
+}
+
+static void task_wake_joiner_list(tcb_t *j, kern_err_t result) {
     while (j) {
         tcb_t *next = j->join_next;
         j->join_next = NULL;
         sched_wakeup(j, result);
         j = next;
     }
-    tcb->joiners = NULL;
 }
 
 static void task_record_exit(tcb_t *tcb, void *retval, kern_err_t result) {
@@ -192,7 +223,29 @@ static void task_record_exit(tcb_t *tcb, void *retval, kern_err_t result) {
     exit_retain_bitmap |= (1ULL << tcb->id);
 }
 
-static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
+static void task_finish_termination(tcb_t *tcb, kern_err_t result) {
+    task_cleanup_resources(tcb);
+
+    uint32_t crit = irq_spin_lock(&task_lock);
+    if (task_id_is_used(tcb->id) &&
+        tcb->reclaim_at == TASK_RECLAIM_CLEANING) {
+        /* Complete the whole publish+wakeup transaction while task_lock and
+         * local IRQ masking are still held.  In particular, a self-exiting
+         * task must not become TERMINATED with wakeups left to execute: the
+         * PendSV entry deliberately does not save a TERMINATED context, so a
+         * tick in that window would strand every joiner until timeout.
+         *
+         * A remote woken joiner may run immediately, but task_delete() then
+         * waits on task_lock and cannot observe a partially published exit. */
+        tcb_t *joiners = task_detach_joiners_locked(tcb);
+        tcb->reclaim_at = sched_get_tick_count() + 1U;
+        tcb->state = TASK_STATE_TERMINATED;
+        task_wake_joiner_list(joiners, result);
+    }
+    irq_spin_unlock(&task_lock, crit);
+}
+
+static void task_cleanup_resources(tcb_t *tcb) {
     if (tcb == NULL || tcb->id < 0) {
         return;
     }
@@ -217,7 +270,6 @@ static void task_cleanup_resources(tcb_t *tcb, kern_err_t join_result) {
      * 由 task_delete 在 memset 后写回。 */
 #endif
 
-    task_wake_joiners(tcb, join_result);
 }
 
 static void task_unlink_from_join_target(tcb_t *tcb) {
@@ -256,30 +308,25 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
 
     case BLOCK_REASON_SEM:
         if (tcb->block_obj) {
-            sem_t *sem = (sem_t *)tcb->block_obj;
-            wait_queue_remove_safe(&sem->wait_queue, tcb);
+            sem_cleanup_task(tcb->block_obj, tcb);
         }
         break;
 
     case BLOCK_REASON_MUTEX:
         if (tcb->block_obj) {
-            mutex_t *mutex = (mutex_t *)tcb->block_obj;
-            wait_queue_remove_safe(&mutex->wait_queue, tcb);
+            mutex_cleanup_task(tcb->block_obj, tcb);
         }
         break;
 
     case BLOCK_REASON_QUEUE:
         if (tcb->block_obj) {
-            mqueue_t *mq = (mqueue_t *)tcb->block_obj;
-            wait_queue_remove_safe(&mq->send_queue, tcb);
-            wait_queue_remove_safe(&mq->recv_queue, tcb);
+            mqueue_cleanup_task(tcb->block_obj, tcb);
         }
         break;
 
     case BLOCK_REASON_EVENT:
         if (tcb->block_obj) {
-            event_t *evt = (event_t *)tcb->block_obj;
-            wait_queue_remove_safe(&evt->wait_queue, tcb);
+            event_cleanup_task(tcb->block_obj, tcb);
         }
         break;
 
@@ -318,16 +365,9 @@ static void task_write_saved_svc_r0(tcb_t *tcb, kern_err_t result) {
         return;
     }
 
-    /*
-     * SVC saves R4-R11 below the hardware frame before blocking.  When
-     * EXC_RETURN bit 4 is clear, the hardware also placed S0-S15, FPSCR and
-     * one reserved word (18 words / 72 bytes) before the core frame.
-     */
-    uint32_t frame_offset = 32U;
-    if ((tcb->exc_return & EXC_RETURN_BASIC_FRAME) == 0U) {
-        frame_offset += FP_EXTENDED_FRAME_SIZE;
-    }
-    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + frame_offset);
+    /* SVC saves R4-R11 below the hardware core frame.  For an extended FP
+     * frame S0-S15/FPSCR follow the core frame; they do not precede R0. */
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
     *stacked_r0 = (uint32_t)result;
 }
 
@@ -350,12 +390,13 @@ void task_complete_blocked_syscall(tcb_t *tcb, kern_err_t result) {
 
 void task_init(void) {
     // 初始化任务池自旋锁
-    irq_spin_init(&task_lock);
+    irq_spin_init_rank(&task_lock, LOCKDEP_RANK_TASK);
     // 清零任务池
     memset(task_pool, 0, sizeof(task_pool));
     memset(task_stacks, 0, sizeof(task_stacks));
 
-    task_used_bitmap = 0;
+    task_used_words[0] = 0;
+    task_used_words[1] = 0;
     memset(exit_retain, 0, sizeof(exit_retain));
     memset(exit_retain_result, 0, sizeof(exit_retain_result));
     exit_retain_bitmap = 0;
@@ -372,6 +413,9 @@ void task_init(void) {
         idle->stack_size = IDLE_STACK_SIZE_ACTUAL;
         idle->time_slice = KERN_DEFAULT_TIME_SLICE;
         idle->time_slice_reload = KERN_DEFAULT_TIME_SLICE;
+        idle->affinity_mask = (1UL << cpu);
+        idle->cpu_owner = (uint8_t)cpu;
+        idle->migration_state = TASK_MIGRATION_STABLE;
         idle->attrs = TASK_ATTR_PRIVILEGED;  /* 空闲任务运行在特权模式 */
         idle->exc_return = TASK_INITIAL_EXC_RETURN;
         strncpy(idle->name, "idle", KERN_TASK_NAME_LEN - 1);
@@ -428,6 +472,9 @@ task_id_t task_create(const char   *name,
     tcb->priority = priority;
     tcb->base_priority = priority;
     tcb->state = TASK_STATE_CREATED;
+    tcb->affinity_mask = KERN_CPU_AFFINITY_ALL;
+    tcb->cpu_owner = KERN_CPU_NONE;
+    tcb->migration_state = TASK_MIGRATION_STABLE;
     tcb->attrs = TASK_ATTR_PRIVILEGED;  /* 默认创建特权任务，兼容现有代码 */
     tcb->exc_return = TASK_INITIAL_EXC_RETURN;
 
@@ -535,12 +582,23 @@ kern_err_t task_exit_request(void *retval) {
         return KERN_ERR_STATE;
     }
 
+    uint32_t crit = irq_spin_lock(&task_lock);
+    if (!task_id_is_used(current->id) ||
+        current->state == TASK_STATE_TERMINATED) {
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_ERR_STATE;
+    }
+
     task_record_exit(current, retval, KERN_OK);
+    /* Do not publish TERMINATED until cleanup and joiner wakeup are ready to
+     * commit.  PendSV skips saving TERMINATED tasks; publishing it here made
+     * a SysTick during cleanup permanently abandon this execution context. */
+    current->reclaim_at = TASK_RECLAIM_CLEANING;
+    irq_spin_unlock(&task_lock, crit);
 
-    /* 设置为终止状态 */
-    current->state = TASK_STATE_TERMINATED;
-
-    task_cleanup_resources(current, KERN_OK);
+    /* Cleanup may acquire endpoint/capability/resource locks.  Keep it outside
+     * task_lock so lock ordering stays TASK -> OBJECT -> RESOURCE. */
+    task_finish_termination(current, KERN_OK);
 
     /* free_task_id 由 task_reclaim 负责，避免 double-free */
 
@@ -578,6 +636,26 @@ kern_err_t task_suspend(task_id_t task_id) {
         irq_spin_unlock(&task_lock, crit);
         return KERN_OK;
     }
+
+#if SMP
+    /* READY/RUNNING state is owned by cpu_owner.  Ask that CPU to remove the
+     * task and acknowledge after PendSV has stopped referencing its TCB. */
+    if (tcb->cpu_owner < SMP_MAX_CPUS &&
+        tcb->cpu_owner != hal_get_cpu_id() &&
+        (_current_task[tcb->cpu_owner] == tcb ||
+         tcb->state == TASK_STATE_READY ||
+         tcb->state == TASK_STATE_RUNNING)) {
+        kern_err_t err = sched_quiesce_task(tcb);
+        if (err == KERN_OK && tcb->state == TASK_STATE_BLOCKED) {
+            err = task_unlink_blocked(tcb);
+            if (err == KERN_OK) {
+                tcb->state = TASK_STATE_SUSPENDED;
+            }
+        }
+        irq_spin_unlock(&task_lock, crit);
+        return err;
+    }
+#endif
 
     // 根据当前状态处理
     switch (tcb->state) {
@@ -672,7 +750,29 @@ kern_err_t task_delete(task_id_t task_id) {
         return KERN_ERR_STATE;
     }
 
-    if (tcb->state == TASK_STATE_BLOCKED) {
+    /* A completed termination can be reclaimed immediately by explicit
+     * delete.  A cleanup still in progress owns the TCB and must finish first. */
+    if (tcb->state == TASK_STATE_TERMINATED) {
+        if (tcb->reclaim_at == TASK_RECLAIM_CLEANING) {
+            irq_spin_unlock(&task_lock, crit);
+            return KERN_ERR_BUSY;
+        }
+
+        exit_retain_bitmap &= ~(1ULL << task_id);
+        exit_retain[task_id] = NULL;
+        exit_retain_result[task_id] = KERN_OK;
+        free_task_id(task_id);
+        uint16_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
+        memset(tcb, 0, sizeof(tcb_t));
+        tcb->hdr.obj_type = CAP_OBJ_TASK;
+        tcb->hdr.generation = next_gen;
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_OK;
+    }
+
+    if (tcb->state == TASK_STATE_BLOCKED &&
+        !(tcb->cpu_owner < SMP_MAX_CPUS &&
+          tcb->cpu_owner != hal_get_cpu_id())) {
         kern_err_t err = task_unlink_blocked(tcb);
         if (err != KERN_OK) {
             irq_spin_unlock(&task_lock, crit);
@@ -680,16 +780,51 @@ kern_err_t task_delete(task_id_t task_id) {
         }
     }
 
-    // 从就绪队列移除
-    sched_remove_ready(tcb);
+    /* Externally deleting a task that is READY/RUNNING on another CPU must
+     * first quiesce that CPU.  Otherwise memset below can race PendSV or live
+     * task execution. */
+    if ((tcb->cpu_owner < SMP_MAX_CPUS &&
+         tcb->cpu_owner != hal_get_cpu_id()) ||
+        tcb->state == TASK_STATE_READY || tcb->state == TASK_STATE_RUNNING) {
+        kern_err_t err = sched_quiesce_task(tcb);
+        if (err != KERN_OK) {
+            irq_spin_unlock(&task_lock, crit);
+            return err;
+        }
 
-    if (tcb->state != TASK_STATE_TERMINATED) {
-        task_cleanup_resources(tcb, KERN_ERR_NOEXIST);
-    } else if (task_id >= 0 && task_id < KERNEL_MAX_TASKS) {
-        exit_retain_bitmap &= ~(1ULL << task_id);
-        exit_retain[task_id] = NULL;
-        exit_retain_result[task_id] = KERN_OK;
+        /* It may have blocked just before the remote IPI preempted it.  The
+         * quiesce acknowledgement guarantees its owner CPU no longer uses
+         * the TCB, so unlinking the wait object is now safe. */
+        if (tcb->state == TASK_STATE_BLOCKED) {
+            err = task_unlink_blocked(tcb);
+            if (err != KERN_OK) {
+                irq_spin_unlock(&task_lock, crit);
+                return err;
+            }
+            tcb->state = TASK_STATE_SUSPENDED;
+        }
+    } else {
+        sched_remove_ready(tcb);
     }
+
+    task_record_exit(tcb, NULL, KERN_ERR_NOEXIST);
+    tcb->state = TASK_STATE_TERMINATED;
+    tcb->reclaim_at = TASK_RECLAIM_CLEANING;
+    irq_spin_unlock(&task_lock, crit);
+
+    task_cleanup_resources(tcb);
+
+    crit = irq_spin_lock(&task_lock);
+    if (!task_id_is_used(task_id) ||
+        tcb->state != TASK_STATE_TERMINATED ||
+        tcb->reclaim_at != TASK_RECLAIM_CLEANING) {
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_ERR_BUSY;
+    }
+
+    /* Detach joiners before the slot becomes reusable.  Their join_value is
+     * already copied and exit_retain preserves the result across memset. */
+    tcb_t *joiners = task_detach_joiners_locked(tcb);
 
     // 先撤销可见性，再清零 TCB，避免扫描路径看到半清理槽位
     free_task_id(task_id);
@@ -701,6 +836,7 @@ kern_err_t task_delete(task_id_t task_id) {
     tcb->hdr.generation = next_gen;
 
     irq_spin_unlock(&task_lock, crit);
+    task_wake_joiner_list(joiners, KERN_ERR_NOEXIST);
     return KERN_OK;
 }
 
@@ -719,7 +855,7 @@ tcb_t *task_get_tcb(task_id_t task_id) {
         return NULL;
     }
 
-    if ((task_used_bitmap & (1ULL << task_id)) == 0) {
+    if (!task_id_is_used(task_id)) {
         return NULL;
     }
 
@@ -747,9 +883,10 @@ void *task_obj_for_cap(task_id_t id) {
 }
 
 task_id_t task_get_next(task_id_t task_id) {
+    uint64_t snapshot = task_get_used_bitmap();
     int start = (task_id < 0) ? 0 : task_id + 1;
     for (int i = start; i < KERNEL_MAX_TASKS; i++) {
-        if (task_used_bitmap & (1ULL << i)) {
+        if (snapshot & (1ULL << i)) {
             return (task_id_t)i;
         }
     }
@@ -778,10 +915,9 @@ kern_err_t task_set_priority(task_id_t task_id, uint8_t priority) {
     tcb->priority = priority;
     tcb->base_priority = priority;
 
-    // 如果在就绪队列, 需要重新插入
+    // 如果在就绪队列, 由 owner CPU 原地重新插入
     if (tcb->state == TASK_STATE_READY) {
-        sched_remove_ready(tcb);
-        sched_add_ready(tcb);
+        sched_reinsert_by_priority(tcb);
     }
 
     irq_spin_unlock(&task_lock, crit);
@@ -791,6 +927,53 @@ kern_err_t task_set_priority(task_id_t task_id, uint8_t priority) {
 uint8_t task_get_priority(task_id_t task_id) {
     tcb_t *tcb = task_get_tcb(task_id);
     return tcb ? tcb->priority : 0xFF;
+}
+
+kern_err_t task_set_affinity(task_id_t task_id, uint32_t affinity_mask) {
+    if (task_id < 0 || task_id >= KERNEL_MAX_TASKS ||
+        affinity_mask == 0U ||
+        (affinity_mask & ~KERN_CPU_AFFINITY_ALL) != 0U) {
+        return KERN_ERR_PARAM;
+    }
+
+    uint32_t crit = irq_spin_lock(&task_lock);
+    if (!task_id_is_used(task_id)) {
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_ERR_NOEXIST;
+    }
+
+    tcb_t *tcb = &task_pool[task_id];
+    if (tcb->state == TASK_STATE_RUNNING) {
+        uint32_t owner_bit = (tcb->cpu_owner < SMP_MAX_CPUS)
+                           ? (1UL << tcb->cpu_owner) : 0U;
+        if ((affinity_mask & owner_bit) == 0U) {
+            irq_spin_unlock(&task_lock, crit);
+            return KERN_ERR_BUSY;
+        }
+        tcb->affinity_mask = affinity_mask;
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_OK;
+    }
+
+    if (tcb->state == TASK_STATE_READY) {
+        kern_err_t err = sched_quiesce_task(tcb);
+        if (err != KERN_OK) {
+            irq_spin_unlock(&task_lock, crit);
+            return err;
+        }
+        tcb->affinity_mask = affinity_mask;
+        sched_add_ready(tcb);
+    } else {
+        tcb->affinity_mask = affinity_mask;
+    }
+
+    irq_spin_unlock(&task_lock, crit);
+    return KERN_OK;
+}
+
+uint32_t task_get_affinity(task_id_t task_id) {
+    tcb_t *tcb = task_get_tcb(task_id);
+    return tcb ? tcb->affinity_mask : 0U;
 }
 
 #if RT_SCHED
@@ -869,6 +1052,12 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     if (task_id < 0 || task_id >= KERNEL_MAX_TASKS)
         return KERN_ERR_PARAM;
 
+    tcb_t *current = sched_get_current();
+    if (current == NULL) {
+        return KERN_ERR_STATE;
+    }
+
+    uint32_t crit = irq_spin_lock(&task_lock);
     if (!task_id_is_used(task_id)) {
         if (exit_retain_bitmap & (1ULL << task_id)) {
             if (retval) *retval = exit_retain[task_id];
@@ -876,20 +1065,32 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
             exit_retain_bitmap &= ~(1ULL << task_id);
             exit_retain[task_id] = NULL;
             exit_retain_result[task_id] = KERN_OK;
+            irq_spin_unlock(&task_lock, crit);
             return result;
         }
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_NOEXIST;
     }
 
     tcb_t *tcb = &task_pool[task_id];
-    tcb_t *current = sched_get_current();
 
     /* 不能 join 自己 */
-    if (tcb == current)
+    if (tcb == current) {
+        irq_spin_unlock(&task_lock, crit);
         return KERN_ERR_PARAM;
+    }
 
-    /* 已终止 — 直接取 retval */
-    if (tcb->state == TASK_STATE_TERMINATED) {
+    /* A fully cleaned terminated task can be consumed immediately.  Merely
+     * observing TERMINATED is insufficient on SMP: task_exit publishes that
+     * state before it drops task-owned caps/endpoints.  A late join in that
+     * window used to return KERN_OK while reclaim_at was still CLEANING, so
+     * the caller's immediate task_delete() deterministically saw BUSY.
+     *
+     * For TERMINATED+CLEANING fall through and register as a normal joiner.
+     * task_finish_termination() publishes the reclaimable state and detaches
+     * this list under the same task_lock before waking us. */
+    if (tcb->state == TASK_STATE_TERMINATED &&
+        tcb->reclaim_at != TASK_RECLAIM_CLEANING) {
         if (retval) *retval = tcb->exit_value;
         kern_err_t result = (exit_retain_bitmap & (1ULL << task_id))
                             ? exit_retain_result[task_id] : KERN_OK;
@@ -897,56 +1098,48 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
         exit_retain_bitmap &= ~(1ULL << task_id);
         exit_retain[task_id] = NULL;
         exit_retain_result[task_id] = KERN_OK;
+        irq_spin_unlock(&task_lock, crit);
         return result;
     }
 
-    /*
-     * used_bitmap 后备检测：task_reclaim 可能在 task_join 之前
-     * 运行（PendSV + tick handler），TCB 被清零。
-     * 如果 bit 已清除，说明任务已被回收（只有 TERMINATED 才会回收）。
-     * 从保留表中读取 exit_value。
-     */
-    if (!task_id_is_used(task_id)) {
-        kern_err_t result = KERN_OK;
-        if (retval) {
-            *retval = (exit_retain_bitmap & (1ULL << task_id))
-                      ? exit_retain[task_id] : NULL;
-        }
-        if (exit_retain_bitmap & (1ULL << task_id)) {
-            result = exit_retain_result[task_id];
-        }
-        exit_retain_bitmap &= ~(1ULL << task_id);
-        exit_retain[task_id] = NULL;
-        exit_retain_result[task_id] = KERN_OK;
-        return result;
-    }
-
-    /* 挂入 joiner 链表 */
+    /* Publish the waiter and its BLOCKED state under one cross-core lock.
+     * Otherwise target exit can observe the list while sched_wakeup still sees
+     * this task RUNNING, losing the only wakeup. */
+    current->join_value = NULL;
     current->join_next = tcb->joiners;
     tcb->joiners = current;
+    current->state = TASK_STATE_BLOCKED;
+    current->block_reason = BLOCK_REASON_JOIN;
+    current->block_obj = tcb;
+    current->block_result = KERN_OK;
+    current->wake_tick = sched_timeout_deadline(timeout);
+    irq_spin_unlock(&task_lock, crit);
 
-    /* 阻塞等待 */
-    kern_err_t err = sched_block(BLOCK_REASON_JOIN, tcb, timeout);
+    sched_yield();
+    kern_err_t err = current->block_result;
 
     if (err == KERN_OK) {
-        kern_err_t result = KERN_OK;
-        if (exit_retain_bitmap & (1ULL << task_id)) {
-            result = exit_retain_result[task_id];
-            if (retval) {
-                *retval = exit_retain[task_id];
-            }
-            exit_retain_bitmap &= ~(1ULL << task_id);
-            exit_retain[task_id] = NULL;
-            exit_retain_result[task_id] = KERN_OK;
-            return result;
-        }
-
         if (retval) {
-            *retval = tcb->exit_value;
+            *retval = current->join_value;
         }
+        current->join_value = NULL;
     }
 
     return err;
+}
+
+void task_cancel_join_wait(tcb_t *tcb) {
+    if (tcb == NULL) {
+        return;
+    }
+
+    uint32_t crit = irq_spin_lock(&task_lock);
+    if (tcb->state == TASK_STATE_BLOCKED &&
+        tcb->block_reason == BLOCK_REASON_JOIN) {
+        task_unlink_from_join_target(tcb);
+        tcb->block_obj = NULL;
+    }
+    irq_spin_unlock(&task_lock, crit);
 }
 
 const char *task_get_name(task_id_t task_id) {
@@ -967,8 +1160,19 @@ tcb_t *task_get_idle(void) {
     return &idle_tasks[cpu];
 }
 
+tcb_t *task_get_idle_cpu(uint32_t cpu) {
+    if (cpu >= SMP_MAX_CPUS) {
+        return NULL;
+    }
+    return &idle_tasks[cpu];
+}
+
 uint64_t task_get_used_bitmap(void) {
-    return task_used_bitmap;
+    uint32_t crit = irq_spin_lock(&task_lock);
+    uint64_t snapshot = (uint64_t)task_used_words[0] |
+                        ((uint64_t)task_used_words[1] << 32);
+    irq_spin_unlock(&task_lock, crit);
+    return snapshot;
 }
 
 /*============================================================================
@@ -1064,25 +1268,33 @@ void task_reclaim(tcb_t *tcb) {
      * exit_value/state。避免 PendSV 立即清零 TCB 导致 joiner
      * 看不到 TERMINATED 状态。
      */
+    uint32_t crit = irq_spin_lock(&task_lock);
     if (tcb->reclaim_at == 0) {
         tcb->reclaim_at = sched_get_tick_count() + 1;
     }
+    irq_spin_unlock(&task_lock, crit);
 }
 
 void task_reclaim_expired(void) {
     uint32_t now = sched_get_tick_count();
+    uint32_t crit = irq_spin_lock(&task_lock);
     for (task_id_t id = 0; id < KERNEL_MAX_TASKS; id++) {
         if (!task_id_is_used(id)) continue;
 
         tcb_t *tcb = &task_pool[id];
         if (tcb->state != TASK_STATE_TERMINATED) continue;
         if (tcb->reclaim_at == 0) continue;
+        if (tcb->reclaim_at == TASK_RECLAIM_CLEANING) continue;
         if (now < tcb->reclaim_at) continue;
         if (tcb->joiners) continue;
 
         free_task_id(id);
+        uint16_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
         memset(tcb, 0, sizeof(tcb_t));
+        tcb->hdr.obj_type = CAP_OBJ_TASK;
+        tcb->hdr.generation = next_gen;
     }
+    irq_spin_unlock(&task_lock, crit);
 }
 
 kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result) {
@@ -1090,7 +1302,14 @@ kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result) {
         return KERN_ERR_PARAM;
     }
 
+    uint32_t crit = irq_spin_lock(&task_lock);
+    if (!task_id_is_used(tcb->id)) {
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_ERR_NOEXIST;
+    }
+
     if (tcb->state == TASK_STATE_TERMINATED) {
+        irq_spin_unlock(&task_lock, crit);
         return KERN_OK;
     }
 
@@ -1099,8 +1318,17 @@ kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result) {
     }
 
     task_record_exit(tcb, NULL, result);
-    tcb->state = TASK_STATE_TERMINATED;
-    task_cleanup_resources(tcb, result);
+    /* The fault/self-termination path is still executing on this TCB.  Keep
+     * it schedulable until task_finish_termination() can atomically publish
+     * TERMINATED and wake joiners; otherwise PendSV can discard the cleanup
+     * continuation exactly like the normal task_exit() path. */
+    if (tcb != sched_get_current()) {
+        tcb->state = TASK_STATE_TERMINATED;
+    }
+    tcb->reclaim_at = TASK_RECLAIM_CLEANING;
+    irq_spin_unlock(&task_lock, crit);
+
+    task_finish_termination(tcb, result);
     return KERN_OK;
 }
 
@@ -1113,8 +1341,9 @@ void task_terminate(tcb_t *tcb) {
  *============================================================================*/
 
 void task_check_stack_overflow(void) {
+    uint64_t snapshot = task_get_used_bitmap();
     for (task_id_t id = 0; id < KERNEL_MAX_TASKS; id++) {
-        if (!(task_used_bitmap & (1ULL << id))) continue;
+        if (!(snapshot & (1ULL << id))) continue;
 
         tcb_t *tcb = &task_pool[id];
         if (tcb->state == TASK_STATE_TERMINATED) continue;

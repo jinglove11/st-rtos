@@ -188,8 +188,6 @@ typedef struct {
     uint32_t r0, r1, r2, r3, r12, lr, pc, xpsr;
 } exception_frame_t;
 
-#define EXC_RETURN_BASIC_FRAME (1UL << 4)
-#define FP_EXTENDED_FRAME_SIZE 72U
 
 /*============================================================================
  * 触发 PendSV — 写 ICSR.PENDSVSET
@@ -234,10 +232,9 @@ void task_fault_exit(void) {
  *============================================================================*/
 
 void fault_handler_c(uint32_t fault_type, void *exc_frame, uint32_t exc_return) {
+    /* Cortex-M always places R0..xPSR at the exception SP.  In an extended
+     * frame the low FP registers follow that core frame. */
     exception_frame_t *frame = (exception_frame_t *)exc_frame;
-    if (frame != NULL && (exc_return & EXC_RETURN_BASIC_FRAME) == 0U) {
-        frame = (exception_frame_t *)((uint8_t *)frame + FP_EXTENDED_FRAME_SIZE);
-    }
     tcb_t *current = sched_get_current();
 
 #if TRACE_ENABLE

@@ -55,9 +55,9 @@ static mutex_t *mutex_get(mutex_id_t id) {
 }
 
 #if KERN_MUTEX_PI
-// 优先级继承: 提升持有者优先级
-// 调用者必须已持 mux_lock。此函数内部操作 ready_list 时
-// 会临时获取 sched_lock (锁顺序: mux_lock → sched_lock)。
+// 优先级继承: 提升持有者优先级。
+// 调用者必须已持 mux_lock；scheduler 会把远程队列重插入
+// 同步投递到 owner CPU，不再暴露全局 sched_lock。
 static void mutex_priority_inherit(mutex_t *mutex, tcb_t *waiter) {
     if (mutex->owner < 0) return;
 
@@ -69,13 +69,8 @@ static void mutex_priority_inherit(mutex_t *mutex, tcb_t *waiter) {
         owner->priority = waiter->priority;
 
         if (owner->state == TASK_STATE_READY) {
-            /* M1-Step4: ready_list 操作需要 sched_lock。
-             * 锁顺序: mux_lock(已持有) → sched_lock */
-            extern irq_spinlock_t sched_lock;
-            uint32_t scrit = irq_spin_lock(&sched_lock);
             extern void sched_reinsert_by_priority(tcb_t *tcb);
             sched_reinsert_by_priority(owner);
-            irq_spin_unlock(&sched_lock, scrit);
         }
         // 如果持有者是 RUNNING 状态，优先级已经提升
         // 当高优先级任务阻塞后，调度器会根据优先级选择下一个任务
@@ -176,7 +171,7 @@ static bool mutex_would_deadlock(mutex_t *mutex, tcb_t *caller)
  *============================================================================*/
 
 void mutex_init(void) {
-    irq_spin_init(&mux_lock);
+    irq_spin_init_rank(&mux_lock, LOCKDEP_RANK_OBJECT);
     memset(mutex_pool, 0, sizeof(mutex_pool));
     mutex_used_bitmap = 0;
 }
@@ -263,6 +258,18 @@ void *mutex_obj_for_cap(mutex_id_t id) {
     return (void *)&mutex_pool[id];
 }
 
+void mutex_cleanup_task(void *mutex_obj, tcb_t *tcb) {
+    mutex_t *mutex = (mutex_t *)mutex_obj;
+    if (mutex == NULL || tcb == NULL) return;
+
+    uint32_t crit = irq_spin_lock(&mux_lock);
+    if (mutex >= &mutex_pool[0] && mutex < &mutex_pool[KERN_MAX_MUTEXES] &&
+        mutex->in_use) {
+        (void)wait_queue_remove_safe(&mutex->wait_queue, tcb);
+    }
+    irq_spin_unlock(&mux_lock, crit);
+}
+
 kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
     uint32_t crit = irq_spin_lock(&mux_lock);
 
@@ -307,16 +314,10 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
 
 #if KERN_MUTEX_PI
     mutex_priority_inherit(mutex, current);
-
-    // 如果持有锁的任务正在运行，将其加入就绪队列
-    // 这样当高优先级任务阻塞后，持有锁的任务能被调度器选中
-    extern tcb_t *task_get_tcb(task_id_t task_id);
-    tcb_t *owner = task_get_tcb(mutex->owner);
-    if (owner && owner->state == TASK_STATE_RUNNING) {
-        extern void sched_add_ready(tcb_t *tcb);
-        owner->state = TASK_STATE_READY;
-        sched_add_ready(owner);
-    }
+    /* A RUNNING owner is already executing (possibly on the other core).
+     * Enqueuing it would make one TCB both current and READY and can run the
+     * same stack on two CPUs.  READY owners are reinserted by
+     * mutex_priority_inherit(); RUNNING owners only need the priority write. */
 #endif
 
     current->block_reason = BLOCK_REASON_MUTEX;
@@ -334,13 +335,7 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
     current->state = TASK_STATE_BLOCKED;
     current->block_result = KERN_OK;
 
-    /* 设置超时唤醒时间 */
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mux_lock, crit);
 
@@ -416,14 +411,6 @@ kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
 
 #if KERN_MUTEX_PI
     mutex_priority_inherit(mutex, current);
-
-    extern tcb_t *task_get_tcb(task_id_t task_id);
-    tcb_t *owner = task_get_tcb(mutex->owner);
-    if (owner && owner->state == TASK_STATE_RUNNING) {
-        extern void sched_add_ready(tcb_t *tcb);
-        owner->state = TASK_STATE_READY;
-        sched_add_ready(owner);
-    }
 #endif
 
     current->syscall_blocked = 1;
@@ -435,11 +422,7 @@ kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
     sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
 
-    if (timeout > 0) {
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mux_lock, crit);
     return KERN_SYSCALL_BLOCKED;

@@ -61,7 +61,7 @@ static sem_t *sem_get(sem_id_t id) {
  *============================================================================*/
 
 void sem_init(void) {
-    irq_spin_init(&sem_lock);
+    irq_spin_init_rank(&sem_lock, LOCKDEP_RANK_OBJECT);
     memset(sem_pool, 0, sizeof(sem_pool));
     sem_used_bitmap = 0;
 }
@@ -162,6 +162,18 @@ void *sem_obj_for_cap(sem_id_t id) {
     return (void *)&sem_pool[id];
 }
 
+void sem_cleanup_task(void *sem_obj, tcb_t *tcb) {
+    sem_t *sem = (sem_t *)sem_obj;
+    if (sem == NULL || tcb == NULL) return;
+
+    uint32_t crit = irq_spin_lock(&sem_lock);
+    if (sem >= &sem_pool[0] && sem < &sem_pool[KERN_MAX_SEMAPHORES] &&
+        sem->in_use) {
+        (void)wait_queue_remove_safe(&sem->wait_queue, tcb);
+    }
+    irq_spin_unlock(&sem_lock, crit);
+}
+
 kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
     if (hal_irq_get_active() >= 0) {
         return KERN_ERR_ISR;
@@ -201,13 +213,7 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
     current->state = TASK_STATE_BLOCKED;
     current->block_result = KERN_OK;
 
-    /* 设置超时唤醒时间 */
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&sem_lock, crit);
 
@@ -274,11 +280,7 @@ kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
     sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
 
-    if (timeout > 0) {
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&sem_lock, crit);
     return KERN_SYSCALL_BLOCKED;

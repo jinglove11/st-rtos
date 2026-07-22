@@ -4,7 +4,7 @@
  *
  * 测试内容：
  * 1. CPU 统计基本功能
- * 2. 多任务竞争后 cpu_usage 总和 ≈ 100%
+ * 2. 多任务竞争后 cpu_usage 总和 ≈ 100% × CPU 数
  * 3. idle 任务 cpu_usage 合理
  */
 
@@ -45,7 +45,7 @@ static void test_cpu_usage_basic(void) {
 }
 
 /*============================================================================
- * Test 2: 多任务竞争后 cpu_usage 总和 ≈ 100%
+ * Test 2: 多任务竞争后 cpu_usage 总和 ≈ 100% × CPU 数
  *============================================================================*/
 
 static volatile int stats_task_running = 0;
@@ -89,17 +89,21 @@ static void test_cpu_usage_sum(void) {
             sum += task_pool[i].cpu_usage;
         }
     }
-    tcb_t *idle = task_get_idle();
-    if (idle != NULL) {
-        sum += idle->cpu_usage;
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; cpu++) {
+        tcb_t *idle = task_get_idle_cpu(cpu);
+        if (idle != NULL) {
+            sum += idle->cpu_usage;
+        }
     }
 
     /* 停止忙等任务 */
     stats_task_running = 0;
     task_delay(100);
 
-    TEST_ASSERT(sum >= 7000 && sum <= 12000,
-                "CPU usage sum is approximately 100%");
+    uint32_t expected = 10000U * SMP_MAX_CPUS;
+    uint32_t tolerance = 3000U * SMP_MAX_CPUS;
+    TEST_ASSERT(sum >= expected - tolerance && sum <= expected + tolerance,
+                "CPU usage sum matches active CPU count");
 }
 
 /*============================================================================

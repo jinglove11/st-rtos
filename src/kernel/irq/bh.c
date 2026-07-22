@@ -157,7 +157,7 @@ static void bh_service_loop(void *arg) {
 
 void bh_init(void) {
 #if IRQ_BH_ENABLE
-    irq_spin_init(&bh_lock);
+    irq_spin_init_rank(&bh_lock, LOCKDEP_RANK_OBJECT);
     memset(bh_pool, 0, sizeof(bh_pool));
     bh_sem = sem_create(0, 0);  /* 计数信号量, 初始0, 无上限 */
 #endif

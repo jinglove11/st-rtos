@@ -236,10 +236,18 @@ static void test_timer_state(void) {
     timer_start(tid, 0);
 
     int active = timer_is_active(tid);
+    for (uint32_t wait = 0; active == 0 && wait < 100U; wait++) {
+        task_delay(1);
+        active = timer_is_active(tid);
+    }
     TEST_ASSERT(active == 1, "Timer should be active");
 
     timer_stop(tid);
     active = timer_is_active(tid);
+    for (uint32_t wait = 0; active != 0 && wait < 100U; wait++) {
+        task_delay(1);
+        active = timer_is_active(tid);
+    }
     TEST_ASSERT(active == 0, "Timer should not be active after stop");
 
     /* 检查剩余时间 */

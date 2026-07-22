@@ -68,6 +68,9 @@ void stats_task_switch(tcb_t *prev, tcb_t *next);
  */
 void stats_tick_update(void);
 
+/** @brief Thread-context CPU-usage aggregation (never called from SysTick). */
+void stats_deferred_update(void);
+
 /** @brief 记录一次 IRQ (含延迟) */
 void stats_record_irq(uint32_t latency_ticks);
 

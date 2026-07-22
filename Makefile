@@ -44,8 +44,9 @@ PICO_TARGET          = $(PICO_BUILD_DIR)/my-rtos-pico2w.elf
 PICO_UF2             = $(PICO_BUILD_DIR)/my-rtos-pico2w.uf2
 
 .PHONY: all configure clean flash verify setup-pico-sdk info help \
-	rp2350_defconfig stm32f767_defconfig menuconfig genconfig \
+	rp2350_defconfig rp2350_smp_defconfig stm32f767_defconfig menuconfig genconfig \
 	test-serial-boot test-serial-svc-runtime test-daplink \
+	test-smp-soak \
 	agent agent-start agent-stop agent-status agent-test
 
 all: configure
@@ -152,6 +153,11 @@ rp2350_defconfig:
 	@python3 scripts/menuconfig.py genconfig
 	@echo "Loaded Raspberry Pi Pico 2 W default configuration"
 
+rp2350_smp_defconfig:
+	@cp configs/rp2350_smp_defconfig .config
+	@python3 scripts/menuconfig.py genconfig
+	@echo "Loaded RP2350 dual-core M1 acceptance configuration"
+
 stm32f767_defconfig:
 	@cp configs/stm32f767_defconfig .config
 	@python3 scripts/menuconfig.py genconfig
@@ -168,6 +174,13 @@ test-serial-svc-runtime:
 
 test-serial-boot:
 	python3 scripts/serial_boot_test.py --port $${PORT:-/dev/ttyUSB0}
+
+test-smp-soak:
+	python3 scripts/smp_soak_test.py \
+		--port $${PORT:-/dev/ttyACM0} \
+		--duration $${DURATION:-1800} \
+		--startup-timeout $${STARTUP_TIMEOUT:-1800} \
+		--log $${LOG:-/tmp/my-rtos-smp-soak.log}
 
 test-daplink: all
 	python3 scripts/serial_boot_test.py \
@@ -227,6 +240,8 @@ help:
 	@echo "  make test-serial-boot PORT=/dev/ttyUSB0"
 	@echo "  make test-daplink PORT=/dev/ttyACM0  Build, DAPLink flash, and test"
 	@echo "  make test-serial-svc-runtime PORT=/dev/ttyUSB0"
+	@echo "  make rp2350_smp_defconfig  Load dual-core 1M-iteration acceptance profile"
+	@echo "  make test-smp-soak PORT=/dev/ttyACM0 DURATION=1800"
 	@echo "  make agent-start PORT=/dev/ttyACM0 BAUD=921600"
 	@echo "  make agent-status | agent-stop | agent-test"
 	@echo "  make stm32f767_defconfig && make BOARD=stm32f767"

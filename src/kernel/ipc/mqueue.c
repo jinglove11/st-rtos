@@ -146,7 +146,7 @@ static void mqueue_wake_send_waiter(mqueue_t *mq) {
  *============================================================================*/
 
 void mqueue_init(void) {
-    irq_spin_init(&mqueue_lock);
+    irq_spin_init_rank(&mqueue_lock, LOCKDEP_RANK_OBJECT);
     memset(mqueue_pool, 0, sizeof(mqueue_pool));
     mqueue_used_bitmap = 0;
 #if SYSCALL_ENABLE
@@ -269,6 +269,19 @@ void *mqueue_obj_for_cap(queue_id_t id) {
     return (void *)&mqueue_pool[id];
 }
 
+void mqueue_cleanup_task(void *mqueue_obj, tcb_t *tcb) {
+    mqueue_t *mq = (mqueue_t *)mqueue_obj;
+    if (mq == NULL || tcb == NULL) return;
+
+    uint32_t crit = irq_spin_lock(&mqueue_lock);
+    if (mq >= &mqueue_pool[0] && mq < &mqueue_pool[KERN_MAX_MQUEUES] &&
+        mq->in_use) {
+        (void)wait_queue_remove_safe(&mq->send_queue, tcb);
+        (void)wait_queue_remove_safe(&mq->recv_queue, tcb);
+    }
+    irq_spin_unlock(&mqueue_lock, crit);
+}
+
 kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
     uint32_t crit = irq_spin_lock(&mqueue_lock);
 
@@ -314,12 +327,7 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
     current->block_result = KERN_OK;
 
     /* 设置超时唤醒时间 */
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
 
@@ -401,12 +409,7 @@ kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
     }
 
     current->state = TASK_STATE_BLOCKED;
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;
@@ -488,12 +491,7 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
     current->block_result = KERN_OK;
 
     /* 设置超时唤醒时间 */
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
 
@@ -576,12 +574,7 @@ kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
     }
 
     current->state = TASK_STATE_BLOCKED;
-    if (timeout > 0) {
-        extern uint32_t sched_get_tick_count(void);
-        current->wake_tick = sched_get_tick_count() + timeout;
-    } else {
-        current->wake_tick = 0;
-    }
+    current->wake_tick = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;

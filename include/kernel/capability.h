@@ -81,11 +81,18 @@ typedef void (*cap_cleanup_fn_t)(void *object, uint8_t obj_type);
 typedef void (*cap_revoke_hook_fn_t)(cap_id_t cap, void *object,
                                      uint8_t obj_type);
 
+/* Hooks run from a lock-free deferred safe point.  Implementations must not
+ * block or yield; they may acquire ordinary ranked locks and enqueue more
+ * capability cleanup work. */
+
 /*============================================================================
  * API
  *============================================================================*/
 
 void     cap_init(void);
+/* Internal safe-point hook used by irq_spin_unlock.  It is public only to
+ * avoid a spinlock/capability header dependency cycle. */
+void     cap_deferred_poll(void);
 cap_id_t cap_create_for_gen(tcb_t *owner, void *object, uint8_t obj_type,
                             uint8_t rights, uint16_t obj_generation);
 cap_id_t cap_create(void *object, uint8_t obj_type, uint8_t rights, uint8_t owner);

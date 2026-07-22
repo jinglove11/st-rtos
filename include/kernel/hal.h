@@ -62,6 +62,15 @@
  */
 void hal_cpu_init(void);
 
+/**
+ * @brief Prepare the current CPU's floating-point context for task switching.
+ *
+ * Cortex-M lazy FP stacking can leave a deferred frame referring to the
+ * bootstrap MSP when the scheduler abandons that thread and starts the first
+ * task on PSP.  The scheduler calls this once per CPU before its first task.
+ */
+void hal_fpu_context_init(void);
+
 /*============================================================================
  * 调试接口
  *============================================================================*/

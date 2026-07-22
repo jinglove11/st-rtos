@@ -99,6 +99,7 @@
 #define SHELL_STACK_SIZE (4096)
 #define SMP 1
 #define SMP_MAX_CPUS (2)
+#define SMP_STRESS_ITERATIONS (10000)
 #define SMP_WORK_STEALING 1
 #define SUPERVISOR 1
 #define SYSCALL_ENABLE 1

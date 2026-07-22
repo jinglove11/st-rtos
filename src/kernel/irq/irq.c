@@ -13,7 +13,12 @@
 #include "stats.h"
 #include "capability.h"
 #include "board_config.h"
+#include "spinlock.h"
 #include <string.h>
+
+#if TARGET_BOARD == BOARD_RP2350_PICO2 && SMP
+#include "hardware/regs/intctrl.h"
+#endif
 
 #ifndef TRACE_IRQ_REGISTER
 #define TRACE_IRQ_REGISTER    1
@@ -41,6 +46,18 @@
 #define IRQ_FLAG_THREADED   0x02
 
 #define IRQ_COUNT_MAX       ((int16_t)BOARD_IRQ_COUNT)
+
+static int irq_is_kernel_reserved(int16_t irq) {
+#if TARGET_BOARD == BOARD_RP2350_PICO2 && SMP
+    /* The SMP scheduler and flash-safe lockout share this FIFO interrupt.
+     * Replacing its vector breaks all remote wakeups and can park a task
+     * forever.  It is never a user-allocatable IRQ while SMP is enabled. */
+    return irq == (int16_t)SIO_IRQ_FIFO;
+#else
+    (void)irq;
+    return 0;
+#endif
+}
 
 typedef struct {
     int16_t     irq_num;
@@ -70,6 +87,7 @@ typedef struct {
 
 static irq_desc_t irq_descriptors[IRQ_MAX_USER];
 static irq_notify_binding_t irq_notify_bindings[IRQ_MAX_USER];
+static irq_spinlock_t irq_table_lock;
 
 /* ISR-safe event (notification) bindings: when an IRQ fires in ISR context,
  * the kernel event_set()s the bound event so a user task wakes. Unlike
@@ -153,6 +171,7 @@ static void irq_record_event(int16_t irq, uint8_t action,
 
 #if CAP_ENABLE
 static irq_cap_object_t *irq_cap_alloc_object(void) {
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (!irq_cap_objects[i].in_use) {
             /* M2-Step3d: 跨 memset 保留 generation (free 时已 bump) */
@@ -163,24 +182,28 @@ static irq_cap_object_t *irq_cap_alloc_object(void) {
                 irq_cap_objects[i].hdr.generation = saved_gen;
             }
             irq_cap_objects[i].in_use = 1U;
+            irq_spin_unlock(&irq_table_lock, crit);
             return &irq_cap_objects[i];
         }
     }
+    irq_spin_unlock(&irq_table_lock, crit);
     return NULL;
 }
 
 static void irq_cap_free_object(irq_cap_object_t *obj) {
     if (obj != NULL) {
+        uint32_t crit = irq_spin_lock(&irq_table_lock);
         /* M2-Step3d: bump generation 跨 memset 保留 */
         uint16_t next_gen = kobj_header_prepare_reuse(&obj->hdr);
         memset(obj, 0, sizeof(*obj));
         obj->hdr.obj_type   = CAP_OBJ_IRQ;
         obj->hdr.generation = next_gen;
+        irq_spin_unlock(&irq_table_lock, crit);
     }
 }
 
 static void irq_clear_endpoint_binding(int16_t irq) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_notify_bindings[i].bound &&
             irq_notify_bindings[i].irq_num == irq) {
@@ -191,11 +214,11 @@ static void irq_clear_endpoint_binding(int16_t irq) {
             irq_notify_bindings[i].bound = 0;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
 }
 
 static void irq_clear_endpoint_binding_for_cap(cap_id_t cap) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_notify_bindings[i].bound &&
             irq_notify_bindings[i].bound_cap == cap) {
@@ -206,11 +229,11 @@ static void irq_clear_endpoint_binding_for_cap(cap_id_t cap) {
             irq_notify_bindings[i].bound = 0;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
 }
 
 static void irq_set_endpoint_binding_cap(int16_t irq, cap_id_t cap) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_notify_bindings[i].bound &&
             irq_notify_bindings[i].irq_num == irq) {
@@ -218,7 +241,7 @@ static void irq_set_endpoint_binding_cap(int16_t irq, cap_id_t cap) {
             break;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
 }
 
 static void irq_cap_cleanup(void *object, uint8_t obj_type) {
@@ -247,6 +270,7 @@ static void irq_cap_register_hooks(void) {
  *============================================================================*/
 
 void irq_init(void) {
+    irq_spin_init_rank(&irq_table_lock, LOCKDEP_RANK_REGISTRY);
     memset(irq_descriptors, 0, sizeof(irq_descriptors));
     memset(irq_notify_bindings, 0, sizeof(irq_notify_bindings));
 #if CAP_ENABLE
@@ -288,13 +312,18 @@ kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
+    if (irq_is_kernel_reserved(irq)) {
+        irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PERM,
+                         STATS_COUNTER_BUSY);
+        return KERN_ERR_PERM;
+    }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
 
     /* 检查是否已注册 */
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_descriptors[i].in_use && irq_descriptors[i].irq_num == irq) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&irq_table_lock, crit);
             irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_BUSY,
                              STATS_COUNTER_BUSY);
             return KERN_ERR_BUSY;
@@ -310,7 +339,7 @@ kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
         }
     }
     if (slot < 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
                          STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
@@ -327,7 +356,7 @@ kern_err_t irq_register(int16_t irq, isr_func_t handler, uint8_t priority) {
     hal_irq_set_priority((uint32_t)irq, priority);
     hal_irq_enable_irq((uint32_t)irq);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
@@ -338,22 +367,25 @@ kern_err_t irq_unregister(int16_t irq) {
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
+    }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
 
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_descriptors[i].in_use && irq_descriptors[i].irq_num == irq) {
             hal_irq_disable_irq((uint32_t)irq);
             hal_irq_set_vector((uint32_t)irq, &_default_handler);
             memset(&irq_descriptors[i], 0, sizeof(irq_desc_t));
-            hal_exit_critical(crit);
+            irq_spin_unlock(&irq_table_lock, crit);
             irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_OK,
                              STATS_COUNTER_DELETE);
             return KERN_OK;
         }
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_ERR_NOEXIST,
                      STATS_COUNTER_NOEXIST);
     return KERN_ERR_NOEXIST;
@@ -364,6 +396,9 @@ kern_err_t irq_enable(int16_t irq) {
         irq_record_event(irq, TRACE_IRQ_UNMASK, KERN_ERR_PARAM,
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
+    }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
     }
     hal_irq_enable_irq((uint32_t)irq);
     irq_record_event(irq, TRACE_IRQ_UNMASK, KERN_OK, STATS_COUNTER_OK);
@@ -376,6 +411,9 @@ kern_err_t irq_disable(int16_t irq) {
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
+    }
     hal_irq_disable_irq((uint32_t)irq);
     irq_record_event(irq, TRACE_IRQ_MASK, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
@@ -387,13 +425,16 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
+    }
     if (!endpoint_exists(ep_id)) {
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
 
     int slot = -1;
     for (int i = 0; i < IRQ_MAX_USER; i++) {
@@ -408,7 +449,7 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
     }
 
     if (slot < 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
                          STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
@@ -420,7 +461,7 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
     irq_notify_bindings[slot].badge = badge;
     irq_notify_bindings[slot].bound = 1;
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
@@ -428,13 +469,20 @@ kern_err_t irq_bind_endpoint(int16_t irq, ep_id_t ep_id, uint32_t badge) {
 /* Fire any event binding for `irq` from ISR context. Called by the ISR
  * dispatch path. event_set is ISR-safe (masks IRQs). */
 static void irq_event_fire(int16_t irq) {
+    event_id_t event_id = KERN_INVALID_ID;
+    uint32_t flags = 0U;
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_event_bindings[i].bound &&
             irq_event_bindings[i].irq_num == irq) {
-            (void)event_set(irq_event_bindings[i].event_id,
-                            irq_event_bindings[i].flags);
-            return;
+            event_id = irq_event_bindings[i].event_id;
+            flags = irq_event_bindings[i].flags;
+            break;
         }
+    }
+    irq_spin_unlock(&irq_table_lock, crit);
+    if (event_id != KERN_INVALID_ID) {
+        (void)event_set(event_id, flags);
     }
 }
 
@@ -442,7 +490,7 @@ kern_err_t irq_bind_event(int16_t irq, event_id_t event_id, uint32_t flags) {
     if (irq < 0 || irq >= IRQ_COUNT_MAX) {
         return KERN_ERR_PARAM;
     }
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     int slot = -1;
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_event_bindings[i].bound &&
@@ -455,19 +503,19 @@ kern_err_t irq_bind_event(int16_t irq, event_id_t event_id, uint32_t flags) {
         }
     }
     if (slot < 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
         return KERN_ERR_RESOURCE;
     }
     irq_event_bindings[slot].bound   = 1;
     irq_event_bindings[slot].irq_num = irq;
     irq_event_bindings[slot].event_id = event_id;
     irq_event_bindings[slot].flags   = flags;
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     return KERN_OK;
 }
 
 kern_err_t irq_unbind_event(int16_t irq) {
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_event_bindings[i].bound &&
             irq_event_bindings[i].irq_num == irq) {
@@ -477,7 +525,7 @@ kern_err_t irq_unbind_event(int16_t irq) {
             irq_event_bindings[i].flags = 0;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     return KERN_OK;
 }
 
@@ -494,7 +542,7 @@ kern_err_t irq_notify(int16_t irq) {
     ep_id_t ep_id = KERN_INVALID_ID;
     uint32_t badge = 0;
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
         if (irq_notify_bindings[i].bound &&
             irq_notify_bindings[i].irq_num == irq) {
@@ -503,7 +551,7 @@ kern_err_t irq_notify(int16_t irq) {
             break;
         }
     }
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
 
     if (ep_id == KERN_INVALID_ID) {
         irq_record_event(irq, TRACE_IRQ_SPURIOUS, KERN_ERR_NOEXIST,
@@ -533,6 +581,9 @@ kern_err_t kirq_create_cap(int16_t irq, uint8_t rights, cap_id_t *out_cap) {
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_PARAM,
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
+    }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
     }
 
     if (rights == 0U) {
@@ -660,6 +711,8 @@ static void _threaded_isr_dispatch(void) {
      * binding, signal the waiting user task now (event_set masks IRQs). */
     irq_event_fire((int16_t)irq);
 
+    task_id_t wake_task = KERN_INVALID_ID;
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_THREADED_MAX; i++) {
         irq_thread_t *it = &irq_threads[i];
         if (!it->in_use) continue;
@@ -668,8 +721,12 @@ static void _threaded_isr_dispatch(void) {
 
         /* 标记待处理 (ISR 上下文无需临界区) */
         it->pending = 1;
-
-        tcb_t *tcb = task_get_tcb(it->task_id);
+        wake_task = it->task_id;
+        break;
+    }
+    irq_spin_unlock(&irq_table_lock, crit);
+    if (wake_task != KERN_INVALID_ID) {
+        tcb_t *tcb = task_get_tcb(wake_task);
         if (tcb) {
             sched_wakeup(tcb, KERN_OK);
         }
@@ -689,29 +746,29 @@ static void _threaded_irq_task(void *arg) {
 
     while (1) {
         /* 原子检查 pending 标志 */
-        uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
         if (it->stopping) {
             memset(it, 0, sizeof(irq_thread_t));
-            hal_exit_critical(crit);
+            irq_spin_unlock(&irq_table_lock, crit);
             task_exit(NULL);
         }
         int was_pending = it->pending;
         it->pending = 0;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
 
         if (!was_pending) {
             /* 阻塞等待 ISR 唤醒，1 tick 超时保护竞争窗口 */
             sched_block(BLOCK_REASON_IRQ, it, 1);
         }
 
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&irq_table_lock);
         task_func_t handler = it->handler;
         void *handler_arg = it->arg;
         int16_t irq_num = it->irq_num;
         if (handler != NULL && !it->stopping) {
             it->running = 1;
         }
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
 
         if (handler) {
 #if KERN_TASK_STATS
@@ -725,15 +782,15 @@ static void _threaded_irq_task(void *arg) {
 #endif
         }
 
-        crit = hal_enter_critical();
+        crit = irq_spin_lock(&irq_table_lock);
         it->running = 0;
         if (it->stopping) {
             memset(it, 0, sizeof(irq_thread_t));
-            hal_exit_critical(crit);
+            irq_spin_unlock(&irq_table_lock, crit);
             task_exit(NULL);
         }
         irq_num = it->irq_num;
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
 
         /* 重新使能硬件中断 */
         hal_irq_enable_irq((uint32_t)irq_num);
@@ -748,13 +805,16 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
+    }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
 
     /* 检查是否已注册 */
     for (int i = 0; i < IRQ_THREADED_MAX; i++) {
         if (irq_threads[i].in_use && irq_threads[i].irq_num == irq) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&irq_table_lock, crit);
             irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_BUSY,
                              STATS_COUNTER_BUSY);
             return KERN_ERR_BUSY;
@@ -770,7 +830,7 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
         }
     }
     if (slot < 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
                          STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
@@ -797,7 +857,7 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
 
     task_id_t tid = task_create(name, _threaded_irq_task, it, priority, stack_size);
     if (tid < 0) {
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
         irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_ERR_RESOURCE,
                          STATS_COUNTER_QUEUE_FULL);
         return KERN_ERR_RESOURCE;
@@ -818,7 +878,7 @@ kern_err_t irq_request_threaded(int16_t irq, task_func_t handler,
     hal_irq_set_priority((uint32_t)irq, priority);
     hal_irq_enable_irq((uint32_t)irq);
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     irq_record_event(irq, TRACE_IRQ_REGISTER, KERN_OK, STATS_COUNTER_OK);
     return KERN_OK;
 }
@@ -829,8 +889,11 @@ kern_err_t irq_release_threaded(int16_t irq) {
                          STATS_COUNTER_ERROR);
         return KERN_ERR_PARAM;
     }
+    if (irq_is_kernel_reserved(irq)) {
+        return KERN_ERR_PERM;
+    }
 
-    uint32_t crit = hal_enter_critical();
+    uint32_t crit = irq_spin_lock(&irq_table_lock);
 
     for (int i = 0; i < IRQ_THREADED_MAX; i++) {
         irq_thread_t *it = &irq_threads[i];
@@ -849,23 +912,24 @@ kern_err_t irq_release_threaded(int16_t irq) {
 
         tcb_t *tcb = task_get_tcb(it->task_id);
         if (tcb == sched_get_current()) {
-            hal_exit_critical(crit);
+            irq_spin_unlock(&irq_table_lock, crit);
             irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_OK,
                              STATS_COUNTER_DELETE);
             return KERN_OK;
         }
 
-        /* 删除关联任务 */
-        task_delete(it->task_id);
-
+        /* Publish the slot as stopped before dropping the table lock.  Task
+         * teardown may execute capability hooks that acquire this lock. */
+        task_id_t task_id = it->task_id;
         memset(it, 0, sizeof(irq_thread_t));
-        hal_exit_critical(crit);
+        irq_spin_unlock(&irq_table_lock, crit);
+        (void)task_delete(task_id);
         irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_OK,
                          STATS_COUNTER_DELETE);
         return KERN_OK;
     }
 
-    hal_exit_critical(crit);
+    irq_spin_unlock(&irq_table_lock, crit);
     irq_record_event(irq, TRACE_IRQ_RELEASE, KERN_ERR_NOEXIST,
                      STATS_COUNTER_NOEXIST);
     return KERN_ERR_NOEXIST;

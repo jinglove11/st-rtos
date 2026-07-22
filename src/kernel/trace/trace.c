@@ -9,13 +9,22 @@
 
 #include "scheduler.h"
 #include "hal.h"
-#include "spinlock.h"
 #include "kernel_config.h"
 
-static trace_entry_t trace_buf[TRACE_BUFFER_SIZE];
-static uint16_t trace_head;
-static uint16_t trace_count;
-static spinlock_t trace_slock;
+typedef struct {
+    trace_entry_t buf[TRACE_BUFFER_SIZE];
+    volatile uint16_t head;
+    volatile uint16_t count;
+    volatile uint32_t epoch;
+} trace_cpu_t;
+
+static trace_cpu_t trace_cpu[SMP_MAX_CPUS];
+static volatile uint32_t trace_epoch = 1U;
+
+static uint32_t trace_cpu_id(void) {
+    uint32_t cpu = hal_get_cpu_id();
+    return (cpu < SMP_MAX_CPUS) ? cpu : 0U;
+}
 
 static void trace_put_hex16(uint16_t value) {
     static const char hex[] = "0123456789ABCDEF";
@@ -48,19 +57,26 @@ static void trace_put_u32(uint32_t value) {
 }
 
 void trace_record(uint8_t event, uint8_t task_id, uint16_t data) {
-    /* M1: spinlock 保护 trace_head/count (两核并发 trace_record) */
-    spin_lock(&trace_slock);
-    trace_entry_t *e = &trace_buf[trace_head];
+    uint32_t irq_state = hal_irq_save();
+    trace_cpu_t *state = &trace_cpu[trace_cpu_id()];
+    uint32_t epoch = __atomic_load_n(&trace_epoch, __ATOMIC_ACQUIRE);
+    if (state->epoch != epoch) {
+        state->head = 0U;
+        state->count = 0U;
+        state->epoch = epoch;
+    }
+
+    trace_entry_t *e = &state->buf[state->head];
     e->tick     = sched_get_tick_count();
     e->event    = event;
     e->task_id  = task_id;
     e->data     = data;
 
-    trace_head = (trace_head + 1) % TRACE_BUFFER_SIZE;
-    if (trace_count < TRACE_BUFFER_SIZE) {
-        trace_count++;
+    state->head = (uint16_t)((state->head + 1U) % TRACE_BUFFER_SIZE);
+    if (state->count < TRACE_BUFFER_SIZE) {
+        state->count++;
     }
-    spin_unlock(&trace_slock);
+    hal_irq_restore(irq_state);
 }
 
 uint16_t trace_pack(uint8_t object_id, uint8_t result) {
@@ -92,34 +108,85 @@ void trace_ipc_event(uint8_t task_id, uint8_t ipc_id, uint8_t action, uint8_t re
 }
 
 uint16_t trace_get_count(void) {
-    return trace_count;
+    uint32_t epoch = __atomic_load_n(&trace_epoch, __ATOMIC_ACQUIRE);
+    uint32_t total = 0U;
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; cpu++) {
+        if (trace_cpu[cpu].epoch == epoch) {
+            total += trace_cpu[cpu].count;
+        }
+    }
+    return (total > UINT16_MAX) ? UINT16_MAX : (uint16_t)total;
+}
+
+uint16_t trace_get_local_count(void) {
+    uint32_t epoch = __atomic_load_n(&trace_epoch, __ATOMIC_ACQUIRE);
+    trace_cpu_t *state = &trace_cpu[trace_cpu_id()];
+    return (state->epoch == epoch) ? state->count : 0U;
 }
 
 const trace_entry_t *trace_get_entry(uint16_t index) {
-    if (index >= trace_count) return NULL;
+    uint32_t epoch = __atomic_load_n(&trace_epoch, __ATOMIC_ACQUIRE);
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; cpu++) {
+        trace_cpu_t *state = &trace_cpu[cpu];
+        if (state->epoch != epoch) {
+            continue;
+        }
+        uint16_t count = state->count;
+        if (index >= count) {
+            index = (uint16_t)(index - count);
+            continue;
+        }
 
-    /* 计算实际位置: 最旧的条目在 (head - count) 处 */
-    uint16_t pos;
-    if (trace_count < TRACE_BUFFER_SIZE) {
-        pos = index;
-    } else {
-        pos = (trace_head + index) % TRACE_BUFFER_SIZE;
+        uint16_t oldest = (count < TRACE_BUFFER_SIZE) ? 0U : state->head;
+        uint16_t pos = (uint16_t)((oldest + index) % TRACE_BUFFER_SIZE);
+        return &state->buf[pos];
     }
-    return &trace_buf[pos];
+    return NULL;
+}
+
+const trace_entry_t *trace_get_local_entry(uint16_t index) {
+    uint32_t epoch = __atomic_load_n(&trace_epoch, __ATOMIC_ACQUIRE);
+    trace_cpu_t *state = &trace_cpu[trace_cpu_id()];
+    if (state->epoch != epoch || index >= state->count) {
+        return NULL;
+    }
+
+    uint16_t oldest = (state->count < TRACE_BUFFER_SIZE) ? 0U : state->head;
+    return &state->buf[(oldest + index) % TRACE_BUFFER_SIZE];
 }
 
 void trace_clear(void) {
-    spin_init(&trace_slock);
-    trace_head  = 0;
-    trace_count = 0;
+    uint32_t epoch = __atomic_add_fetch(&trace_epoch, 1U, __ATOMIC_ACQ_REL);
+    uint32_t irq_state = hal_irq_save();
+    trace_cpu_t *state = &trace_cpu[trace_cpu_id()];
+    state->head = 0U;
+    state->count = 0U;
+    state->epoch = epoch;
+    hal_irq_restore(irq_state);
 }
 
 uint16_t trace_filter(uint8_t event,
                       void (*callback)(const trace_entry_t *e, void *ctx),
                       void *ctx) {
     uint16_t matched = 0;
-    for (uint16_t i = 0; i < trace_count; i++) {
+    uint16_t count = trace_get_count();
+    for (uint16_t i = 0; i < count; i++) {
         const trace_entry_t *e = trace_get_entry(i);
+        if (e && e->event == event) {
+            callback(e, ctx);
+            matched++;
+        }
+    }
+    return matched;
+}
+
+uint16_t trace_filter_local(uint8_t event,
+                            void (*callback)(const trace_entry_t *e, void *ctx),
+                            void *ctx) {
+    uint16_t matched = 0;
+    uint16_t count = trace_get_local_count();
+    for (uint16_t i = 0; i < count; i++) {
+        const trace_entry_t *e = trace_get_local_entry(i);
         if (e && e->event == event) {
             callback(e, ctx);
             matched++;

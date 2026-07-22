@@ -7,6 +7,45 @@
 #define SPINLOCK_H
 
 #include <stdint.h>
+#include "kernel_config.h"
+
+/* Debug lock ordering.  Ranks must be acquired in strictly increasing order;
+ * equal-rank nesting is intentionally rejected because M1 forbids nesting
+ * peer object locks.  Rank 0 leaves legacy/unclassified locks unchecked. */
+typedef enum {
+    LOCKDEP_RANK_NONE       = 0,
+    LOCKDEP_RANK_REGISTRY   = 10,
+    LOCKDEP_RANK_TASK       = 20,
+    LOCKDEP_RANK_OBJECT     = 30,
+    LOCKDEP_RANK_RESOURCE   = 40,
+    LOCKDEP_RANK_REMOTE     = 50,
+} lockdep_rank_t;
+
+#if KERN_DEBUG_ENABLE
+void lockdep_check(uint8_t rank, const void *lock);
+void lockdep_acquire(uint8_t rank, const void *lock);
+void lockdep_release(uint8_t rank, const void *lock);
+#else
+static inline void lockdep_check(uint8_t rank, const void *lock) {
+    (void)rank;
+    (void)lock;
+}
+static inline void lockdep_acquire(uint8_t rank, const void *lock) {
+    (void)rank;
+    (void)lock;
+}
+static inline void lockdep_release(uint8_t rank, const void *lock) {
+    (void)rank;
+    (void)lock;
+}
+#endif
+
+#if CAP_ENABLE
+/* Drain capability cleanup/revoke callbacks at an outermost lock-release
+ * safe point.  capability.c supplies the implementation; keeping the call in
+ * irq_spin_unlock guarantees callbacks never inherit a ranked subsystem lock. */
+void cap_deferred_poll(void);
+#endif
 
 typedef volatile uint32_t spinlock_t;
 
@@ -84,31 +123,60 @@ static inline int spin_trylock(spinlock_t *lock) {
 typedef struct {
     spinlock_t lock;
     uint32_t irq_state;
+    uint8_t rank;
+    uint8_t _pad[3];
 } irq_spinlock_t;
 
 static inline void irq_spin_init(irq_spinlock_t *s) {
     spin_init(&s->lock);
     s->irq_state = 0;
+    s->rank = LOCKDEP_RANK_NONE;
+}
+
+static inline void irq_spin_init_rank(irq_spinlock_t *s, uint8_t rank) {
+    irq_spin_init(s);
+    s->rank = rank;
 }
 
 static inline uint32_t irq_spin_lock(irq_spinlock_t *s) {
-    // 保存中断状态并关闭中断
+    /* Check order before potentially waiting.  While contended, restore the
+     * caller's PRIMASK between try-lock attempts so a scheduler IPI can break
+     * cross-core dependencies (e.g. a remote quiesce).  Interrupts remain
+     * masked for the entire interval after the lock is actually acquired. */
     uint32_t primask;
     __asm volatile("mrs %0, primask" : "=r"(primask));
-    __asm volatile("cpsid i");
+    lockdep_check(s->rank, s);
 
-    // 获取自旋锁
-    spin_lock(&s->lock);
+    for (;;) {
+        __asm volatile("cpsid i");
+        if (spin_trylock(&s->lock) == 0) {
+            break;
+        }
+        __asm volatile("msr primask, %0" :: "r"(primask));
+        __asm volatile("yield");
+    }
 
+    lockdep_acquire(s->rank, s);
     return primask;
 }
 
 static inline void irq_spin_unlock(irq_spinlock_t *s, uint32_t irq_state) {
+    lockdep_release(s->rank, s);
+
     // 释放自旋锁
     spin_unlock(&s->lock);
 
     // 恢复中断状态
     __asm volatile("msr primask, %0" :: "r"(irq_state));
+
+#if CAP_ENABLE
+    /* A saved PRIMASK of zero means this was the outermost irq_spinlock.
+     * Poll only after restoring it, so deferred callbacks start with no
+     * ranked lock held.  Nested unlocks leave the work for their outer owner. */
+    if (irq_state == 0U) {
+        cap_deferred_poll();
+    }
+#endif
 }
 
 #endif // SPINLOCK_H

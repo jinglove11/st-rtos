@@ -19,6 +19,13 @@
 #if TRACE_ENABLE && TEST_ENABLE
 
 #include "trace.h"
+#include "hal.h"
+
+/* The production APIs aggregate all CPUs. Exact ring-buffer unit tests must
+ * inspect the calling CPU only; peer-core scheduler activity is unrelated. */
+#define trace_get_count trace_get_local_count
+#define trace_get_entry trace_get_local_entry
+#define trace_filter    trace_filter_local
 
 /*============================================================================
  * Test 1: trace_record 写入 → trace_get_entry 读取一致性
@@ -50,32 +57,45 @@ static void test_trace_write_read(void) {
 static void test_trace_wraparound(void) {
     test_section("Test 2: trace buffer wrap-around");
 
+    /* Exact local-ring layout must not be perturbed by a local SysTick/PendSV
+     * trace between writes.  Peer-core tracing uses its own ring. */
+    uint32_t irq_state = hal_irq_save();
     trace_clear();
 
     /* Fill buffer to capacity */
     for (int i = 0; i < TRACE_BUFFER_SIZE; i++) {
         trace_record(TRACE_TASK_SWITCH, (uint8_t)i, (uint16_t)i);
     }
-    TEST_ASSERT_EQ(TRACE_BUFFER_SIZE, trace_get_count(), "count at capacity");
+    uint16_t count_at_capacity = trace_get_count();
 
     /* Add one more → oldest drops, count stays at capacity */
     trace_record(TRACE_ISR_ENTER, 0xFF, 0xDEAD);
-    TEST_ASSERT_EQ(TRACE_BUFFER_SIZE, trace_get_count(), "count stays at capacity after wrap");
+    uint16_t count_after_wrap = trace_get_count();
 
     /* First entry should now be index 1 from original (index 0 was evicted) */
     const trace_entry_t *e0 = trace_get_entry(0);
-    TEST_ASSERT_NOT_NULL(e0, "entry 0 not null after wrap");
-    if (!e0) return;
-    TEST_ASSERT_EQ(1, e0->task_id, "first entry shifted: task_id=1");
-    TEST_ASSERT_EQ(1, e0->data, "first entry shifted: data=1");
+    trace_entry_t e0_copy = {0};
+    if (e0 != NULL) e0_copy = *e0;
 
     /* The last entry (index=count-1) should be the wrapped one */
     const trace_entry_t *elast = trace_get_entry(TRACE_BUFFER_SIZE - 1);
+    trace_entry_t elast_copy = {0};
+    if (elast != NULL) elast_copy = *elast;
+    hal_irq_restore(irq_state);
+
+    TEST_ASSERT_EQ(TRACE_BUFFER_SIZE, count_at_capacity, "count at capacity");
+    TEST_ASSERT_EQ(TRACE_BUFFER_SIZE, count_after_wrap,
+                   "count stays at capacity after wrap");
+    TEST_ASSERT_NOT_NULL(e0, "entry 0 not null after wrap");
+    if (!e0) return;
+    TEST_ASSERT_EQ(1, e0_copy.task_id, "first entry shifted: task_id=1");
+    TEST_ASSERT_EQ(1, e0_copy.data, "first entry shifted: data=1");
+
     TEST_ASSERT_NOT_NULL(elast, "last entry not null");
     if (!elast) return;
-    TEST_ASSERT_EQ(TRACE_ISR_ENTER, elast->event, "last entry is the wrap entry");
-    TEST_ASSERT_EQ(0xFF, elast->task_id, "last entry task_id=0xFF");
-    TEST_ASSERT_EQ(0xDEAD, elast->data, "last entry data=0xDEAD");
+    TEST_ASSERT_EQ(TRACE_ISR_ENTER, elast_copy.event, "last entry is the wrap entry");
+    TEST_ASSERT_EQ(0xFF, elast_copy.task_id, "last entry task_id=0xFF");
+    TEST_ASSERT_EQ(0xDEAD, elast_copy.data, "last entry data=0xDEAD");
 }
 
 /*============================================================================

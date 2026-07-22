@@ -8,6 +8,7 @@
 #include "ipc_transfer.h"
 #include "mem.h"
 #include "semaphore.h"   /* M2-Step3a: sem_create/sem_obj_for_cap */
+#include "spinlock.h"
 #include <string.h>
 #if CAP_RESTART_SUBSET
 #include "cap_subset.h"
@@ -1240,6 +1241,49 @@ static void test_cap_cleanup_callback(void) {
 }
 
 /*============================================================================
+ * Test 26b: deferred hooks run after the caller's outer object lock
+ *============================================================================*/
+
+static irq_spinlock_t cap_test_outer_lock;
+static irq_spinlock_t cap_test_registry_lock;
+static volatile int cap_safe_point_cleanup_count;
+
+static void cap_safe_point_cleanup(void *object, uint8_t obj_type) {
+    (void)object;
+    if (obj_type == CAP_OBJ_SYSTEM) {
+        uint32_t crit = irq_spin_lock(&cap_test_registry_lock);
+        cap_safe_point_cleanup_count++;
+        irq_spin_unlock(&cap_test_registry_lock, crit);
+    }
+}
+
+static void test_cap_cleanup_outer_lock_safe_point(void) {
+    test_section("Test 26b: cleanup waits for outer lock safe point");
+
+    int obj = 1202;
+    cap_safe_point_cleanup_count = 0;
+    irq_spin_init_rank(&cap_test_outer_lock, LOCKDEP_RANK_OBJECT);
+    irq_spin_init_rank(&cap_test_registry_lock, LOCKDEP_RANK_REGISTRY);
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_register_cleanup(CAP_OBJ_SYSTEM,
+                                             cap_safe_point_cleanup),
+                   "register safe-point cleanup callback");
+
+    cap_id_t cap = cap_create(&obj, CAP_OBJ_SYSTEM, CAP_FULL, 1);
+    TEST_ASSERT(cap != ((cap_id_t)-1), "create safe-point test cap");
+
+    uint32_t crit = irq_spin_lock(&cap_test_outer_lock);
+    cap_delete(cap);
+    TEST_ASSERT_EQ(0, cap_safe_point_cleanup_count,
+                   "cleanup deferred while outer object lock held");
+    irq_spin_unlock(&cap_test_outer_lock, crit);
+
+    TEST_ASSERT_EQ(1, cap_safe_point_cleanup_count,
+                   "cleanup ran once after outer object unlock");
+    (void)cap_register_cleanup(CAP_OBJ_SYSTEM, NULL);
+}
+
+/*============================================================================
  * Test 25b: M2 验收 A3 — revoke 大型派生树后 cleanup 只调一次
  *
  * 构造深度 + 广度派生树 (root → child1 → grandchild; root → child2 →
@@ -1473,6 +1517,7 @@ static void test_capability_module(void) {
     test_ipc_cap_move_success();
     test_cap_object_refcount();
     test_cap_cleanup_callback();
+    test_cap_cleanup_outer_lock_safe_point();
     test_cap_revoke_deep_tree_cleanup_once();
     test_mmio_cap_lifecycle();
 #if CAP_RESTART_SUBSET

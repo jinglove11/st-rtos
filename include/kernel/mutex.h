@@ -93,5 +93,6 @@ int mutex_deadlock_check(void);
 
 mutex_id_t mutex_id_from_obj(void *obj);
 void *mutex_obj_for_cap(mutex_id_t id);
+void mutex_cleanup_task(void *mutex_obj, tcb_t *tcb);
 
 #endif // MUTEX_H

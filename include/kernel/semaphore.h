@@ -94,5 +94,6 @@ sem_id_t sem_id_from_obj(void *obj);
  * 返回的指针在 sem_delete + 重新 alloc 后值不变但 generation 变了,
  * 所以 cap_create_for_gen 必须立即调用并把当前 hdr.generation 一并传入。 */
 void *sem_obj_for_cap(sem_id_t id);
+void sem_cleanup_task(void *sem_obj, tcb_t *tcb);
 
 #endif // SEMAPHORE_H

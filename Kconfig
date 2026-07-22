@@ -993,6 +993,15 @@ config SMP_WORK_STEALING
       idle CPU 从其他 CPU 的 run queue 末尾偷任务。
       关闭则任务严格按 affinity 跑。
 
+config SMP_STRESS_ITERATIONS
+    int "SMP ping-pong iterations"
+    default 10000
+    depends on TEST_MODULE_SMP
+    range 100 1000000
+    help
+      SMP smoke profile uses 10000.  The dedicated RP2350 SMP acceptance
+      profile sets 1000000 for the M1 cross-core semaphore and endpoint gates.
+
 config CAP_RCU
     bool "Capability table RCU reader"
     default n

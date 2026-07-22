@@ -2963,16 +2963,19 @@ static void test_user_channel_recv_caps_sleepable(void) {
     TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                    "kernel channel_send_caps to user recv_caps OK");
 
-    err = sem_wait(sem, 0);
-    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
-                   "user channel recv_caps used transferred sem cap");
-
     void *retval = NULL;
     kern_err_t join_err = task_join(service, &retval, 1000);
     TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
                    "channel recv_caps service joined OK");
     TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
                    "sleepable ch_recv_caps returned OK");
+
+    /* channel_send_caps is one-way: enqueue success does not mean the peer
+     * has already run.  Joining establishes that sys_sem_post completed before
+     * the nonblocking semaphore observation. */
+    err = sem_wait(sem, 0);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "user channel recv_caps used transferred sem cap");
 
     cap_delete(sem_cap);
     sem_delete(sem);

@@ -24,6 +24,9 @@
 #include "device.h"
 #endif
 #include "fault.h"
+#if SMP
+#include "smp.h"
+#endif
 #if FAULT_ENDPOINT
 #include "fault_endpoint.h"
 #endif
@@ -73,6 +76,17 @@ void kern_start(void) {
     // 启动定时器服务任务
     timer_service_start();
     bh_service_start();
+    sched_timeout_service_start();
+
+#if SMP
+    /* SMP is a kernel boot property, not a test-framework feature.  Launch
+     * core1 after every subsystem and service TCB is initialized, but before
+     * core0 enters its first task.  Core1 starts on its private idle task and
+     * uses IPI work stealing once core0 enables interrupts. */
+    if (smp_init_core1() != KERN_OK) {
+        kern_panic("core1 launch timeout");
+    }
+#endif
 
     // 启动调度器
     sched_start();
