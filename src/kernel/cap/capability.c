@@ -25,15 +25,85 @@
  * SMP 下两核同时操作 cap_pool 互斥。
  * 用法: uint32_t crit = CAP_LOCK(); ... CAP_UNLOCK(crit); */
 static irq_spinlock_t cap_pool_lock;
+
+/* M2-#9: cleanup/revoke hook table (前向声明,供 deferred 队列引用)。
+ * 真正定义在下方。 */
+static cap_cleanup_fn_t cap_cleanup_table[CAP_OBJ_TYPE_MAX];
+static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
+
+/*============================================================================
+ * M2-#9: cleanup/revoke hook 延迟执行队列
+ *
+ * 问题: cap_clear_slot 在持 CAP_LOCK 时调 cleanup/revoke hook。hook 可能
+ * 反向获取子系统锁 (如 mem.c 的 mem_lock),与已持有的子系统锁形成嵌套
+ * 死锁。当前 hook (kmem_cap_cleanup / kshm_unmap) 不获取子系统锁,但
+ * 未来 hook 可能会。
+ *
+ * 修复: cap_clear_slot 把需要调的 hook 记到 pending 队列 (不直接调)。
+ * CAP_UNLOCK 宏在释放 cap_pool_lock 后自动 flush 队列 (锁外执行 hook)。
+ * pending 队列是 per-CPU (避免两核竞争同一队列),足够大覆盖单次
+ * cap_clear_slot 调用 (max 1 revoke + 1 cleanup)。
+ *============================================================================*/
+#define CAP_DEFERRED_MAX 4
+typedef struct {
+    void     *object;
+    uint8_t   obj_type;
+    uint8_t   kind;        /* 0=cleanup, 1=revoke_hook */
+    cap_id_t  cap;        /* revoke_hook 用 */
+} cap_deferred_t;
+
+/* per-CPU deferred queue。SMP_MAX_CPUS 在 kernel_types.h 已 fallback 到 1。 */
+static cap_deferred_t cap_deferred_queue[SMP_MAX_CPUS][CAP_DEFERRED_MAX];
+static uint8_t cap_deferred_count[SMP_MAX_CPUS];
+
+static void cap_defer_hook(void *object, uint8_t obj_type, uint8_t kind, cap_id_t cap) {
+    uint32_t cpu = hal_get_cpu_id();
+    if (cpu >= SMP_MAX_CPUS) cpu = 0;
+    uint8_t i = cap_deferred_count[cpu];
+    if (i < CAP_DEFERRED_MAX) {
+        cap_deferred_queue[cpu][i].object   = object;
+        cap_deferred_queue[cpu][i].obj_type = obj_type;
+        cap_deferred_queue[cpu][i].kind     = kind;
+        cap_deferred_queue[cpu][i].cap      = cap;
+        cap_deferred_count[cpu] = i + 1;
+    }
+    /* 队列满:静默丢弃 (CAP_DEFERRED_MAX=4 足够单次 cap_clear_slot,正常不会满) */
+}
+
+/* 锁外 flush:执行所有 pending hook。由 CAP_UNLOCK 自动调用。 */
+static void cap_flush_deferred(void) {
+    uint32_t cpu = hal_get_cpu_id();
+    if (cpu >= SMP_MAX_CPUS) cpu = 0;
+    uint8_t n = cap_deferred_count[cpu];
+    cap_deferred_count[cpu] = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        cap_deferred_t *d = &cap_deferred_queue[cpu][i];
+        if (d->kind == 1) {
+            /* revoke hook */
+            if (d->obj_type < CAP_OBJ_TYPE_MAX &&
+                cap_revoke_hook_table[d->obj_type] != NULL) {
+                cap_revoke_hook_table[d->obj_type](d->cap, d->object, d->obj_type);
+            }
+        } else {
+            /* cleanup hook (仅当 refcount==0) */
+            if (d->obj_type < CAP_OBJ_TYPE_MAX &&
+                cap_cleanup_table[d->obj_type] != NULL &&
+                cap_object_refcount(d->object, d->obj_type) == 0) {
+                cap_cleanup_table[d->obj_type](d->object, d->obj_type);
+            }
+        }
+    }
+}
+
 #define CAP_LOCK()   irq_spin_lock(&cap_pool_lock)
-#define CAP_UNLOCK(crit) irq_spin_unlock(&cap_pool_lock, crit)
+/* M2-#9: CAP_UNLOCK 释放锁后自动 flush 延迟 hook (锁外执行) */
+#define CAP_UNLOCK(crit) do { irq_spin_unlock(&cap_pool_lock, crit); cap_flush_deferred(); } while (0)
 
 typedef char cap_slot_bits_fit[(CAP_MAX_COUNT_VAL <= (1U << CAP_SLOT_BITS)) ? 1 : -1];
 typedef char cap_shm_type_registered[(CAP_OBJ_SHM < CAP_OBJ_TYPE_MAX) ? 1 : -1];
 
 static cap_entry_t cap_pool[CAP_MAX_COUNT_VAL];
-static cap_cleanup_fn_t cap_cleanup_table[CAP_OBJ_TYPE_MAX];
-static cap_revoke_hook_fn_t cap_revoke_hook_table[CAP_OBJ_TYPE_MAX];
+/* cap_cleanup_table / cap_revoke_hook_table 已在上方 M2-#9 deferred 队列前声明 */
 
 #define CAP_TASK_CSPACE_SLOTS \
     ((int)(sizeof(((tcb_t *)0)->cap_set) / sizeof(((tcb_t *)0)->cap_set[0])))
@@ -261,10 +331,9 @@ static void cap_clear_slot(int slot) {
     void *object = cap_pool[slot].object;
     uint8_t obj_type = cap_pool[slot].obj_type;
     int16_t child = cap_pool[slot].first_child;
-    if (cap != CAP_INVALID &&
-        obj_type < CAP_OBJ_TYPE_MAX &&
-        cap_revoke_hook_table[obj_type] != NULL) {
-        cap_revoke_hook_table[obj_type](cap, object, obj_type);
+    /* M2-#9: revoke hook 延迟到 CAP_UNLOCK 后执行 (避免持锁调 hook 死锁) */
+    if (cap != CAP_INVALID && obj_type < CAP_OBJ_TYPE_MAX) {
+        cap_defer_hook(object, obj_type, 1, cap);  /* kind=1=revoke */
     }
 
     if (cap != CAP_INVALID) {
@@ -287,10 +356,9 @@ static void cap_clear_slot(int slot) {
     cap_pool[slot].first_child = CAP_NO_SLOT;
     cap_pool[slot].next_sibling = CAP_NO_SLOT;
 
-    if (obj_type < CAP_OBJ_TYPE_MAX &&
-        cap_cleanup_table[obj_type] != NULL &&
-        cap_object_refcount(object, obj_type) == 0) {
-        cap_cleanup_table[obj_type](object, obj_type);
+    /* M2-#9: cleanup hook 延迟到 CAP_UNLOCK 后执行 */
+    if (obj_type < CAP_OBJ_TYPE_MAX) {
+        cap_defer_hook(object, obj_type, 0, cap);  /* kind=0=cleanup */
     }
 }
 
