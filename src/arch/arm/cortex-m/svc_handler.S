@@ -28,7 +28,8 @@
  *     +68       a5
  *     +72       a6
  *
- *   因此异常帧 R0 地址是 PSP+32，额外参数从 PSP+64 开始。
+ *   basic frame 时异常帧 R0 地址是 PSP+32，额外参数从 PSP+64 开始。
+ *   extended FP frame 时两者再增加 72 字节。
  */
 
     .syntax unified
@@ -70,6 +71,9 @@ SVC_Handler:
     ite     eq
     mrseq   r12, msp
     mrsne   r12, psp
+    tst     lr, #0x10
+    it      eq
+    addeq   r12, r12, #72         /* skip extended FP state */
     ldr     r12, [r12, #24]       /* stacked PC */
     ldrb    r12, [r12, #-2]        /* SVC 立即数 */
 
@@ -109,11 +113,17 @@ SVC_Handler:
     bl      mpu_load_task_regions
     pop     {r0, lr}
 
+    ldr     lr, [r0, #OFF_EXC_RETURN]
     ldrb    r2, [r0, #OFF_ATTRS]   /* TCB->attrs */
     tst     r2, #1                 /* TASK_ATTR_USER? */
     ite     eq
     moveq   r2, #2
     movne   r2, #3
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    tst     lr, #0x10
+    it      eq
+    orreq   r2, r2, #4
+#endif
     msr     control, r2
     isb
 
@@ -125,7 +135,6 @@ SVC_Handler:
     str     r0, [r1, r3]
 
     cpsie   i
-    ldr     lr, =0xFFFFFFFD
     bx      lr
 
 /*============================================================================
@@ -142,16 +151,27 @@ SVC_Handler:
     cmp     r4, #0
     beq     1f
     str     r12, [r4, #OFF_SP]    /* TCB->sp = PSP */
+    str     lr, [r4, #OFF_EXC_RETURN]
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    tst     lr, #0x10
+    bne     .L_svc_no_fp_save
+    add     r2, r4, #OFF_FP_HIGH
+    vstmia  r2, {s16-s31}
+.L_svc_no_fp_save:
+#endif
     /* Save PSPLIM alongside R4-R11 so blocked syscalls switch cleanly. */
     mrs     r2, psplim
     str     r2, [r4, #OFF_SP_LIMIT]
 1:
-    add     r7, r12, #32           /* R7 = 异常帧中 R0 地址 */
+    add     r7, r12, #32           /* skip saved R4-R11 */
+    tst     lr, #0x10
+    it      eq
+    addeq   r7, r7, #72            /* skip extended FP state */
 
     /* 从用户栈读取 a4-a6 */
-    ldr     r4, [r12, #64]
-    ldr     r5, [r12, #68]
-    ldr     r6, [r12, #72]
+    ldr     r4, [r7, #32]
+    ldr     r5, [r7, #36]
+    ldr     r6, [r7, #40]
     push    {r4, r5, r6, lr}
 
     /*
@@ -179,10 +199,17 @@ SVC_Handler:
     /* Restore PSPLIM before clobbering r4 with the saved R4-R11. */
     ldr     r2, [r4, #OFF_SP_LIMIT]
     msr     psplim, r2
+    ldr     lr, [r4, #OFF_EXC_RETURN]
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    tst     lr, #0x10
+    bne     .L_svc_no_fp_restore
+    add     r2, r4, #OFF_FP_HIGH
+    vldmia  r2, {s16-s31}
+.L_svc_no_fp_restore:
+#endif
     ldmia   r1!, {r4-r11}
     msr     psp, r1
 2:
-    ldr     lr, =0xFFFFFFFD
     bx      lr
 
 .L_bad_svc_param:
@@ -190,6 +217,9 @@ SVC_Handler:
     ite     eq
     mrseq   r12, msp
     mrsne   r12, psp
+    tst     lr, #0x10
+    it      eq
+    addeq   r12, r12, #72
     ldr     r1, =-2               /* KERN_ERR_PARAM */
     str     r1, [r12]              /* stacked R0 */
     bx      lr
@@ -199,6 +229,9 @@ SVC_Handler:
     ite     eq
     mrseq   r12, msp
     mrsne   r12, psp
+    tst     lr, #0x10
+    it      eq
+    addeq   r12, r12, #72
     ldr     r1, =-5               /* KERN_ERR_STATE */
     str     r1, [r12]              /* stacked R0 */
     bx      lr
@@ -224,15 +257,28 @@ SVC_Handler:
     bl      mpu_load_task_regions
     pop     {r0, lr}
 
+    ldr     lr, [r0, #OFF_EXC_RETURN]
     ldrb    r2, [r0, #OFF_ATTRS]   /* next_task->attrs */
     tst     r2, #1                 /* TASK_ATTR_USER? */
     ite     eq
     moveq   r2, #2
     movne   r2, #3
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    tst     lr, #0x10
+    it      eq
+    orreq   r2, r2, #4
+#endif
     msr     control, r2
     isb
 
     ldr     r1, [r0, #OFF_SP]     /* next->sp */
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    tst     lr, #0x10
+    bne     .L_blocked_no_fp_restore
+    add     r3, r0, #OFF_FP_HIGH
+    vldmia  r3, {s16-s31}
+.L_blocked_no_fp_restore:
+#endif
     ldmia   r1!, {r4-r11}
     msr     psp, r1
 
@@ -240,7 +286,6 @@ SVC_Handler:
     ldr     r2, [r0, #OFF_SP_LIMIT]
     msr     psplim, r2
 
-    ldr     lr, =0xFFFFFFFD
     bx      lr
 
 .L_svc_halt:

@@ -12,6 +12,12 @@
 #include "kernel_config.h"
 #include "kobject.h"   /* M2-Step3a: kobject_header_t */
 
+/* Kconfig hides SMP_MAX_CPUS when SMP is disabled, while the scheduler keeps
+ * one-element per-CPU arrays in the uniprocessor build. */
+#ifndef SMP_MAX_CPUS
+#define SMP_MAX_CPUS 1
+#endif
+
 /*============================================================================
  * 错误码
  *============================================================================*/
@@ -129,8 +135,9 @@ typedef struct tcb {
      * "hdr 在 object 指针的 offset 0" 不变量的唯一例外处理方式。 */
     kobject_header_t hdr;
 
-    // --- 上下文保存区 (汇编访问, OFF_SP=12 不是 0) ---
+    // --- 上下文保存区 (汇编访问,偏移由 tcb_offsets.inc 自动生成) ---
     void       *sp;                   // 栈指针
+    uint32_t    exc_return;           // 异常返回类型 (basic/extended FP frame)
 
     // --- 基本信息 ---
     char        name[KERN_TASK_NAME_LEN];  // 任务名称
@@ -143,6 +150,7 @@ typedef struct tcb {
     void       *stack_base;           // 栈基址
     uint32_t    stack_size;           // 栈大小 (字节)
     uint32_t    sp_limit;             // PSP 下界 (装载到 PSPLIM, M33 栈溢出保护)
+    uint32_t    fp_high[16];          // FPU S16-S31 (硬件仅自动保存 S0-S15)
 
     // --- 调度信息 ---
     uint32_t    time_slice;           // 剩余时间片

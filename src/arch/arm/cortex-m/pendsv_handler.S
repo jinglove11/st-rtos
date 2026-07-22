@@ -11,7 +11,7 @@
  *   2. 获取 _current_task TCB
  *   3. 检查是否为首次切换 (current == NULL → 跳过保存)
  *   4. 检查任务状态是否为 TERMINATED (跳过保存)
- *   5. 保存 R4-R11 到 PSP，更新 TCB->sp
+ *   5. 保存 R4-R11、EXC_RETURN 和可选的 S16-S31
  *   6. 调用 kern_pendsv_handler() 选择下一个任务
  *   7. 加载下一个任务的 MPU regions
  *   8. 根据 next_task->attrs 更新 CONTROL (特权级切换)
@@ -63,6 +63,17 @@ PendSV_Handler:
     mrs     r1, psp
     stmdb   r1!, {r4-r11}
     str     r1, [r0, #OFF_SP]     /* TCB->sp = PSP */
+    str     lr, [r0, #OFF_EXC_RETURN]
+
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    /* Extended hardware frames save S0-S15/FPSCR.  The ABI makes S16-S31
+     * callee-saved, so the scheduler must preserve those per task. */
+    tst     lr, #0x10
+    bne     .L_no_fp_save
+    add     r2, r0, #OFF_FP_HIGH
+    vstmia  r2, {s16-s31}
+.L_no_fp_save:
+#endif
 
     /* Save current PSPLIM so it is restored on context-in. */
     mrs     r2, psplim
@@ -84,15 +95,31 @@ PendSV_Handler:
     bl      mpu_load_task_regions
     pop     {r0, lr}
 
+    ldr     lr, [r0, #OFF_EXC_RETURN]
     ldrb    r2, [r0, #OFF_ATTRS]   /* next_task->attrs */
     tst     r2, #1                 /* TASK_ATTR_USER? */
     ite     eq
     moveq   r2, #2                 /* 特权: SPSEL=1, nPRIV=0 */
     movne   r2, #3                 /* 用户: SPSEL=1, nPRIV=1 */
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    /* CONTROL.FPCA must describe the task being restored, not the task that
+     * was interrupted.  Extended EXC_RETURN frames require FPCA=1. */
+    tst     lr, #0x10
+    it      eq
+    orreq   r2, r2, #4
+#endif
     msr     control, r2
     isb
 
     ldr     r1, [r0, #OFF_SP]     /* next->sp */
+
+#if defined(__ARM_FP) && (__ARM_FP != 0)
+    tst     lr, #0x10
+    bne     .L_no_fp_restore
+    add     r3, r0, #OFF_FP_HIGH
+    vldmia  r3, {s16-s31}
+.L_no_fp_restore:
+#endif
 
     ldmia   r1!, {r4-r11}
     msr     psp, r1

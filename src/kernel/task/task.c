@@ -28,6 +28,11 @@
  */
 typedef char tcb_state_offset_in_first_cacheline[(offsetof(tcb_t, state) < 64) ? 1 : -1];
 
+/* Return to Thread mode using PSP, with a basic (non-FP) hardware frame. */
+#define TASK_INITIAL_EXC_RETURN 0xFFFFFFFDUL
+#define EXC_RETURN_BASIC_FRAME (1UL << 4)
+#define FP_EXTENDED_FRAME_SIZE 72U
+
 // 简单的数字转字符串
 static void int_to_str(int n, char *buf) {
     int i = 0;
@@ -314,11 +319,15 @@ static void task_write_saved_svc_r0(tcb_t *tcb, kern_err_t result) {
     }
 
     /*
-     * SVC saves R4-R11 below the hardware frame before blocking:
-     *   sp + 0..31  saved R4-R11
-     *   sp + 32     stacked R0
+     * SVC saves R4-R11 below the hardware frame before blocking.  When
+     * EXC_RETURN bit 4 is clear, the hardware also placed S0-S15, FPSCR and
+     * one reserved word (18 words / 72 bytes) before the core frame.
      */
-    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + 32U);
+    uint32_t frame_offset = 32U;
+    if ((tcb->exc_return & EXC_RETURN_BASIC_FRAME) == 0U) {
+        frame_offset += FP_EXTENDED_FRAME_SIZE;
+    }
+    uint32_t *stacked_r0 = (uint32_t *)((uint8_t *)tcb->sp + frame_offset);
     *stacked_r0 = (uint32_t)result;
 }
 
@@ -364,6 +373,7 @@ void task_init(void) {
         idle->time_slice = KERN_DEFAULT_TIME_SLICE;
         idle->time_slice_reload = KERN_DEFAULT_TIME_SLICE;
         idle->attrs = TASK_ATTR_PRIVILEGED;  /* 空闲任务运行在特权模式 */
+        idle->exc_return = TASK_INITIAL_EXC_RETURN;
         strncpy(idle->name, "idle", KERN_TASK_NAME_LEN - 1);
 
         /* 初始化空闲任务栈 */
@@ -419,6 +429,7 @@ task_id_t task_create(const char   *name,
     tcb->base_priority = priority;
     tcb->state = TASK_STATE_CREATED;
     tcb->attrs = TASK_ATTR_PRIVILEGED;  /* 默认创建特权任务，兼容现有代码 */
+    tcb->exc_return = TASK_INITIAL_EXC_RETURN;
 
     // 设置名称
     if (name) {
