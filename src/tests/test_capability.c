@@ -20,6 +20,11 @@ static void cap_test_task(void *arg) {
     (void)arg;
 }
 
+static uint64_t test_cspace_occupied(tcb_t *task) {
+    cnode_t *cnode = cap_space_of(task);
+    return cnode != NULL ? cnode->occupied : 0;
+}
+
 /*============================================================================
  * Test 1: cap_create returns valid non-zero token
  *============================================================================*/
@@ -364,6 +369,114 @@ static void test_cap_stale_generation(void) {
 }
 
 /*============================================================================
+ * Test 17a: 32-bit generation boundary retires a slot instead of wrapping
+ *============================================================================*/
+
+static void test_cap_generation_exhaustion_retires_slot(void) {
+    test_section("Test 17a: generation exhaustion retires slot");
+
+    int obj = 0x32434150;
+    uint16_t free_before = cap_free_count();
+    cap_id_t original = cap_create(&obj, CAP_OBJ_SYSTEM, CAP_FULL, 1);
+    TEST_ASSERT(original != KERN_INVALID_ID, "create cap for generation boundary");
+    if (original == KERN_INVALID_ID) {
+        return;
+    }
+
+    cap_id_t boundary = KERN_INVALID_ID;
+    uint16_t retired_slot = UINT16_MAX;
+    uint32_t limit = cap_test_generation_limit();
+    kern_err_t err = cap_test_force_generation(original, limit, &boundary,
+                                                &retired_slot);
+    TEST_ASSERT_EQ(KERN_OK, err, "force cap generation to positive-handle limit");
+    if (err != KERN_OK) {
+        cap_delete(original);
+        return;
+    }
+
+    TEST_ASSERT(sizeof(cap_id_t) == sizeof(int32_t), "cap handle ABI is 32-bit");
+    TEST_ASSERT(boundary > INT16_MAX, "cap handle retains generation above 16-bit ABI");
+    TEST_ASSERT(cap_resolve(original, CAP_OBJ_SYSTEM, CAP_READ) == NULL,
+                "pre-boundary handle becomes stale");
+    TEST_ASSERT(cap_resolve(boundary, CAP_OBJ_SYSTEM, CAP_READ) == &obj,
+                "boundary generation handle resolves");
+
+    cap_delete(boundary);
+    TEST_ASSERT(cap_resolve(boundary, CAP_OBJ_SYSTEM, CAP_READ) == NULL,
+                "retired handle no longer resolves");
+    TEST_ASSERT_EQ((int)free_before - 1, (int)cap_free_count(),
+                   "exhausted slot is not returned to free pool");
+
+    cap_id_t replacement = cap_create(&obj, CAP_OBJ_SYSTEM, CAP_FULL, 1);
+    TEST_ASSERT(replacement != KERN_INVALID_ID,
+                "another slot remains allocatable after retirement");
+    if (replacement != KERN_INVALID_ID) {
+        uint16_t replacement_slot = UINT16_MAX;
+        uint32_t replacement_generation = 0;
+        err = cap_test_handle_info(replacement, &replacement_slot,
+                                   &replacement_generation);
+        TEST_ASSERT_EQ(KERN_OK, err, "decode replacement handle");
+        TEST_ASSERT(replacement_slot != retired_slot,
+                    "allocator never reuses retired slot");
+        TEST_ASSERT(replacement_generation > 0 &&
+                    replacement_generation <= limit,
+                    "replacement slot has a valid non-retired generation");
+        cap_delete(replacement);
+    }
+
+    /* Restore the artificial retirement so the module's resource audit still
+     * checks the real implementation for leaks rather than this test fixture. */
+    err = cap_test_reset_retired_slot(retired_slot);
+    TEST_ASSERT_EQ(KERN_OK, err, "test-only retired slot reset succeeds");
+    TEST_ASSERT_EQ((int)free_before, (int)cap_free_count(),
+                   "generation boundary test restores capability pool");
+}
+
+static void test_object_generation_exhaustion_retires_slot(void) {
+    test_section("Test 17aa: object generation exhaustion retires slot");
+
+    sem_id_t retired_id = sem_create(0, 1);
+    TEST_ASSERT(retired_id != KERN_INVALID_ID,
+                "create semaphore for object generation boundary");
+    if (retired_id == KERN_INVALID_ID) {
+        return;
+    }
+
+    kobject_header_t *retired_hdr =
+        (kobject_header_t *)sem_obj_for_cap(retired_id);
+    retired_hdr->generation = KOBJ_GENERATION_MAX;
+    kern_err_t err = sem_delete(retired_id);
+    TEST_ASSERT_EQ(KERN_OK, err, "delete object at final valid generation");
+    TEST_ASSERT(kobj_generation_is_retired(retired_hdr->generation),
+                "object generation advances to retired sentinel");
+
+    cap_id_t impossible = cap_create_for_gen(NULL, retired_hdr,
+                                             CAP_OBJ_SEMAPHORE, CAP_FULL,
+                                             retired_hdr->generation);
+    TEST_ASSERT(impossible == KERN_INVALID_ID,
+                "retired object cannot receive a capability");
+
+    sem_id_t replacement_id = sem_create(0, 1);
+    TEST_ASSERT(replacement_id != KERN_INVALID_ID,
+                "another object slot remains allocatable");
+    TEST_ASSERT(replacement_id != retired_id,
+                "object allocator skips retired slot");
+    if (replacement_id != KERN_INVALID_ID) {
+        (void)sem_delete(replacement_id);
+    }
+
+    /* Undo the artificial boundary, then prove the allocator can see the
+     * slot again.  Production code has no path that clears this sentinel. */
+    retired_hdr->generation = KOBJ_GENERATION_INITIAL;
+    sem_id_t restored_id = sem_create(0, 1);
+    TEST_ASSERT_EQ((int)retired_id, (int)restored_id,
+                   "test fixture restores retired object slot");
+    if (restored_id != KERN_INVALID_ID) {
+        (void)sem_delete(restored_id);
+    }
+}
+
+/*============================================================================
  * Test 17b: M2-Step3a — 对象 slot 复用后旧 cap 失效 (stale-cap-on-reuse)
  *
  * 这是 M2 验收 #1: "旧 task cap 在 task id 复用后必须返回 stale-cap 错误"
@@ -391,7 +504,7 @@ static void test_cap_object_stale_on_reuse(void) {
     /* 通过 cap_create_for_gen 直接拿带 obj_generation 的 cap,模拟 sys_sem_create */
     void *obj_a = sem_obj_for_cap(sem_a);
     TEST_ASSERT(obj_a != NULL, "M2-Step3a: sem A obj pointer non-null");
-    uint16_t gen_a = ((const kobject_header_t *)obj_a)->generation;
+    uint32_t gen_a = ((const kobject_header_t *)obj_a)->generation;
     TEST_ASSERT_EQ(1, (int)gen_a, "M2-Step3a: sem A generation = 1 (first alloc)");
 
     cap_id_t cap_a = cap_create_for_gen(NULL, obj_a, CAP_OBJ_SEMAPHORE,
@@ -418,7 +531,7 @@ static void test_cap_object_stale_on_reuse(void) {
                    "M2-Step3a: sem B reuses sem A slot (id identical)");
 
     void *obj_b = sem_obj_for_cap(sem_b);
-    uint16_t gen_b = ((const kobject_header_t *)obj_b)->generation;
+    uint32_t gen_b = ((const kobject_header_t *)obj_b)->generation;
     TEST_ASSERT_EQ(2, (int)gen_b,
                    "M2-Step3a: sem B generation = 2 (after bump on delete)");
 
@@ -537,7 +650,7 @@ static void test_cap_task_id_reuse_stale(void) {
 
     /* 取 task A 的真实 generation cap (跟 sys_task_create 一致) */
     void *obj_a = task_obj_for_cap(a);
-    uint16_t gen_a = ((const kobject_header_t *)obj_a)->generation;
+    uint32_t gen_a = ((const kobject_header_t *)obj_a)->generation;
     cap_id_t cap_a = cap_create_for_gen(NULL, obj_a, CAP_OBJ_TASK, CAP_FULL, gen_a);
     TEST_ASSERT(cap_a > 0, "A1: task cap A created");
 
@@ -559,7 +672,7 @@ static void test_cap_task_id_reuse_stale(void) {
                    "A1: task B reuses task A's id (slot recycle)");
 
     void *obj_b = task_obj_for_cap(b);
-    uint16_t gen_b = ((const kobject_header_t *)obj_b)->generation;
+    uint32_t gen_b = ((const kobject_header_t *)obj_b)->generation;
     TEST_ASSERT(gen_b != gen_a, "A1: task B has bumped generation");
 
     /* 模拟"漏撤":构造一个旧 gen_a 的 cap 指向 obj_b。
@@ -611,6 +724,8 @@ static void test_cap_copy_atomic_on_full(void) {
     cap_id_t src_cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER | CAP_GRANT);
     TEST_ASSERT(src_cap > 0, "M2-#8: src cap created");
+    cap_id_t dst_cnode = cap_cnode_cap_create(src, dst, CAP_WRITE);
+    TEST_ASSERT(dst_cnode > 0, "M2-#8: destination CNode authority created");
 
     /* 填满 dst 的 CSpace */
     cap_id_t filler[KERN_TASK_CAP_SLOTS];
@@ -629,6 +744,13 @@ static void test_cap_copy_atomic_on_full(void) {
     cap_id_t bad = cap_copy_to(src, src_cap, dst, CAP_READ);
     TEST_ASSERT(bad == ((cap_id_t)-1),
                 "M2-#8: cap_copy_to fails when dst CSpace full");
+    cap_id_t bad_cnode = cap_cnode_copy(src, src_cap, dst_cnode, CAP_READ);
+    TEST_ASSERT(bad_cnode < 0,
+                "M2-#8: CNode Copy fails when destination is full");
+    cap_id_t moved = KERN_INVALID_ID;
+    kern_err_t move_err = cap_cnode_move(src, src_cap, dst_cnode, &moved);
+    TEST_ASSERT_EQ((int)KERN_ERR_RESOURCE, (int)move_err,
+                   "M2-#8: CNode Move fails atomically when target is full");
 
     /* 验证原子性:
      * - cap_pool 没泄漏 (失败的 child slot 被回滚)
@@ -637,11 +759,12 @@ static void test_cap_copy_atomic_on_full(void) {
     TEST_ASSERT_EQ((int)free_before, (int)cap_free_count(),
                    "M2-#8: no cap_pool slot leaked on failed copy");
 
-    void *p = cap_resolve(src_cap, CAP_OBJ_ENDPOINT, CAP_READ);
+    void *p = cap_lookup_for(src, src_cap, CAP_OBJ_ENDPOINT, CAP_READ);
     TEST_ASSERT(p == &obj,
                 "M2-#8: src cap still resolves after failed copy");
 
     /* cleanup */
+    cap_delete(dst_cnode);
     cap_delete(src_cap);
     for (int i = 0; i < filled; i++) {
         cap_delete(filler[i]);
@@ -743,14 +866,16 @@ static void test_cap_cspace_install_and_revoke(void) {
     int obj = 505;
     cap_id_t cap = cap_create_for(tcb, &obj, CAP_OBJ_CHANNEL, CAP_READ);
     TEST_ASSERT(cap != ((cap_id_t)-1), "cap_create_for succeeds");
-    TEST_ASSERT(tcb->capabilities != 0, "cap installed in task CSpace");
+    TEST_ASSERT(test_cspace_occupied(tcb) != 0,
+                "cap installed in task CSpace");
 
     void *ptr = cap_lookup_for(tcb, cap, CAP_OBJ_CHANNEL, CAP_READ);
     TEST_ASSERT(ptr == &obj, "installed user cap resolves");
 
     kern_err_t err = cap_revoke_for(tcb, cap);
     TEST_ASSERT_EQ((int)KERN_OK, (int)err, "revoke installed cap OK");
-    TEST_ASSERT(tcb->capabilities == 0, "revoke clears task CSpace slot");
+    TEST_ASSERT(test_cspace_occupied(tcb) == 0,
+                "revoke clears task CSpace slot");
 
     ptr = cap_lookup_for(tcb, cap, CAP_OBJ_CHANNEL, CAP_READ);
     TEST_ASSERT(ptr == NULL, "revoked user cap no longer resolves");
@@ -786,9 +911,9 @@ static void test_cap_cspace_extended_slots(void) {
         TEST_ASSERT(ptr == &objects[i], "extended CSpace cap resolves");
     }
 
-    TEST_ASSERT((tcb->capabilities & BIT(16)) != 0,
+    TEST_ASSERT((test_cspace_occupied(tcb) & (UINT64_C(1) << 16)) != 0,
                 "extended CSpace uses slot 16");
-    TEST_ASSERT((tcb->capabilities & BIT(19)) != 0,
+    TEST_ASSERT((test_cspace_occupied(tcb) & (UINT64_C(1) << 19)) != 0,
                 "extended CSpace uses slot 19");
 
     for (uint32_t i = 0; i < 20U; i++) {
@@ -796,7 +921,7 @@ static void test_cap_cspace_extended_slots(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "extended CSpace cap revoked");
     }
-    TEST_ASSERT_EQ(0, (int)tcb->capabilities,
+    TEST_ASSERT_EQ(0, (int)test_cspace_occupied(tcb),
                    "extended CSpace fully cleared");
 
     (void)task_delete(tid);
@@ -807,7 +932,7 @@ static void test_cap_cspace_extended_slots(void) {
  *
  * 历史 CSpace 是 32 slot (uint32 bitmap)。M2-#4 扩到 64 (uint64 bitmap)。
  * 本测试填充 48 个 slot (跨过旧的 32 边界),验证 slot 33-47 可用,
- * 且 capabilities 位图的高 32 位 (bit 32-63) 正确置位。
+ * 且 CNode occupied 位图的高 32 位 (bit 32-63) 正确置位。
  *============================================================================*/
 static void test_cap_cspace_over_32_slots(void) {
     test_section("Test 21b: CSpace slots beyond 32 (M2-#4 64-slot)");
@@ -826,7 +951,7 @@ static void test_cap_cspace_over_32_slots(void) {
         (void)task_delete(tid);
         return;
     }
-    /* cap_task_add 只对 USER 任务登记 cap_set;手工设 attrs 让它走完整路径 */
+    /* cap_task_add 只对 USER 任务登记 CNode;手工设 attrs 走完整路径。 */
     tcb->attrs = TASK_ATTR_USER;
 
     /* 填充 48 个 slot (绕过 32 边界)。cap_pool 上限是 CAP_MAX_COUNT=128,够。 */
@@ -842,13 +967,13 @@ static void test_cap_cspace_over_32_slots(void) {
     }
     TEST_ASSERT_EQ(48, filled, "M2-#4: filled 48 slots (cross 32 boundary)");
 
-    /* 验证高 32 位被置位 (bit 32-47)。capabilities 是 uint64,高 32 位
+    /* 验证高 32 位被置位 (bit 32-47)。occupied 是 uint64,高 32 位
      * 应该有 (1<<0)|(1<<1)|...|(1<<15) = 0xFFFF 在高 word。 */
-    TEST_ASSERT((tcb->capabilities >> 32) != 0,
-                "M2-#4: high 32 bits of capabilities bitmap set");
+    TEST_ASSERT((test_cspace_occupied(tcb) >> 32) != 0,
+                "M2-#4: high 32 bits of CNode bitmap set");
 
     /* slot 40 应该被填充 */
-    TEST_ASSERT((tcb->capabilities & ((uint64_t)BIT(40))) != 0,
+    TEST_ASSERT((test_cspace_occupied(tcb) & (UINT64_C(1) << 40)) != 0,
                 "M2-#4: slot 40 populated");
 
     /* cap_resolve 应能 resolve slot 40 的 cap */
@@ -859,7 +984,7 @@ static void test_cap_cspace_over_32_slots(void) {
     for (int i = 0; i < filled; i++) {
         cap_delete(caps[i]);
     }
-    TEST_ASSERT_EQ(0, (int)tcb->capabilities,
+    TEST_ASSERT_EQ(0, (int)test_cspace_occupied(tcb),
                    "M2-#4: all slots cleared after delete");
 
     (void)task_delete(tid);
@@ -991,7 +1116,8 @@ static void test_cap_move_to_task(void) {
     cap_id_t moved = (cap_id_t)-1;
     kern_err_t err = cap_move_to(src, cap, dst, &moved);
     TEST_ASSERT_EQ((int)KERN_OK, (int)err, "move cap OK");
-    TEST_ASSERT_EQ((int)cap, (int)moved, "move preserves cap id for now");
+    TEST_ASSERT(moved != cap && cap_is_local_cptr(moved),
+                "move returns destination-local CPtr");
 
     void *ptr = cap_lookup_for(src, cap, CAP_OBJ_CHANNEL, CAP_READ);
     TEST_ASSERT(ptr == NULL, "source no longer has moved cap");
@@ -1150,6 +1276,230 @@ static void test_ipc_cap_move_success(void) {
     TEST_ASSERT(ptr == NULL, "src lost cap after MOVE");
 
     (void)cap_revoke_for(dst, out[0]);
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+}
+
+/*============================================================================
+ * Test 24c: explicit prepare/commit transaction publishes one atomic batch
+ *============================================================================*/
+
+static void test_cap_explicit_transaction(void) {
+    test_section("Test 24c: explicit cap transaction commit");
+
+    task_id_t src_id = task_create("captxs", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("captxd", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "transaction tasks created");
+    if (src_id < 0 || dst_id < 0) {
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int copy_obj = 2101;
+    int move_obj = 2102;
+    int revoke_obj = 2103;
+    cap_id_t copy_cap = cap_create_for(
+        src, &copy_obj, CAP_OBJ_ENDPOINT,
+        CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    cap_id_t move_cap = cap_create_for(
+        src, &move_obj, CAP_OBJ_CHANNEL,
+        CAP_READ | CAP_WRITE | CAP_TRANSFER);
+    cap_id_t revoke_cap = cap_create_for(
+        src, &revoke_obj, CAP_OBJ_EVENT, CAP_READ);
+    TEST_ASSERT(copy_cap >= 0 && move_cap >= 0 && revoke_cap >= 0,
+                "transaction source caps created");
+
+    cap_transaction_t txn;
+    cap_txn_begin(&txn);
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_txn_prepare_copy(&txn, src, copy_cap, dst,
+                                             CAP_READ),
+                   "transaction COPY prepared");
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_txn_prepare_move(&txn, src, move_cap, dst,
+                                             CAP_READ),
+                   "transaction MOVE prepared");
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_txn_prepare_revoke(&txn, src, revoke_cap),
+                   "transaction REVOKE prepared");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)cap_txn_commit(&txn),
+                   "transaction batch committed");
+    TEST_ASSERT_EQ((int)CAP_TXN_STATE_COMMITTED, (int)txn.state,
+                   "transaction records committed state");
+
+    TEST_ASSERT(cap_lookup_for(src, copy_cap, CAP_OBJ_ENDPOINT, CAP_READ) ==
+                    &copy_obj,
+                "COPY preserves source cap");
+    TEST_ASSERT(cap_lookup_for(dst, txn.results[0], CAP_OBJ_ENDPOINT,
+                               CAP_READ) == &copy_obj,
+                "COPY publishes destination cap");
+    TEST_ASSERT(cap_lookup_for(dst, txn.results[0], CAP_OBJ_ENDPOINT,
+                               CAP_WRITE) == NULL,
+                "COPY attenuates destination rights");
+
+    TEST_ASSERT(cap_lookup_for(src, move_cap, CAP_OBJ_CHANNEL, CAP_READ) == NULL,
+                "MOVE retires source-visible CPtr");
+    TEST_ASSERT(cap_lookup_for(dst, txn.results[1], CAP_OBJ_CHANNEL,
+                               CAP_READ) == &move_obj,
+                "MOVE publishes destination cap");
+    TEST_ASSERT(cap_lookup_for(dst, txn.results[1], CAP_OBJ_CHANNEL,
+                               CAP_WRITE) == NULL,
+                "MOVE attenuates destination rights");
+    TEST_ASSERT(cap_lookup_for(src, revoke_cap, CAP_OBJ_EVENT, CAP_READ) == NULL,
+                "REVOKE removes source cap in same commit");
+
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE, (int)cap_txn_commit(&txn),
+                   "committed transaction cannot commit twice");
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE, (int)cap_txn_rollback(&txn),
+                   "committed transaction cannot roll back");
+
+    (void)cap_revoke_for(src, copy_cap);
+    (void)cap_revoke_for(dst, txn.results[0]);
+    (void)cap_revoke_for(dst, txn.results[1]);
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+}
+
+/*============================================================================
+ * Test 24d: failed prepare validation consumes no cap/CNode generations
+ *============================================================================*/
+
+static void test_cap_transaction_failure_is_read_only(void) {
+    test_section("Test 24d: failed cap transaction is read-only");
+
+    task_id_t src_id = task_create("captxfs", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("captxfd", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0,
+                "failed-transaction tasks created");
+    if (src_id < 0 || dst_id < 0) {
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int good_obj = 2201;
+    int bad_obj = 2202;
+    cap_id_t good = cap_create_for(src, &good_obj, CAP_OBJ_ENDPOINT,
+                                   CAP_READ | CAP_TRANSFER);
+    cap_id_t bad = cap_create_for(src, &bad_obj, CAP_OBJ_CHANNEL, CAP_READ);
+    TEST_ASSERT(good >= 0 && bad >= 0, "failure source caps created");
+
+    cnode_t *dst_cnode = cap_space_of(dst);
+    TEST_ASSERT_NOT_NULL(dst_cnode, "failure target CNode available");
+    if (dst_cnode == NULL) {
+        (void)cap_revoke_for(src, good);
+        (void)cap_revoke_for(src, bad);
+        (void)task_delete(src_id);
+        (void)task_delete(dst_id);
+        return;
+    }
+    uint8_t free_slot = 0;
+    while (free_slot < KERN_TASK_CAP_SLOTS &&
+           (dst_cnode->occupied & (UINT64_C(1) << free_slot)) != 0U) {
+        free_slot++;
+    }
+    TEST_ASSERT(free_slot < KERN_TASK_CAP_SLOTS,
+                "failure target has a free CNode slot");
+    if (free_slot >= KERN_TASK_CAP_SLOTS) {
+        (void)cap_revoke_for(src, good);
+        (void)cap_revoke_for(src, bad);
+        (void)task_delete(src_id);
+        (void)task_delete(dst_id);
+        return;
+    }
+    uint32_t generation_before = dst_cnode->slots[free_slot].generation;
+    uint64_t occupied_before = dst_cnode->occupied;
+    uint16_t pool_before = cap_free_count();
+
+    cap_transaction_t txn;
+    cap_txn_begin(&txn);
+    (void)cap_txn_prepare_copy(&txn, src, good, dst, CAP_READ);
+    (void)cap_txn_prepare_copy(&txn, src, bad, dst, CAP_READ);
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, (int)cap_txn_commit(&txn),
+                   "invalid late op aborts complete transaction");
+    TEST_ASSERT_EQ((int)CAP_TXN_STATE_ABORTED, (int)txn.state,
+                   "failed transaction records aborted state");
+    TEST_ASSERT(txn.results[0] < 0 && txn.results[1] < 0,
+                "failed transaction publishes no results");
+    TEST_ASSERT_EQ((int)pool_before, (int)cap_free_count(),
+                   "failed transaction consumes no global cap slot");
+    TEST_ASSERT(dst_cnode->occupied == occupied_before,
+                "failed transaction changes no CNode membership");
+    TEST_ASSERT_EQ((int)generation_before,
+                   (int)dst_cnode->slots[free_slot].generation,
+                   "failed transaction consumes no local generation");
+    TEST_ASSERT(cap_lookup_for(src, good, CAP_OBJ_ENDPOINT, CAP_READ) ==
+                    &good_obj,
+                "failed transaction preserves transferable source");
+    TEST_ASSERT(cap_lookup_for(src, bad, CAP_OBJ_CHANNEL, CAP_READ) == &bad_obj,
+                "failed transaction preserves failing source");
+    TEST_ASSERT_EQ((int)KERN_OK, (int)cap_txn_rollback(&txn),
+                   "aborted transaction descriptor rolls back");
+    TEST_ASSERT_EQ((int)KERN_ERR_STATE,
+                   (int)cap_txn_prepare_copy(&txn, src, good, dst, CAP_READ),
+                   "rolled-back descriptor requires a new begin");
+
+    /* Leave exactly one destination slot free, then request two copies.  The
+     * full batch must fail during reservation without consuming that slot's
+     * local generation or either reserved global pool slot. */
+    cap_id_t filler[KERN_TASK_CAP_SLOTS - 1];
+    int filler_obj = 2203;
+    int filled = 0;
+    for (int i = 0; i < KERN_TASK_CAP_SLOTS - 1; i++) {
+        filler[i] = cap_create_for(dst, &filler_obj, CAP_OBJ_EVENT, CAP_READ);
+        if (filler[i] < 0) {
+            break;
+        }
+        filled++;
+    }
+    TEST_ASSERT_EQ(KERN_TASK_CAP_SLOTS - 1, filled,
+                   "batch-capacity target leaves one free slot");
+    free_slot = 0;
+    while (free_slot < KERN_TASK_CAP_SLOTS &&
+           (dst_cnode->occupied & (UINT64_C(1) << free_slot)) != 0U) {
+        free_slot++;
+    }
+    TEST_ASSERT(free_slot < KERN_TASK_CAP_SLOTS,
+                "batch-capacity target retains one free slot");
+    if (free_slot >= KERN_TASK_CAP_SLOTS) {
+        for (int i = 0; i < filled; i++) {
+            (void)cap_revoke_for(dst, filler[i]);
+        }
+        (void)cap_revoke_for(src, good);
+        (void)cap_revoke_for(src, bad);
+        (void)task_delete(src_id);
+        (void)task_delete(dst_id);
+        return;
+    }
+    generation_before = dst_cnode->slots[free_slot].generation;
+    occupied_before = dst_cnode->occupied;
+    pool_before = cap_free_count();
+
+    cap_txn_begin(&txn);
+    (void)cap_txn_prepare_copy(&txn, src, good, dst, CAP_READ);
+    (void)cap_txn_prepare_copy(&txn, src, good, dst, CAP_READ);
+    TEST_ASSERT_EQ((int)KERN_ERR_RESOURCE, (int)cap_txn_commit(&txn),
+                   "batch capacity is reserved before publication");
+    TEST_ASSERT_EQ((int)pool_before, (int)cap_free_count(),
+                   "capacity failure consumes no global slots");
+    TEST_ASSERT(dst_cnode->occupied == occupied_before,
+                "capacity failure publishes no destination cap");
+    TEST_ASSERT_EQ((int)generation_before,
+                   (int)dst_cnode->slots[free_slot].generation,
+                   "capacity failure consumes no CNode generation");
+
+    for (int i = 0; i < filled; i++) {
+        (void)cap_revoke_for(dst, filler[i]);
+    }
+    (void)cap_revoke_for(src, good);
+    (void)cap_revoke_for(src, bad);
     (void)task_delete(src_id);
     (void)task_delete(dst_id);
 }
@@ -1413,12 +1763,12 @@ static void test_cap_derive_for_restart_strips_grant(void) {
         return;
     }
     new_task->attrs = TASK_ATTR_USER;
-    uint32_t new_caps_before = new_task->capabilities;
+    uint64_t new_caps_before = test_cspace_occupied(new_task);
 
     /* Request CAP_FULL — CAP_GRANT must be stripped regardless. */
     cap_id_t child = cap_derive_for_restart(sup, parent, new_task, CAP_FULL);
     TEST_ASSERT(child != ((cap_id_t)-1), "derive_for_restart succeeds");
-    TEST_ASSERT(new_task->capabilities != new_caps_before,
+    TEST_ASSERT(test_cspace_occupied(new_task) != new_caps_before,
                 "child installed into NEW task cspace");
 
     /* The child's rights must be CAP_FULL & ~CAP_GRANT. */
@@ -1481,6 +1831,252 @@ static void test_cap_derive_for_restart_no_grant(void) {
 }
 #endif /* CAP_RESTART_SUBSET */
 
+/*============================================================================
+ * Test 32: first-class CNode cap directs copy/mint/move
+ *============================================================================*/
+
+static void test_cnode_cap_operations(void) {
+    test_section("Test 32: CNode cap Copy/Mint/Move");
+
+    uint16_t free_before = cap_free_count();
+    task_id_t src_id = task_create("cnode_src", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("cnode_dst", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "CNode source/target tasks created");
+    if (src_id < 0 || dst_id < 0) {
+        if (src_id >= 0) (void)task_delete(src_id);
+        if (dst_id >= 0) (void)task_delete(dst_id);
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int object = 0x321;
+    cap_id_t source = cap_create_for(src, &object, CAP_OBJ_ENDPOINT, CAP_FULL);
+    cap_id_t dst_node = cap_cnode_cap_create(src, dst, CAP_WRITE);
+    TEST_ASSERT(source >= 0 && dst_node >= 0,
+                "source and destination CNode caps created");
+
+    cap_id_t copied = cap_cnode_copy(src, source, dst_node, CAP_READ);
+    TEST_ASSERT(copied >= 0, "CNode Copy succeeds");
+    TEST_ASSERT(cap_lookup_for(src, source, CAP_OBJ_ENDPOINT, CAP_READ) == &object,
+                "CNode Copy preserves source");
+    TEST_ASSERT(cap_lookup_for(dst, copied, CAP_OBJ_ENDPOINT, CAP_READ) == &object,
+                "CNode Copy installs into target");
+
+    const uint32_t badge = UINT32_C(0xC0DECAFE);
+    cap_id_t minted = cap_cnode_mint(src, source, dst_node, CAP_READ, badge);
+    TEST_ASSERT(minted >= 0, "CNode Mint succeeds");
+    TEST_ASSERT_EQ((int)badge, (int)cap_get_badge(minted),
+                   "CNode Mint records badge");
+    TEST_ASSERT(cap_lookup_for(dst, minted, CAP_OBJ_ENDPOINT, CAP_WRITE) == NULL,
+                "CNode Mint cannot amplify rights");
+
+    int moved_object = 0x654;
+    cap_id_t moved_source = cap_create_for(src, &moved_object,
+                                           CAP_OBJ_CHANNEL,
+                                           CAP_READ | CAP_TRANSFER);
+    cap_id_t moved = KERN_INVALID_ID;
+    kern_err_t err = cap_cnode_move(src, moved_source, dst_node, &moved);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "CNode Move succeeds");
+    TEST_ASSERT(moved != moved_source && cap_is_local_cptr(moved),
+                "CNode Move returns target-local CPtr");
+    TEST_ASSERT(cap_lookup_for(src, moved, CAP_OBJ_CHANNEL, CAP_READ) == NULL,
+                "CNode Move removes source membership");
+    TEST_ASSERT(cap_lookup_for(dst, moved, CAP_OBJ_CHANNEL, CAP_READ) == &moved_object,
+                "CNode Move installs target membership");
+
+    cap_id_t readonly_node = cap_cnode_cap_create(src, dst, CAP_READ);
+    TEST_ASSERT(readonly_node >= 0, "read-only CNode cap created");
+    TEST_ASSERT(cap_cnode_copy(src, source, readonly_node, CAP_READ) < 0,
+                "CNode Copy rejects destination without CAP_WRITE");
+
+    /* Destroying the target revokes CNode caps held in another task. */
+    (void)task_delete(dst_id);
+    TEST_ASSERT(cap_lookup_for(src, dst_node, CAP_OBJ_CNODE, CAP_WRITE) == NULL,
+                "target death revokes external CNode cap");
+    (void)task_delete(src_id);
+    TEST_ASSERT_EQ((int)free_before, (int)cap_free_count(),
+                   "CNode operations leave no global cap leak");
+}
+
+/*============================================================================
+ * Test 33: CNode object and local-slot generations survive TCB reuse
+ *============================================================================*/
+
+static void test_cnode_generation_on_task_reuse(void) {
+    test_section("Test 33: CNode generation survives task reuse");
+
+    task_id_t first_id = task_create("cnode_gen_a", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(first_id >= 0, "first CNode generation task created");
+    if (first_id < 0) return;
+
+    tcb_t *first = task_get_tcb(first_id);
+    first->attrs = TASK_ATTR_USER;
+    cnode_t *first_node = cap_space_of(first);
+    TEST_ASSERT(first_node != NULL, "first task owns root CNode");
+    if (first_node == NULL) {
+        (void)task_delete(first_id);
+        return;
+    }
+
+    uint32_t object_generation = first_node->hdr.generation;
+    int object = 7;
+    cap_id_t cap = cap_create_for(first, &object, CAP_OBJ_EVENT, CAP_READ);
+    TEST_ASSERT(cap >= 0, "cap installed for local generation test");
+
+    uint8_t local_slot = UINT8_MAX;
+    for (uint8_t i = 0; i < KERN_TASK_CAP_SLOTS; i++) {
+        if ((first_node->occupied & (UINT64_C(1) << i)) != 0 &&
+            first_node->slots[i].cap == cap) {
+            local_slot = i;
+            break;
+        }
+    }
+    TEST_ASSERT(local_slot != UINT8_MAX, "installed cap has a CNode leaf slot");
+    uint32_t local_generation = local_slot != UINT8_MAX
+                              ? first_node->slots[local_slot].generation : 0;
+    cap_delete(cap);
+    if (local_slot != UINT8_MAX) {
+        TEST_ASSERT(first_node->slots[local_slot].generation > local_generation,
+                    "deleting cap advances local slot generation");
+    }
+
+    (void)task_delete(first_id);
+    task_id_t second_id = task_create("cnode_gen_b", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT_EQ((int)first_id, (int)second_id,
+                   "task allocator reuses the retired TCB slot");
+    tcb_t *second = task_get_tcb(second_id);
+    cnode_t *second_node = cap_space_of(second);
+    TEST_ASSERT(second_node == first_node, "task reuse keeps persistent CNode storage");
+    TEST_ASSERT(second_node != NULL &&
+                second_node->hdr.generation != object_generation,
+                "task reuse advances CNode object generation");
+    if (second_node != NULL && local_slot != UINT8_MAX) {
+        TEST_ASSERT(second_node->slots[local_slot].generation > local_generation,
+                    "task reuse does not reset local slot generation");
+    }
+    (void)task_delete(second_id);
+}
+
+/*============================================================================
+ * Test 34: user handles are CNode-local CPtrs, not backing-pool handles
+ *============================================================================*/
+
+static void test_local_cptr_isolation_and_stale_rejection(void) {
+    test_section("Test 34: local CPtr isolation and stale rejection");
+
+    task_id_t a_id = task_create("cptr_a", cap_test_task, NULL, 10, 512);
+    task_id_t b_id = task_create("cptr_b", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(a_id >= 0 && b_id >= 0, "local CPtr tasks created");
+    if (a_id < 0 || b_id < 0) return;
+
+    tcb_t *a = task_get_tcb(a_id);
+    tcb_t *b = task_get_tcb(b_id);
+    a->attrs = TASK_ATTR_USER;
+    b->attrs = TASK_ATTR_USER;
+    int a_obj = 101;
+    int b_obj = 202;
+    cap_id_t a_cap = cap_create_for(a, &a_obj, CAP_OBJ_ENDPOINT, CAP_READ);
+    cap_id_t b_cap = cap_create_for(b, &b_obj, CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(cap_is_local_cptr(a_cap) && cap_is_local_cptr(b_cap),
+                "user-visible handles carry the local CPtr tag");
+    TEST_ASSERT(a_cap != b_cap,
+                "different root CNodes produce distinct CPtr namespaces");
+    TEST_ASSERT(cap_lookup_for(a, b_cap, CAP_OBJ_ENDPOINT, CAP_READ) == NULL,
+                "task A cannot resolve task B CPtr");
+    TEST_ASSERT(cap_lookup_for(b, a_cap, CAP_OBJ_ENDPOINT, CAP_READ) == NULL,
+                "task B cannot resolve task A CPtr");
+
+    uint8_t old_cnode = 0;
+    uint8_t old_slot = 0;
+    uint32_t old_generation = 0;
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_test_local_handle_info(a_cap, &old_cnode,
+                                                   &old_slot,
+                                                   &old_generation),
+                   "local CPtr fields decode");
+    TEST_ASSERT_EQ((int)a_id, (int)old_cnode,
+                   "local CPtr names its root CNode index");
+
+    TEST_ASSERT_EQ((int)KERN_OK, (int)cap_delete_for(a, a_cap),
+                   "local CPtr delete succeeds");
+    cap_id_t replacement = cap_create_for(a, &a_obj, CAP_OBJ_ENDPOINT,
+                                           CAP_READ);
+    TEST_ASSERT(cap_is_local_cptr(replacement) && replacement != a_cap,
+                "local slot reuse advances visible generation");
+    TEST_ASSERT(cap_lookup_for(a, a_cap, CAP_OBJ_ENDPOINT, CAP_READ) == NULL,
+                "stale local CPtr is rejected after slot reuse");
+    TEST_ASSERT(cap_lookup_for(a, replacement, CAP_OBJ_ENDPOINT, CAP_READ) ==
+                &a_obj, "replacement local CPtr resolves");
+
+    (void)task_delete(a_id);
+    task_id_t reused_id = task_create("cptr_reuse", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT_EQ((int)a_id, (int)reused_id,
+                   "local CPtr test reuses root CNode index");
+    tcb_t *reused = task_get_tcb(reused_id);
+    reused->attrs = TASK_ATTR_USER;
+    cap_id_t after_reuse = cap_create_for(reused, &a_obj,
+                                           CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(cap_lookup_for(reused, replacement, CAP_OBJ_ENDPOINT,
+                               CAP_READ) == NULL,
+                "task reuse cannot revive an old local CPtr");
+    TEST_ASSERT(after_reuse != replacement,
+                "task reuse retains local slot generation history");
+
+    (void)task_delete(reused_id);
+    (void)task_delete(b_id);
+}
+
+/*============================================================================
+ * Test 35: local CPtr generation exhaustion permanently retires the slot
+ *============================================================================*/
+
+static void test_local_cptr_generation_exhaustion(void) {
+    test_section("Test 35: local CPtr generation exhaustion");
+
+    task_id_t tid = task_create("cptr_limit", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "local generation task created");
+    if (tid < 0) return;
+    tcb_t *task = task_get_tcb(tid);
+    task->attrs = TASK_ATTR_USER;
+
+    int object = 303;
+    cap_id_t original = cap_create_for(task, &object, CAP_OBJ_EVENT, CAP_READ);
+    cap_id_t boundary = KERN_INVALID_ID;
+    uint8_t retired_slot = UINT8_MAX;
+    kern_err_t err = cap_test_force_local_generation(
+        task, original, cap_test_local_generation_limit(),
+        &boundary, &retired_slot);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err,
+                   "force local CPtr to final generation");
+    TEST_ASSERT(boundary != original && cap_is_local_cptr(boundary),
+                "boundary handle remains a local CPtr");
+    TEST_ASSERT(cap_lookup_for(task, original, CAP_OBJ_EVENT, CAP_READ) == NULL,
+                "pre-boundary local CPtr becomes stale");
+    TEST_ASSERT(cap_lookup_for(task, boundary, CAP_OBJ_EVENT, CAP_READ) ==
+                &object, "final local generation resolves before delete");
+
+    TEST_ASSERT_EQ((int)KERN_OK, (int)cap_delete_for(task, boundary),
+                   "delete final local generation");
+    cap_id_t next = cap_create_for(task, &object, CAP_OBJ_EVENT, CAP_READ);
+    uint8_t next_cnode = 0;
+    uint8_t next_slot = UINT8_MAX;
+    uint32_t next_generation = 0;
+    (void)cap_test_local_handle_info(next, &next_cnode, &next_slot,
+                                     &next_generation);
+    TEST_ASSERT(next >= 0 && next_slot != retired_slot,
+                "allocator skips permanently retired local slot");
+
+    (void)cap_delete_for(task, next);
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_test_reset_retired_local_slot(task, retired_slot),
+                   "test hook restores retired local slot");
+    (void)task_delete(tid);
+}
+
 static void test_capability_module(void) {
     test_cap_create_basic();
     test_cap_create_pool_full();
@@ -1499,7 +2095,9 @@ static void test_capability_module(void) {
     test_cap_id0_roundtrip();
     test_cap_no_permission();
     test_cap_stale_generation();
+    test_cap_generation_exhaustion_retires_slot();
     test_cap_object_stale_on_reuse();
+    test_object_generation_exhaustion_retires_slot();
     test_cap_mint_badge();
     test_cap_task_id_reuse_stale();
     test_cap_copy_atomic_on_full();
@@ -1515,6 +2113,8 @@ static void test_capability_module(void) {
     test_ipc_cap_transfer_rollback();
     test_ipc_cap_move_rollback();
     test_ipc_cap_move_success();
+    test_cap_explicit_transaction();
+    test_cap_transaction_failure_is_read_only();
     test_cap_object_refcount();
     test_cap_cleanup_callback();
     test_cap_cleanup_outer_lock_safe_point();
@@ -1524,6 +2124,10 @@ static void test_capability_module(void) {
     test_cap_derive_for_restart_strips_grant();
     test_cap_derive_for_restart_no_grant();
 #endif
+    test_cnode_cap_operations();
+    test_cnode_generation_on_task_reuse();
+    test_local_cptr_isolation_and_stale_rejection();
+    test_local_cptr_generation_exhaustion();
 }
 
 TEST_MODULE_REGISTER(capability, test_capability_module);

@@ -4,8 +4,8 @@
  */
 
 #include "fs_runtime.h"
-#include "capability.h"
 #include "nameserver.h"
+#include "user_api.h"
 
 #if CAP_ENABLE
 
@@ -123,7 +123,10 @@ int fs_runtime_release_service(cap_id_t service_cap) {
         err = nameserver_lookup_ack(fs_runtime_inbox_ep_cap);
     }
     if (service_cap > 0) {
-        cap_delete(service_cap);
+        int cap_err = sys_cap_revoke(service_cap);
+        if (err == KERN_OK && cap_err != KERN_OK) {
+            err = cap_err;
+        }
     }
     return err;
 }

@@ -7,6 +7,7 @@
 #include "root_bootstrap.h"
 #include "capability.h"
 #include "endpoint.h"
+#include "factory.h"
 #include "user_api.h"
 #include "task.h"
 #include "nameserver.h"
@@ -690,6 +691,10 @@ static void test_fs_runtime_lookup_release_caps(void) {
                        "FS runtime binds inbox cap for leak test");
     }
 
+    void *inbox_obj = inbox_ep >= 0
+        ? endpoint_obj_for_cap(inbox_ep) : NULL;
+    uint16_t inbox_refs_before = inbox_obj != NULL
+        ? cap_object_refcount(inbox_obj, CAP_OBJ_ENDPOINT) : 0U;
     uint16_t cap_free_before_lookups = cap_free_count();
     for (uint32_t i = 0; i < 4U; i++) {
         cap_id_t lookup_cap = KERN_INVALID_ID;
@@ -702,12 +707,18 @@ static void test_fs_runtime_lookup_release_caps(void) {
         TEST_ASSERT_EQ((int)KERN_OK,
                        fs_runtime_release_service(lookup_cap),
                        "FS runtime release service OK");
+        /* ACK completion and server-side temporary-cap release are separate
+         * scheduling events.  Track this inbox object instead of the global
+         * cap pool, which can change concurrently on the other core. */
         for (uint32_t wait = 0;
-             wait < 4U && cap_free_count() != cap_free_before_lookups;
+             wait < 100U && inbox_obj != NULL &&
+             cap_object_refcount(inbox_obj, CAP_OBJ_ENDPOINT) >
+                 inbox_refs_before;
              wait++) {
             task_delay(1);
         }
-        TEST_ASSERT(cap_free_count() >= cap_free_before_lookups,
+        TEST_ASSERT_EQ((int)inbox_refs_before,
+                    (int)cap_object_refcount(inbox_obj, CAP_OBJ_ENDPOINT),
                     "FS runtime release restores temporary cap");
     }
 
@@ -1117,10 +1128,10 @@ static void test_root_bootstrap_initial_task_cap(void) {
                    "root bootstrap records task id");
     TEST_ASSERT(info.root_endpoint >= 0,
                 "root bootstrap records root endpoint");
-    TEST_ASSERT_EQ(2, (int)info.cap_count,
+    TEST_ASSERT_EQ(3, (int)info.cap_count,
                    "root bootstrap records initial caps");
 
-    if (err == KERN_OK && info.cap_count > 1) {
+    if (err == KERN_OK && info.cap_count > 2) {
         TEST_ASSERT_EQ((int)CAP_OBJ_TASK, (int)info.caps[0].obj_type,
                        "root bootstrap cap type is task");
         TEST_ASSERT_EQ((int)CAP_FULL, (int)info.caps[0].rights,
@@ -1146,6 +1157,21 @@ static void test_root_bootstrap_initial_task_cap(void) {
             TEST_ASSERT(endpoint_exists(ep_id),
                         "root bootstrap endpoint exists");
         }
+
+        TEST_ASSERT_EQ((int)CAP_OBJ_FACTORY, (int)info.caps[2].obj_type,
+                       "root bootstrap cap type is Factory");
+        TEST_ASSERT_EQ((int)CAP_FULL, (int)info.caps[2].rights,
+                       "root bootstrap Factory cap has full rights");
+        TEST_ASSERT_EQ((int)info.factory_cap, (int)info.caps[2].cap,
+                       "root bootstrap records Factory cap");
+
+        void *factory_obj = cap_lookup_for(root, info.factory_cap,
+                                           CAP_OBJ_FACTORY, CAP_WRITE);
+        TEST_ASSERT_NOT_NULL(factory_obj,
+                             "root task can resolve initial Factory cap");
+        TEST_ASSERT_EQ((int)factory_supported_mask(),
+                       (int)cap_get_badge(info.factory_cap),
+                       "root Factory authorizes supported object types");
     }
 
     err = root_bootstrap_prepare(root);
@@ -1308,7 +1334,7 @@ static void test_root_bootstrap_create_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "root service test root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "root service cleanup restored all caps");
 }
 
@@ -1382,7 +1408,7 @@ static void test_root_bootstrap_start_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "root service start root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "root service start cleanup restored all caps");
 }
 
@@ -1487,7 +1513,7 @@ static void test_root_bootstrap_service_endpoint(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "service endpoint test root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "service endpoint cleanup restored all caps");
 }
 
@@ -1565,7 +1591,7 @@ static void test_root_bootstrap_service_ipc(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "service IPC root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "service IPC cleanup restored all caps");
 }
 
@@ -1765,7 +1791,7 @@ static void test_nameserver_ping_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "name server ping root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "name server ping cleanup restored caps");
 }
 
@@ -1879,7 +1905,7 @@ static void test_nameserver_register_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "name server register root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "name server register cleanup restored caps");
 }
 
@@ -2034,7 +2060,7 @@ static void test_nameserver_lookup_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "lookup root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "lookup cleanup restored caps");
 }
 
@@ -2219,7 +2245,7 @@ static void test_nameserver_negative_paths(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "negative root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "negative cleanup restored caps");
 }
 
@@ -2405,7 +2431,7 @@ static void test_nameserver_unregister_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "unregister root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "unregister cleanup restored caps");
 }
 
@@ -2491,7 +2517,7 @@ static void test_nameserver_protocol_error_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "protocol errors root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "protocol errors cleanup restored caps");
 }
 
@@ -2601,7 +2627,7 @@ static void test_nameserver_cap_recycle_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "cap recycle root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "cap recycle cleanup restored caps");
 }
 
@@ -2711,7 +2737,7 @@ static void test_nameserver_registry_full_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "registry full root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "registry full cleanup restored caps");
 }
 
@@ -2895,7 +2921,7 @@ static void test_nameserver_unregister_owner_service(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "owner unregister root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "owner unregister cleanup restored caps");
 }
 
@@ -3005,7 +3031,7 @@ static void test_fs_server_basic_session(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "FS server root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "FS server cleanup restored caps");
 }
 
@@ -3121,7 +3147,7 @@ static void test_fs_server_negative_protocol(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "FS negative root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "FS negative cleanup restored caps");
 }
 

@@ -23,6 +23,7 @@
 
 #include "syscall.h"
 #include "ipc_transfer.h"
+#include "factory.h"
 #include "fs_types.h"   /* Phase F3: dirent_t/vfs_stat_t (原在 inode.h) */
 
 #if SYSCALL_ENABLE
@@ -168,20 +169,20 @@ static inline int sys_task_create(const char *name, void (*entry)(void *),
                      (int)(uintptr_t)arg, priority, stack_size);
 }
 
-static inline int sys_task_start(int task_id) {
-    return sys_call1(SYSCALL_TASK_START, task_id);
+static inline int sys_task_start(int task_cap) {
+    return sys_call1(SYSCALL_TASK_START, task_cap);
 }
 
-static inline int sys_task_suspend(int task_id) {
-    return sys_call1(SYSCALL_TASK_SUSPEND, task_id);
+static inline int sys_task_suspend(int task_cap) {
+    return sys_call1(SYSCALL_TASK_SUSPEND, task_cap);
 }
 
-static inline int sys_task_resume(int task_id) {
-    return sys_call1(SYSCALL_TASK_RESUME, task_id);
+static inline int sys_task_resume(int task_cap) {
+    return sys_call1(SYSCALL_TASK_RESUME, task_cap);
 }
 
-static inline int sys_task_delete(int task_id) {
-    return sys_call1(SYSCALL_TASK_DELETE, task_id);
+static inline int sys_task_delete(int task_cap) {
+    return sys_call1(SYSCALL_TASK_DELETE, task_cap);
 }
 
 static inline int sys_task_self(void) {
@@ -364,7 +365,7 @@ static inline int sys_ep_sender(int ep_cap) {
 
 /* M2-Step2c: 在自己 CSpace 中查第 index 个 obj_type 类型的 cap。
  * 替代历史 pair-table/packed-arg 机制。无全局状态、SMP 安全。
- * 返回 (int)cap_id_t,失败返回 KERN_INVALID_ID (=0)。 */
+ * 返回 (int)cap_id_t,失败返回 KERN_INVALID_ID (=-1)。 */
 static inline int sys_cap_self_slot(int obj_type, int index) {
     return sys_call2(SYSCALL_CAP_SELF_SLOT, (uint32_t)obj_type, (uint32_t)index);
 }
@@ -388,6 +389,13 @@ static inline int sys_cap_rights(int cap) {
     return sys_call1(SYSCALL_CAP_RIGHTS, cap);
 }
 
+static inline int sys_factory_create(
+    int factory_cap, const factory_create_request_t *request) {
+    return sys_call3(SYSCALL_FACTORY_CREATE, factory_cap,
+                     (int)(uintptr_t)request,
+                     (int)sizeof(factory_create_request_t));
+}
+
 /*============================================================================
  * Channel (P2P) — 用户态内联封装
  *============================================================================*/
@@ -400,8 +408,11 @@ static inline int sys_ch_delete(int ch_id) {
     return sys_call1(SYSCALL_CH_DELETE, ch_id);
 }
 
-static inline int sys_ch_connect(int ch_id, int peer_a, int peer_b) {
-    return sys_call3(SYSCALL_CH_CONNECT, ch_id, peer_a, peer_b);
+/* User callers name both peers with TASK caps, never raw task IDs. */
+static inline int sys_ch_connect(int ch_cap, int peer_a_task_cap,
+                                 int peer_b_task_cap) {
+    return sys_call3(SYSCALL_CH_CONNECT, ch_cap,
+                     peer_a_task_cap, peer_b_task_cap);
 }
 
 static inline int sys_ch_send(int ch_id, const void *msg, int timeout) {
@@ -448,7 +459,7 @@ static inline int sys_mem_size(int mem_cap) {
     return sys_call1(SYSCALL_MEM_SIZE, mem_cap);
 }
 
-/* map memblock cap 进当前任务 MPU,返回可读写指针 (user 任务专用) */
+/* 兼容入口：把 Frame cap 映射进当前任务 MPU，返回用户地址。 */
 static inline void *sys_mem_map(int mem_cap, int rights) {
     return (void *)(uintptr_t)sys_call2(SYSCALL_MEM_MAP, mem_cap, rights);
 }
@@ -657,8 +668,8 @@ static inline int sys_mmio_request(int base, int size, int width) {
  * SCHED_RR / SCHED_NORMAL restore round-robin. RT tasks should use priority
  * 0..15 (RT band); normal tasks use 16..31.
  */
-static inline int sys_task_set_policy(int task_id, int policy) {
-    return sys_call2(SYSCALL_TASK_SET_POLICY, task_id, policy);
+static inline int sys_task_set_policy(int task_cap, int policy) {
+    return sys_call2(SYSCALL_TASK_SET_POLICY, task_cap, policy);
 }
 
 #endif /* SYSCALL_ENABLE */

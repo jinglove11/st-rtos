@@ -9,7 +9,7 @@
  * 历史 cap 系统的 object 字段两种用法:
  *   - 8 个静态池对象 (sem/mutex/mqueue/event/timer/task/endpoint/channel)
  *     塞 (id+1) 当指针 → cap_resolve 拿到的是 fake 指针,无法验证对象身份
- *   - 4 个堆对象 (irq/memblock/mmio/shm/reply) 用真指针
+ *   - 动态/资源对象 (frame/irq/mmio/shm/reply) 用真指针
  *
  * 问题: 对象 slot 复用 (sem_id=N 被释放后重新分配) 时,旧 cap 持有者拿到
  * 的是同一个 (id+1) 值,cap_resolve 成功,获得对新 sem 实例的越权访问。
@@ -25,7 +25,8 @@
  * ============================================================================
  *
  *   obj_type    CAP_OBJ_* (重复 cap_entry.obj_type,cross-check 双保险)
- *   generation  对象代,1..65535 (0 = 未初始化,合法对象永不为 0)
+ *   generation  对象代,1..KOBJ_GENERATION_MAX
+ *               (0 = 未初始化,UINT32_MAX = 永久退役)
  *   refs        cap 引用计数 (M2-Step9 cleanup hook 用,当前预留)
  *   flags       KOBJ_FLAG_* 状态位
  *
@@ -60,30 +61,47 @@ extern "C" {
  *============================================================================*/
 
 typedef struct {
-    uint8_t      obj_type;     /* CAP_OBJ_* (cross-check 与 cap_entry.obj_type) */
-    uint16_t     generation;   /* 对象代,1..65535 (0 = 未初始化) */
-    uint16_t     refs;         /* cap 引用计数 (Step9 cleanup hook 用) */
+    uint32_t     generation;   /* 0=未初始化,UINT32_MAX=退役 */
     uint32_t     flags;        /* KOBJ_FLAG_* */
+    uint16_t     refs;         /* cap 引用计数 (Step9 cleanup hook 用) */
+    uint8_t      obj_type;     /* CAP_OBJ_* (cross-check 与 cap_entry.obj_type) */
+    uint8_t      reserved;
 } kobject_header_t;
 
 /* 对象状态标志 (flags 字段) */
-#define KOBJ_FLAG_DYING   0x1U   /* 对象正在 delete,拒绝新 cap_create */
+#define KOBJ_FLAG_DYING           0x1U /* 对象正在 delete,拒绝新 cap_create */
+#define KOBJ_FLAG_CLEANUP_PENDING 0x2U /* last cap gone; wait for refs == 0 */
+
+/* UINT32_MAX is a sentinel, not a valid generation.  Once the final valid
+ * generation is released, the containing pool slot must never be allocated
+ * again.  This turns wraparound into bounded capacity loss instead of ABA. */
+#define KOBJ_GENERATION_INITIAL UINT32_C(1)
+#define KOBJ_GENERATION_MAX     (UINT32_MAX - UINT32_C(1))
+#define KOBJ_GENERATION_RETIRED UINT32_MAX
 
 /*============================================================================
  * Helpers
  *============================================================================*/
 
-/* 推进 generation,绕过 0 (0 保留给"未初始化")。
- * 用法: alloc 时初始化为 1; delete 时 bump 并保留给下次 alloc 复用。 */
-static inline uint16_t kobj_next_generation(uint16_t g) {
-    uint16_t next = (uint16_t)(g + 1);
-    return next == 0 ? 1 : next;
+/* 推进 generation；不回绕。首次从 0 进入 1，最后一代再释放后进入退役哨兵。 */
+static inline uint32_t kobj_next_generation(uint32_t g) {
+    if (g == 0) {
+        return KOBJ_GENERATION_INITIAL;
+    }
+    if (g >= KOBJ_GENERATION_MAX) {
+        return KOBJ_GENERATION_RETIRED;
+    }
+    return g + 1U;
+}
+
+static inline int kobj_generation_is_retired(uint32_t generation) {
+    return generation == KOBJ_GENERATION_RETIRED;
 }
 
 /* 初始化 header (alloc 路径用) */
 static inline void kobj_header_init(kobject_header_t *h, uint8_t obj_type) {
     h->obj_type   = obj_type;
-    h->generation = 1;
+    h->generation = KOBJ_GENERATION_INITIAL;
     h->refs       = 0;
     h->flags      = 0;
 }
@@ -91,7 +109,7 @@ static inline void kobj_header_init(kobject_header_t *h, uint8_t obj_type) {
 /* 对象 delete 路径用:bump generation 后 memset 整个对象再恢复 generation,
  * 让下次 alloc 拿到带新 generation 的 slot。返回 next_gen 供调用方 memset
  * 后写回 header。 */
-static inline uint16_t kobj_header_prepare_reuse(kobject_header_t *h) {
+static inline uint32_t kobj_header_prepare_reuse(kobject_header_t *h) {
     return kobj_next_generation(h->generation);
 }
 

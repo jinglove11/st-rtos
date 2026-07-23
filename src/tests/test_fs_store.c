@@ -4,7 +4,7 @@
  *
  * 直接测试 fs_store 的 inode 池 + ramfs 逻辑,不经过 IPC。
  * 排查 fs_server 服务化时 fs_store 本身是否正确。
- * 测试在内核态跑 (特权),用 kmalloc 模拟 memblock。
+ * 测试在内核态跑 (特权),用 kmalloc 模拟 Frame backing。
  */
 
 #include "test_framework.h"
@@ -14,13 +14,13 @@
 
 #if TEST_MODULE_FS_STORE && VFS_ENABLE && CAP_ENABLE
 
-/* 用内核 kmalloc 模拟 sys_mem_alloc 的 memblock (内核态测试) */
+/* 用内核 kmalloc 模拟 sys_mem_alloc 的 Frame (内核态测试) */
 static uint8_t *g_test_store = NULL;
 
 static void test_fs_store_basic(void) {
     test_section("Test 1: fs_store init + basic ramfs R/W");
 
-    /* 分配 4KB 作为 store (模拟 memblock) */
+    /* 分配 4KB 作为 store (模拟 Frame) */
     g_test_store = (uint8_t *)kmalloc(4096);
     TEST_ASSERT(g_test_store != NULL, "store buffer allocated");
     if (g_test_store == NULL) return;

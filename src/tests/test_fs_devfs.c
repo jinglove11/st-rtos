@@ -29,11 +29,12 @@ static void dev_driver_task(void *arg) {
     sys_task_exit((void *)(intptr_t)err);
 }
 
-/* fs server 任务:arg 编码 (fs_ep_cap | dev_ep_cap<<16) */
+/* fs server uses its own CNode slots; CPtrs are 32-bit and must never be
+ * truncated/packed into a single initial argument. */
 static void dev_fs_task(void *arg) {
-    uint32_t packed = (uint32_t)(uintptr_t)arg;
-    int fs_ep = (int)(packed & 0xFFFFU);
-    int dev_ep = (int)((packed >> 16) & 0xFFFFU);
+    (void)arg;
+    int fs_ep = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    int dev_ep = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 1);
     int err = fs_server_run_with_dev(fs_ep, 20, dev_ep, "echo");
     sys_task_exit((void *)(intptr_t)err);
 }
@@ -135,12 +136,7 @@ static void test_devfs_forwarding(void) {
         /* fs 还需要 driver 的 ep_cap 来转发 + 注册设备 */
         cap_id_t fs_drv_cap = cap_create_for(fs_tcb, endpoint_obj_for_cap(dev_ep), CAP_OBJ_ENDPOINT,
                                              CAP_READ | CAP_WRITE);
-        /* arg: 低16=fs_cap, 高16=fs_drv_cap */
-        if (fs_tcb->sp != NULL && fs_cap >= 0 && fs_drv_cap >= 0) {
-            uint32_t *r0 = (uint32_t *)((uint8_t *)fs_tcb->sp + 32U);
-            *r0 = (uint32_t)(fs_cap & 0xFFFFU) |
-                  ((uint32_t)(fs_drv_cap & 0xFFFFU) << 16);
-        }
+        (void)fs_drv_cap;
     }
 
     /* 创建 client */

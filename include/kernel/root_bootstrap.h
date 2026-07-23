@@ -24,6 +24,7 @@ typedef struct {
     uint8_t started;
     task_id_t task_id;
     ep_id_t root_endpoint;
+    cap_id_t factory_cap;
     uint8_t cap_count;
     root_bootstrap_cap_t caps[ROOT_BOOTSTRAP_CAP_MAX];
 } root_bootstrap_info_t;

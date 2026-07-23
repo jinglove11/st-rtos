@@ -98,11 +98,22 @@ static void test_kmem_cap_binding(void) {
     uint32_t outstanding = mem_get_outstanding_allocs();
     cap_id_t cap = kmem_alloc_cap(24, CAP_READ | CAP_WRITE | CAP_MANAGE);
     TEST_ASSERT(cap >= 0, "kmem_alloc_cap returns cap");
+    uint8_t type = UINT8_MAX;
+    TEST_ASSERT_EQ(KERN_OK, cap_get_type(cap, &type),
+                   "memory capability type query succeeds");
+    TEST_ASSERT_EQ(CAP_OBJ_FRAME, type,
+                   "legacy kmem allocation returns a Frame cap");
 
     void *ptr = kmem_resolve_cap(cap, CAP_WRITE);
     TEST_ASSERT_NOT_NULL(ptr, "kmem cap resolves with write");
-    TEST_ASSERT_EQ(outstanding + 2, mem_get_outstanding_allocs(),
-                   "cap memory increments outstanding");
+    TEST_ASSERT_EQ(outstanding + 1, mem_get_outstanding_allocs(),
+                   "Frame backing increments outstanding once");
+
+    kobject_header_t *frame_object =
+        (kobject_header_t *)cap_resolve(cap, CAP_OBJ_FRAME, CAP_MANAGE);
+    TEST_ASSERT_NOT_NULL(frame_object, "Frame object metadata resolves");
+    uint32_t frame_generation =
+        frame_object != NULL ? frame_object->generation : 0U;
 
     void *base = NULL;
     size_t size = 0;
@@ -135,8 +146,29 @@ static void test_kmem_cap_binding(void) {
 
     err = kmem_free_cap(cap);
     TEST_ASSERT_EQ(KERN_OK, err, "kmem_free_cap OK");
+    if (frame_object != NULL) {
+        TEST_ASSERT(frame_object->generation != frame_generation,
+                    "Frame release advances object generation");
+    }
     TEST_ASSERT_EQ(outstanding, mem_get_outstanding_allocs(),
                    "cap cleanup frees memory");
+
+    cap_id_t replacement =
+        kmem_alloc_cap(24, CAP_READ | CAP_WRITE | CAP_MANAGE);
+    TEST_ASSERT(replacement >= 0, "released Frame slot is reusable");
+    kobject_header_t *replacement_object =
+        (kobject_header_t *)cap_resolve(replacement, CAP_OBJ_FRAME,
+                                        CAP_MANAGE);
+    TEST_ASSERT_EQ((uintptr_t)frame_object, (uintptr_t)replacement_object,
+                   "Frame metadata slot persists across reuse");
+    if (replacement_object != NULL) {
+        TEST_ASSERT(replacement_object->generation != frame_generation,
+                    "reused Frame keeps advanced generation");
+    }
+    TEST_ASSERT_EQ(KERN_OK, kmem_free_cap(replacement),
+                   "replacement Frame released");
+    TEST_ASSERT_EQ(outstanding, mem_get_outstanding_allocs(),
+                   "Frame reuse test restores outstanding allocations");
 }
 
 static void test_kmmio_cap_strict_rejection(void) {
@@ -399,6 +431,77 @@ static void test_kshm_revoke_unmaps_task(void) {
                    (int)mem_get_outstanding_allocs(),
                    "shm revoke cleanup restores outstanding");
 }
+
+static void test_kframe_revoke_unmaps_task(void) {
+    test_section("Test 9: Frame revoke unmaps task");
+
+    uint32_t outstanding = mem_get_outstanding_allocs();
+    task_id_t tid = task_create_user("framerev", shm_map_dummy_task,
+                                     NULL, 10, 512);
+    TEST_ASSERT(tid >= 0, "user task created for Frame revoke");
+
+    tcb_t *tcb = task_get_tcb(tid);
+    TEST_ASSERT_NOT_NULL(tcb, "user task TCB resolved for Frame revoke");
+
+    cap_id_t root = kframe_create_cap(
+        256, CAP_READ | CAP_WRITE | CAP_MANAGE | CAP_TRANSFER | CAP_GRANT);
+    TEST_ASSERT(root >= 0, "Frame root cap created for revoke");
+
+    cap_id_t task_cap = KERN_INVALID_ID;
+    if (tcb != NULL && root >= 0) {
+        task_cap = cap_copy_to(NULL, root, tcb, CAP_READ | CAP_WRITE);
+    }
+    TEST_ASSERT(task_cap >= 0, "Frame cap copied before revoke");
+
+    void *addr = NULL;
+    kern_err_t err = kmem_map_to_task(tcb, task_cap,
+                                      CAP_READ | CAP_WRITE, &addr);
+    TEST_ASSERT_EQ(KERN_OK, err, "Frame map before revoke OK");
+    TEST_ASSERT_NOT_NULL(addr, "Frame map returns backing address");
+
+    uint8_t mapped_region = 0U;
+    int saw_mapping = 0;
+    for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
+        if (tcb != NULL && tcb->shm_maps[i].in_use &&
+            tcb->shm_maps[i].cap == task_cap) {
+            mapped_region = tcb->shm_maps[i].region;
+            saw_mapping = 1;
+            break;
+        }
+    }
+    TEST_ASSERT_EQ(1, saw_mapping, "Frame mapping exists before revoke");
+
+    err = cap_revoke(root);
+    TEST_ASSERT_EQ(KERN_OK, err, "Frame root revoke OK");
+    if (tcb != NULL && saw_mapping) {
+        int still_mapped = 0;
+        for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
+            if (tcb->shm_maps[i].in_use &&
+                tcb->shm_maps[i].cap == task_cap) {
+                still_mapped = 1;
+            }
+        }
+        TEST_ASSERT_EQ(0, still_mapped,
+                       "Frame revoke clears task mapping");
+        TEST_ASSERT((tcb->mpu_regions[mapped_region][1] & RASR_ENABLE) == 0U,
+                    "Frame revoke disables mapped MPU region");
+    }
+
+    void *base = NULL;
+    size_t size = 0U;
+    err = kmem_get_bounds(task_cap, &base, &size);
+    TEST_ASSERT_EQ(KERN_ERR_CAP, err,
+                   "revoked task Frame cap is invalid");
+
+    if (tid >= 0) {
+        err = task_delete(tid);
+        TEST_ASSERT_EQ(KERN_OK, err,
+                       "task delete after Frame revoke OK");
+    }
+    TEST_ASSERT_EQ((int)outstanding,
+                   (int)mem_get_outstanding_allocs(),
+                   "Frame revoke cleanup restores outstanding");
+}
 #endif
 #endif
 
@@ -413,6 +516,7 @@ static void test_mem_module(void) {
 #if MPU_ENABLE
     test_kshm_map_to_task();
     test_kshm_revoke_unmaps_task();
+    test_kframe_revoke_unmaps_task();
 #endif
 #endif
 }

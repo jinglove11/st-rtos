@@ -38,7 +38,8 @@ static void *mqueue_syscall_recv_msg[KERNEL_MAX_TASKS];
 // 分配消息队列 ID
 static queue_id_t alloc_mqueue_id(void) {
     for (int i = 0; i < KERN_MAX_MQUEUES; i++) {
-        if (!(mqueue_used_bitmap & (1U << i))) {
+        if (!(mqueue_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(mqueue_pool[i].hdr.generation)) {
             mqueue_used_bitmap |= (1U << i);
             return (queue_id_t)i;
         }
@@ -245,7 +246,7 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
     (void)cap_revoke_object(mq, CAP_OBJ_MQUEUE);
 #endif
     /* M2-Step3a: bump generation 跨 memset 保留 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&mq->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&mq->hdr);
     memset(mq, 0, sizeof(mqueue_t));
     mq->hdr.obj_type   = CAP_OBJ_MQUEUE;
     mq->hdr.generation = next_gen;

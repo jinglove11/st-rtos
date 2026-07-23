@@ -40,7 +40,8 @@ static irq_spinlock_t event_lock; /* M1: SMP safe */
 // 分配事件标志组 ID
 static event_id_t alloc_event_id(void) {
     for (int i = 0; i < KERN_MAX_EVENTS; i++) {
-        if (!(event_used_bitmap & (1U << i))) {
+        if (!(event_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(event_pool[i].hdr.generation)) {
             event_used_bitmap |= (1U << i);
             return (event_id_t)i;
         }
@@ -142,7 +143,7 @@ kern_err_t event_delete(event_id_t event_id) {
     (void)cap_revoke_object(evt, CAP_OBJ_EVENT);
 #endif
     /* M2-Step3a: bump generation 跨 memset 保留 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&evt->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&evt->hdr);
     memset(evt, 0, sizeof(event_t));
     evt->hdr.obj_type   = CAP_OBJ_EVENT;
     evt->hdr.generation = next_gen;

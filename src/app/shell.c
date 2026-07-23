@@ -1228,9 +1228,6 @@ static void cmd_driver_status(const char *service_name) {
 
 static void cmd_driver_release_lookup(cap_id_t service_cap) {
     (void)driver_release_service(driver_runtime_inbox_cap(), service_cap);
-    if (service_cap > 0) {
-        cap_delete(service_cap);
-    }
 }
 
 static int cmd_driver_get_service_cap(const char *service_name,

@@ -140,11 +140,9 @@ int allocator_service_run(int ep_cap, uint32_t max_requests) {
                 continue;
             }
 
-            /* 把 shm cap copy 到 client 的 inbox。
-             * 注意:不能用 IPC_CAP_MOVE —— ipc_transfer.c 的 MOVE 实现是
-             * cap_copy_to + cap_revoke_for(src),而 revoke 会递归删子树,
-             * 连刚 copy 给 client 的那份一起删 (既有 bug)。
-             * 用 IPC_CAP_COPY,allocator 保留源 cap (shm backing 不 kfree),
+            /* 把 shm cap copy 到 client 的 inbox。这里必须用 COPY，因为
+             * allocator 仍要保留源 cap，统一管理 backing 生命周期；M2
+             * capability transaction 的 MOVE 会原子转移 cap 本身。
              * client 持有 copy 独立使用。client 用完自己 revoke 它的 copy。
              * allocator 源 cap 在服务退出时由 cap_revoke_all 统一回收。
              * rights:RW + TRANSFER;GRANT 不给,防权限放大。 */

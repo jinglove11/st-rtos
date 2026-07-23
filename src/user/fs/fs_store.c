@@ -3,8 +3,8 @@
  * @brief fs_server 内部 FS 存储 — inode 池 + ramfs (Phase B, context-based)
  *
  * 移植自内核 inode.c + ramfs.c + vfs.c,简化适配 user 态:
- *   - 所有状态在 fs_store_ctx_t 里 (放在 memblock,经 sys_mem_map 映射)
- *   - bump allocator 在 memblock 上分配 (32 字节对齐)
+ *   - 所有状态在 fs_store_ctx_t 里 (放在 Frame,经 sys_mem_map 映射)
+ *   - bump allocator 在 Frame 上分配 (32 字节对齐)
  *   - 类型直接分派,不用函数指针表
  *   - 单线程 (fs_server 服务循环),无需锁
  */
@@ -15,7 +15,7 @@
 #if CAP_ENABLE
 
 /*============================================================================
- * memblock 上的 bump allocator
+ * Frame 上的 bump allocator
  *============================================================================*/
 
 static void *fs_store_alloc(fs_store_ctx_t *ctx, uint32_t size) {
@@ -484,7 +484,7 @@ int fs_store_register_dev(fs_store_ctx_t *ctx, const char *name, int dev_ep_cap)
 }
 
 /*============================================================================
- * 初始化:memblock 布局 [fs_store_ctx_t][inode 池][ramfs 数据区...]
+ * 初始化:Frame 布局 [fs_store_ctx_t][inode 池][ramfs 数据区...]
  *============================================================================*/
 fs_store_ctx_t *fs_store_init(void *store_buf, uint32_t store_size) {
     if (store_buf == NULL || store_size < sizeof(fs_store_ctx_t)) {

@@ -18,6 +18,7 @@
 #include "trace.h"
 #include "syscall.h"
 #include "capability.h"
+#include "task.h"
 #include <string.h>
 
 #if IPC_ENDPOINT
@@ -105,7 +106,8 @@ static cap_id_t ep_server_reply_cap[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 
 static ep_id_t alloc_ep_id(void) {
     for (int i = 0; i < KERN_MAX_ENDPOINTS; i++) {
-        if (!(ep_used_bitmap & (1U << i))) {
+        if (!(ep_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(ep_pool[i].hdr.generation)) {
             ep_used_bitmap |= (1U << i);
             return (ep_id_t)i;
         }
@@ -140,7 +142,7 @@ static void endpoint_invalidate_reply_cap(ep_id_t ep_id, task_id_t server_id) {
     ep_reply_objects[ep_id][server_id].request_gen = 0;
     ep_reply_objects[ep_id][server_id].bind_error = KERN_OK;
     if (cap != KERN_INVALID_ID) {
-        cap_delete(cap);
+        (void)cap_delete_for(task_get_tcb(server_id), cap);
     }
 }
 
@@ -171,6 +173,16 @@ static void endpoint_bind_reply_cap(ep_id_t ep_id, tcb_t *server,
      * (上次的 reply cap 是一次性的,bind 新 request 后旧的应拒绝)。 */
     reply->hdr.obj_type   = CAP_OBJ_REPLY;
     reply->hdr.generation = kobj_header_prepare_reuse(&reply->hdr);
+    if (kobj_generation_is_retired(reply->hdr.generation)) {
+        reply->active = 0;
+        reply->used = 1;
+        reply->sender = NULL;
+        reply->request_gen = 0;
+        reply->bind_error = KERN_ERR_RESOURCE;
+        reply->cap = KERN_INVALID_ID;
+        ep_server_reply_cap[ep_id][server->id] = KERN_INVALID_ID;
+        return;
+    }
     reply->ep_id = ep_id;
     reply->server_id = server->id;
     reply->sender = sender;
@@ -309,7 +321,7 @@ ep_id_t endpoint_create(const char *name, uint16_t msg_size, uint16_t max_pendin
     endpoint_t *ep = &ep_pool[id];
     /* M2-Step3b: 跨 memset 保留 generation (endpoint_delete 已 bump)。
      * 首次分配 generation=0 → 初始化为 1; 复用时保留 bumped 值。 */
-    uint16_t saved_gen = ep->hdr.generation;
+    uint32_t saved_gen = ep->hdr.generation;
     memset(ep, 0, sizeof(endpoint_t));
     kobj_header_init(&ep->hdr, CAP_OBJ_ENDPOINT);
     if (saved_gen != 0) {
@@ -432,7 +444,7 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     (void)cap_revoke_object(ep, CAP_OBJ_ENDPOINT);
 #endif
     /* M2-Step3b: bump generation 跨 memset 保留 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&ep->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&ep->hdr);
     memset(ep, 0, sizeof(endpoint_t));
     ep->hdr.obj_type   = CAP_OBJ_ENDPOINT;
     ep->hdr.generation = next_gen;

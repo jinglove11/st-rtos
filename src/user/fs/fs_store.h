@@ -3,7 +3,7 @@
  * @brief fs_server 内部 FS 存储 — 自管 inode 池 + ramfs (Phase B, context-based)
  *
  * fs_server 是 user 任务,不能用 .bss 全局 (MPU Region 1 禁用)。
- * 所有状态打包进 fs_store_ctx_t,放在 sys_mem_alloc 的 memblock 里 (经
+ * 所有状态打包进 fs_store_ctx_t,放在 sys_mem_alloc 的 Frame 里 (经
  * sys_mem_map 映射进 fs_server 的 MPU region)。fs_store 函数接受 ctx 指针。
  */
 
@@ -67,9 +67,9 @@ typedef struct {
     int       client_id;   /* 打开此 fd 的客户端 task id (死亡时清理) */
 } fs_fd_t;
 
-/* fs_store 上下文 (放在 memblock 里,所有状态集中于此) */
+/* fs_store 上下文 (放在 Frame 里,所有状态集中于此) */
 typedef struct {
-    uint8_t  *store_base;          /* memblock 映射后的基址 */
+    uint8_t  *store_base;          /* Frame 映射后的基址 */
     uint32_t  store_size;
     uint32_t  store_off;           /* bump allocator 下一个偏移 */
 
@@ -84,7 +84,7 @@ typedef struct {
 } fs_store_ctx_t;
 
 /**
- * 初始化:在 store_buf (已 sys_mem_map 的 memblock) 开头放 ctx,
+ * 初始化:在 store_buf (已 sys_mem_map 的 Frame) 开头放 ctx,
  * 构造 / /tmp /dev 目录树。
  * store_size 必须 >= sizeof(fs_store_ctx_t) + inode池 + 余量。
  * 返回 ctx 指针 (成功) 或 NULL。

@@ -29,6 +29,7 @@
 
 #if CAP_ENABLE
 #include "capability.h"
+#include "factory.h"
 #endif
 #if CAP_RESTART_SUBSET
 #include "cap_subset.h"
@@ -143,7 +144,7 @@ static int sys_task_create(uint32_t a1, uint32_t a2, uint32_t a3,
     /* M2-Step3c: 真指针 &task_pool[id] + obj_generation 启用 cross-check
      * (满足 M2 验收 #1: stale task cap 在 id 复用后失效) */
     void *obj = task_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_TASK, CAP_FULL, obj_gen);
     if (cap < 0) { task_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -225,7 +226,7 @@ static int sys_sem_create(uint32_t a1, uint32_t a2, uint32_t a3,
      * hdr.generation — 对象 slot 复用 + bump generation 后,旧 cap 在
      * cap_get_entry cross-check 失败,满足 M2 验收 #1 (stale-cap-on-reuse)。 */
     void *obj = sem_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_SEMAPHORE, CAP_FULL, obj_gen);
     if (cap < 0) { sem_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -286,7 +287,7 @@ static int sys_mutex_create(uint32_t a1, uint32_t a2, uint32_t a3,
     tcb_t *cur = sched_get_current();
     /* M2-Step3a: 真指针 + obj_generation 启用 cross-check */
     void *obj = mutex_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_MUTEX, CAP_FULL, obj_gen);
     if (cap < 0) { /* mutex_delete(id); */ return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -331,7 +332,7 @@ static int sys_mqueue_create(uint32_t a1, uint32_t a2, uint32_t a3,
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
     void *obj = mqueue_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_MQUEUE, CAP_FULL, obj_gen);
     if (cap < 0) { /* mqueue_delete(id); */ return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -407,7 +408,7 @@ static int sys_event_create(uint32_t a1, uint32_t a2, uint32_t a3,
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
     void *obj = event_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_EVENT, CAP_FULL, obj_gen);
     if (cap < 0) { /* event_delete(id); */ return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -531,7 +532,7 @@ static int sys_ep_create(uint32_t a1, uint32_t a2, uint32_t a3,
     tcb_t *cur = sched_get_current();
     /* M2-Step3b: 真指针 + obj_generation 启用 cross-check */
     void *obj = endpoint_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_ENDPOINT, CAP_FULL, obj_gen);
     if (cap < 0) { endpoint_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -749,7 +750,7 @@ static int sys_ch_create(uint32_t a1, uint32_t a2, uint32_t a3,
     tcb_t *cur = sched_get_current();
     /* M2-Step3b: 真指针 + obj_generation */
     void *obj = channel_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_CHANNEL, CAP_FULL, obj_gen);
     if (cap < 0) { channel_delete(id); return KERN_ERR_RESOURCE; }
     return (int)cap;
@@ -779,7 +780,29 @@ static int sys_ch_connect(uint32_t a1, uint32_t a2, uint32_t a3,
 #if CAP_ENABLE
     void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_CHANNEL, CAP_WRITE);
     if (!obj) return KERN_ERR_CAP;
-    return channel_connect(channel_id_from_obj(obj), (task_id_t)a2, (task_id_t)a3);
+
+    /*
+     * A channel cap authorizes reconfiguring the channel, but it does not
+     * grant authority over arbitrary tasks.  User callers must name both
+     * peers with TASK caps from their own CSpace; accepting task IDs here
+     * would let a non-root task attach unrelated tasks to its channel.
+     *
+     * Privileged kernel callers keep the historical raw-ID ABI so internal
+     * tests and bootstrap code can continue to use channel_connect directly.
+     */
+    if (syscall_current_is_user()) {
+        void *peer_a_obj =
+            cap_resolve((cap_id_t)a2, CAP_OBJ_TASK, CAP_MANAGE);
+        if (peer_a_obj == NULL) return KERN_ERR_CAP;
+        void *peer_b_obj =
+            cap_resolve((cap_id_t)a3, CAP_OBJ_TASK, CAP_MANAGE);
+        if (peer_b_obj == NULL) return KERN_ERR_CAP;
+        return channel_connect(channel_id_from_obj(obj),
+                               task_id_from_obj(peer_a_obj),
+                               task_id_from_obj(peer_b_obj));
+    }
+    return channel_connect(channel_id_from_obj(obj),
+                           (task_id_t)a2, (task_id_t)a3);
 #else
     return channel_connect((ch_id_t)a1, (task_id_t)a2, (task_id_t)a3);
 #endif
@@ -960,7 +983,7 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
     void *obj = timer_obj_for_cap(id);
-    uint16_t obj_gen = ((const kobject_header_t *)obj)->generation;
+    uint32_t obj_gen = ((const kobject_header_t *)obj)->generation;
     cap_id_t cap = cap_create_for_gen(cur, obj, CAP_OBJ_TIMER, CAP_FULL, obj_gen);
     if (cap < 0) return KERN_ERR_RESOURCE;
     return (int)cap;
@@ -1214,6 +1237,15 @@ static int sys_cap_derive(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_cap_transfer(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a3);U(a4);U(a5);U(a6);
+    /*
+     * Legacy ABI: a2 is a raw task ID.  Kernel callers retain it for
+     * compatibility, but user callers must use SYSCALL_CAP_TRANSFER_TO,
+     * whose destination is resolved through a TASK cap in the current
+     * CSpace.  Reject before cap_move_to so the source cap remains intact.
+     */
+    if (syscall_current_is_user()) {
+        return KERN_ERR_CAP;
+    }
     return cap_transfer((cap_id_t)a1, (uint8_t)a2);
 }
 
@@ -1287,6 +1319,37 @@ static int sys_cap_badge(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+static int sys_factory_create(uint32_t a1, uint32_t a2, uint32_t a3,
+                              uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    if (a3 != sizeof(factory_create_request_t)) {
+        return KERN_ERR_PARAM;
+    }
+
+    factory_create_request_t request;
+    kern_err_t err = copy_from_user(
+        &request, (const void *)(uintptr_t)a2, sizeof(request));
+    if (err != KERN_OK) {
+        return err;
+    }
+    request.name[sizeof(request.name) - 1U] = '\0';
+    if (request.obj_type == CAP_OBJ_TASK &&
+        !user_access_ok((const void *)(uintptr_t)request.entry, 1U,
+                        USER_ACCESS_READ)) {
+        return KERN_ERR_PARAM;
+    }
+
+    tcb_t *current = sched_get_current();
+    cap_id_t created = factory_create_for(
+        current, (cap_id_t)a1, &request);
+    return (int)created;
+#else
+    U(a1);U(a2);U(a3);
+    return KERN_ERR_CAP;
+#endif
+}
+
 static int sys_cap_revoke(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
@@ -1357,7 +1420,7 @@ static int sys_fault_subscribe(uint32_t a1, uint32_t a2, uint32_t a3,
     }
     /* M2-Step3b: 真指针 + obj_generation */
     void *fault_obj = endpoint_obj_for_cap(kern_fault_ep);
-    uint16_t fault_gen = fault_obj != NULL
+    uint32_t fault_gen = fault_obj != NULL
         ? ((const kobject_header_t *)fault_obj)->generation : 0;
     cap_id_t cap = cap_create_for_gen(cur, fault_obj,
                                       CAP_OBJ_ENDPOINT, CAP_FULL, fault_gen);
@@ -1440,21 +1503,15 @@ static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
     tcb_t *new_task = task_get_tcb(id);
 
     /* Install a reduced-rights cap into the new task. We need a parent TASK
-     * cap held by the caller with CAP_GRANT. Walk the caller's cspace. */
+     * cap held by the caller with CAP_GRANT. Query the caller's CNode. */
     int granted = 0;
     if (caller != NULL && (caller->attrs & TASK_ATTR_USER) != 0) {
-        for (int i = 0; i < KERN_TASK_CAP_SLOTS; i++) {
-            uint64_t bit = (uint64_t)BIT(i);
-            if ((caller->capabilities & bit) == 0) {
-                continue;
+        for (uint8_t i = 0; i < KERN_TASK_CAP_SLOTS; i++) {
+            cap_id_t cand = cap_self_find_slot(caller, CAP_OBJ_TASK, i);
+            if (cand == KERN_INVALID_ID) {
+                break;
             }
-            cap_id_t cand = caller->cap_set[i];
-            uint8_t obj_type = 0;
             uint8_t rights = 0;
-            if (cap_get_type_for(caller, cand, &obj_type) != KERN_OK ||
-                obj_type != CAP_OBJ_TASK) {
-                continue;
-            }
             if (cap_get_rights_for(caller, cand, &rights) != KERN_OK ||
                 (rights & CAP_GRANT) == 0) {
                 continue;
@@ -1474,7 +1531,7 @@ static int sys_task_restart(uint32_t a1, uint32_t a2, uint32_t a3,
      * restarted task — mirrors sys_task_create's contract.
      * M2-Step3c: 真指针 + obj_generation */
     void *task_obj = task_obj_for_cap(id);
-    uint16_t task_gen = ((const kobject_header_t *)task_obj)->generation;
+    uint32_t task_gen = ((const kobject_header_t *)task_obj)->generation;
     cap_id_t mgr_cap = cap_create_for_gen(caller, task_obj,
                                           CAP_OBJ_TASK, CAP_FULL, task_gen);
     if (mgr_cap < 0) {
@@ -1767,6 +1824,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_SELF_SLOT, sys_cap_self_slot, 2),
     SYSDEF(SYSCALL_CAP_MINT,      sys_cap_mint,      3),
     SYSDEF(SYSCALL_CAP_BADGE,     sys_cap_badge,     1),
+    SYSDEF(SYSCALL_FACTORY_CREATE, sys_factory_create, 3),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),

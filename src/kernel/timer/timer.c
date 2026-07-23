@@ -338,7 +338,8 @@ static void heap_remove(timer_heap_t *heap, timer_t *timer) {
 
 static timer_id_t alloc_timer_id(void) {
     for (int i = 0; i < KERN_TIMER_MAX; i++) {
-        if (!(timer_used_bitmap & (1U << i))) {
+        if (!(timer_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(timer_pool[i].hdr.generation)) {
             timer_used_bitmap |= (1U << i);
             return (timer_id_t)i;
         }
@@ -533,7 +534,7 @@ static void process_cmd_delete(timer_id_t timer_id) {
     (void)cap_revoke_object(timer, CAP_OBJ_TIMER);
 #endif
     /* M2-Step3a: bump generation 跨 memset 保留 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&timer->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&timer->hdr);
     memset(timer, 0, sizeof(timer_t));
     timer->hdr.obj_type   = CAP_OBJ_TIMER;
     timer->hdr.generation = next_gen;
@@ -714,7 +715,7 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     timer_t *timer = &timer_pool[id];
     /* M2-Step3a: 跨 memset 保留 generation (process_cmd_delete 已 bump)。
      * 首次分配 generation=0 → 初始化为 1; 复用时保留 bumped 值。 */
-    uint16_t saved_gen = timer->hdr.generation;
+    uint32_t saved_gen = timer->hdr.generation;
     memset(timer, 0, sizeof(timer_t));
     kobj_header_init(&timer->hdr, CAP_OBJ_TIMER);
     if (saved_gen != 0) {

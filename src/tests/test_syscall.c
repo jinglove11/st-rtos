@@ -69,7 +69,8 @@ static void test_syscall_sem(void) {
 
     TEST_ASSERT(cap >= 0, "sys_call2(SEM_CREATE, max=1, init=0) returns valid ID");
     TEST_ASSERT(cap > 0, "cap_create returned positive token");
-    TEST_ASSERT(cap < 32768, "cap_create returned in-range token");
+    TEST_ASSERT((cap_id_t)cap != KERN_INVALID_ID,
+                "cap_create returned valid 32-bit handle");
 
     /* Direct cap_resolve */
     (void)cap_resolve((cap_id_t)cap, CAP_OBJ_SEMAPHORE, CAP_WRITE);
@@ -191,17 +192,228 @@ static int test_invoke_svc2_invalid(void) {
 }
 
 #if MPU_ENABLE && CAP_ENABLE
-static void user_raw_task_id_control_task(void *arg) {
-    int raw_task_id = (int)(uintptr_t)arg;
-    int del_err = sys_task_delete(raw_task_id);
-    int suspend_err = sys_task_suspend(raw_task_id);
-    int result = KERN_ERR;
+static void user_local_cptr_lifecycle_task(void *arg) {
+    (void)arg;
 
-    if (del_err == KERN_ERR_CAP && suspend_err == KERN_ERR_CAP) {
-        result = KERN_OK;
+    int cap = sys_sem_create(1, 0);
+    if (cap < 0) {
+        sys_task_exit((void *)(intptr_t)cap);
     }
 
-    sys_task_exit((void *)(intptr_t)result);
+    /* A capability created by a user task must be installed in that task's
+     * root CNode and returned as the same task-local CPtr. */
+    int self_cap = sys_cap_self_slot(CAP_OBJ_SEMAPHORE, 0);
+    if (self_cap != cap) {
+        (void)sys_sem_delete(cap);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
+
+    int err = sys_sem_post(cap);
+    if (err == KERN_OK) {
+        err = sys_sem_wait(cap, 0);
+    }
+    if (err == KERN_OK) {
+        err = sys_sem_delete(cap);
+    }
+    if (err == KERN_OK && sys_sem_post(cap) != KERN_ERR_CAP) {
+        err = KERN_ERR_STATE;
+    }
+
+    /* Return the deleted numeric CPtr so the privileged test runner can
+     * inspect its ABI tag without keeping the kernel object alive. */
+    sys_task_exit(err == KERN_OK
+                      ? (void *)(uintptr_t)(uint32_t)cap
+                      : (void *)(intptr_t)err);
+}
+
+#define RAW_AUDIT_TASK_ACCESS    (1U << 0)
+#define RAW_AUDIT_OBJECT_ACCESS  (1U << 1)
+#define RAW_AUDIT_RESOURCE_CAPS  (1U << 2)
+#define RAW_AUDIT_CAP_ROUTING    (1U << 3)
+#define RAW_AUDIT_OBJECT_LIFE    (1U << 4)
+
+static void user_raw_audit_peer_task(void *arg) {
+    (void)arg;
+    sys_task_exit(NULL);
+}
+
+/*
+ * M2 final acceptance: a user task may know every small integer object ID,
+ * but none of those integers is authority.  Keep real objects alive while
+ * probing the complete ID ranges, then prove their CSpace caps still work.
+ */
+static void user_raw_object_id_control_task(void *arg) {
+    int raw_task_id = (int)(uintptr_t)arg;
+    uint32_t failures = 0;
+    uint8_t msg[KERN_CH_MSG_SIZE];
+    void *mapped = NULL;
+
+    for (uint32_t i = 0; i < sizeof(msg); i++) {
+        msg[i] = (uint8_t)i;
+    }
+
+    int sem_cap = sys_sem_create(1, 0);
+    int mutex_cap = sys_mutex_create();
+    int mq_cap = sys_mqueue_create(8, 2);
+    int event_cap = sys_event_create(0);
+    int ep_cap = sys_ep_create("raw_audit_ep", KERN_EP_MSG_SIZE, 1);
+    int ch_cap = sys_ch_create(KERN_CH_MSG_SIZE, 0);
+    int timer_cap = sys_timer_create("raw_audit_timer", NULL, NULL, 1);
+    int frame_cap = sys_mem_alloc(64);
+    int peer_a_cap = sys_task_create("raw_peer_a",
+                                     user_raw_audit_peer_task,
+                                     NULL, 8, 512);
+    int peer_b_cap = sys_task_create("raw_peer_b",
+                                     user_raw_audit_peer_task,
+                                     NULL, 8, 512);
+
+    if (sem_cap < 0 || mutex_cap < 0 || mq_cap < 0 || event_cap < 0 ||
+        ep_cap < 0 || ch_cap < 0 || timer_cap < 0 || frame_cap < 0 ||
+        peer_a_cap < 0 || peer_b_cap < 0) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+
+    if (sys_task_delete(raw_task_id) != KERN_ERR_CAP ||
+        sys_task_suspend(raw_task_id) != KERN_ERR_CAP ||
+        sys_task_set_policy(raw_task_id, SYS_SCHED_NORMAL) != KERN_ERR_CAP) {
+        failures |= RAW_AUDIT_TASK_ACCESS;
+    }
+
+    for (int raw = 0; raw < KERN_MAX_SEMAPHORES; raw++) {
+        if (sys_sem_post(raw) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < KERN_MAX_MUTEXES; raw++) {
+        if (sys_mutex_unlock(raw) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < KERN_MAX_MQUEUES; raw++) {
+        if (sys_mqueue_send(raw, msg, 0) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < KERN_MAX_EVENTS; raw++) {
+        if (sys_event_set(raw, 1U) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < KERN_MAX_ENDPOINTS; raw++) {
+        if (sys_ep_send(raw, msg, 0) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < KERN_MAX_CHANNELS; raw++) {
+        if (sys_ch_send(raw, msg, 0) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < TIMER_MAX; raw++) {
+        if (sys_timer_start(raw, 1) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+    for (int raw = 0; raw < KFRAME_OBJECT_MAX; raw++) {
+        if (sys_mem_size(raw) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_OBJECT_ACCESS;
+        }
+    }
+
+    factory_create_request_t request = {
+        .obj_type = CAP_OBJ_SEMAPHORE,
+        .param0 = 0,
+        .param1 = 1,
+    };
+    for (int raw = 0; raw < KERN_MAX_FACTORIES; raw++) {
+        if (sys_factory_create(raw, &request) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_RESOURCE_CAPS;
+        }
+    }
+
+#if IRQ_ENABLE && IPC_ENDPOINT
+    if (ep_cap >= 0) {
+        for (int raw = 0; raw < IRQ_MAX_USER; raw++) {
+            if (sys_irq_bind(raw, ep_cap, 0x52415749U) != KERN_ERR_CAP) {
+                failures |= RAW_AUDIT_RESOURCE_CAPS;
+            }
+        }
+    } else {
+        failures |= RAW_AUDIT_RESOURCE_CAPS;
+    }
+#endif
+
+#if MPU_ENABLE
+    for (int raw = 0; raw < 8; raw++) {
+        if (sys_mmio_map(raw, CAP_READ, &mapped) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_RESOURCE_CAPS;
+        }
+    }
+#endif
+
+    /*
+     * These were the two remaining raw-ID routing paths:
+     * - legacy CAP_TRANSFER selected the destination by task ID;
+     * - CH_CONNECT selected both peers by task ID.
+     */
+    if (sem_cap >= 0) {
+        if (sys_call2(SYSCALL_CAP_TRANSFER, sem_cap, raw_task_id) !=
+                KERN_ERR_CAP ||
+            sys_cap_transfer_to(sem_cap, raw_task_id) != KERN_ERR_CAP) {
+            failures |= RAW_AUDIT_CAP_ROUTING;
+        }
+    }
+    if (ch_cap >= 0 &&
+        sys_ch_connect(ch_cap, raw_task_id, sys_task_self()) != KERN_ERR_CAP) {
+        failures |= RAW_AUDIT_CAP_ROUTING;
+    }
+    if (ch_cap >= 0 && peer_a_cap >= 0 && peer_b_cap >= 0 &&
+        sys_ch_connect(ch_cap, peer_a_cap, peer_b_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_CAP_ROUTING;
+    }
+
+    /* Failed raw-ID probes must not mutate or move the real objects. */
+    if (sem_cap >= 0 &&
+        (sys_sem_post(sem_cap) != KERN_OK ||
+         sys_sem_wait(sem_cap, 0) != KERN_OK)) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (frame_cap >= 0 && sys_mem_size(frame_cap) != 64) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+
+    if (frame_cap >= 0 && sys_mem_free(frame_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (timer_cap >= 0 && sys_cap_revoke(timer_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (ch_cap >= 0 && sys_ch_delete(ch_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (peer_b_cap >= 0 && sys_task_delete(peer_b_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (peer_a_cap >= 0 && sys_task_delete(peer_a_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (ep_cap >= 0 && sys_ep_delete(ep_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (event_cap >= 0 && sys_event_delete(event_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (mq_cap >= 0 && sys_mqueue_delete(mq_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (mutex_cap >= 0 && sys_mutex_delete(mutex_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+    if (sem_cap >= 0 && sys_sem_delete(sem_cap) != KERN_OK) {
+        failures |= RAW_AUDIT_OBJECT_LIFE;
+    }
+
+    sys_task_exit((void *)(uintptr_t)failures);
 }
 
 static void user_forbidden_callback(void *arg) {
@@ -266,6 +478,10 @@ static void user_mem_cap_task(void *arg) {
     if (cap < 0) {
         sys_task_exit((void *)(intptr_t)cap);
     }
+    if (sys_cap_type(cap) != CAP_OBJ_FRAME) {
+        (void)sys_mem_free(cap);
+        sys_task_exit((void *)(intptr_t)KERN_ERR_STATE);
+    }
 
     int size = sys_mem_size(cap);
     if (size != 32) {
@@ -282,7 +498,8 @@ static void user_mem_cap_task(void *arg) {
 }
 
 static void user_shm_map_task(void *arg) {
-    int cap = (int)(intptr_t)arg;
+    (void)arg;
+    int cap = sys_cap_self_slot(CAP_OBJ_SHM, 0);
     int err = KERN_OK;
 
     int created = sys_shm_create(256, CAP_READ | CAP_WRITE);
@@ -328,7 +545,8 @@ static void user_shm_map_task(void *arg) {
 }
 
 static void user_shm_map_exhaust_task(void *arg) {
-    int ep_cap = (int)(intptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     cap_id_t caps[IPC_CAPS_MAX];
@@ -403,6 +621,31 @@ static void test_set_created_task_arg(tcb_t *tcb, uintptr_t arg) {
 }
 #endif
 
+static void test_user_local_cptr_lifecycle(void) {
+    test_section("Test 8b: User-local CPtr syscall lifecycle");
+
+#if MPU_ENABLE && CAP_ENABLE
+    task_id_t user = task_create_user("u_local_cap",
+                                      user_local_cptr_lifecycle_task,
+                                      NULL, 5, 512);
+    TEST_ASSERT(user >= 0, "local CPtr user task created");
+    if (user < 0) return;
+
+    task_start(user);
+    void *retval = NULL;
+    kern_err_t join_err = task_join(user, &retval, 1000);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)join_err,
+                   "local CPtr user task joined");
+    if (join_err == KERN_OK) {
+        cap_id_t returned = (cap_id_t)(uintptr_t)retval;
+        TEST_ASSERT(cap_is_local_cptr(returned),
+                    "user syscall returned a task-local CPtr");
+    }
+#else
+    test_skip("MPU or capability disabled");
+#endif
+}
+
 static void test_syscall_security_negative(void) {
     test_section("Test 9: Syscall security negative cases");
 
@@ -416,14 +659,15 @@ static void test_syscall_security_negative(void) {
     TEST_ASSERT_EQ((int)KERN_ERR_STATE, err, "running task cannot reuse SVC #0");
 
 #if MPU_ENABLE && CAP_ENABLE
-    task_id_t victim = task_create_user("raw_victim", user_raw_task_id_control_task,
-                                        NULL, 10, 512);
+    task_id_t victim = task_create_user("raw_victim",
+                                        user_raw_object_id_control_task,
+                                        NULL, 10, 1024);
     TEST_ASSERT(victim >= 0, "raw-id victim task created");
     if (victim < 0) return;
 
     task_id_t attacker = task_create_user("raw_attacker",
-                                          user_raw_task_id_control_task,
-                                          (void *)(uintptr_t)victim, 5, 512);
+                                          user_raw_object_id_control_task,
+                                          (void *)(uintptr_t)victim, 5, 1024);
     TEST_ASSERT(attacker >= 0, "raw-id attacker task created");
     if (attacker < 0) {
         (void)task_delete(victim);
@@ -432,10 +676,20 @@ static void test_syscall_security_negative(void) {
 
     task_start(attacker);
     void *retval = NULL;
-    kern_err_t join_err = task_join(attacker, &retval, 1000);
+    kern_err_t join_err = task_join(attacker, &retval, 2000);
     TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "raw-id attacker joined");
-    TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
-                   "user raw task id management rejected");
+    uint32_t raw_audit = join_err == KERN_OK
+        ? (uint32_t)(uintptr_t)retval : UINT32_MAX;
+    TEST_ASSERT_EQ(0, (int)(raw_audit & RAW_AUDIT_TASK_ACCESS),
+                   "user raw task-id management rejected");
+    TEST_ASSERT_EQ(0, (int)(raw_audit & RAW_AUDIT_OBJECT_ACCESS),
+                   "user raw sync/IPC/timer/frame IDs rejected");
+    TEST_ASSERT_EQ(0, (int)(raw_audit & RAW_AUDIT_RESOURCE_CAPS),
+                   "user raw factory/IRQ/MMIO IDs rejected");
+    TEST_ASSERT_EQ(0, (int)(raw_audit & RAW_AUDIT_CAP_ROUTING),
+                   "raw task IDs rejected by cap and channel routing");
+    TEST_ASSERT_EQ(0, (int)(raw_audit & RAW_AUDIT_OBJECT_LIFE),
+                   "raw-ID probes leave capability objects intact");
 
     TEST_ASSERT_NOT_NULL(task_get_tcb(victim), "raw-id victim still exists");
     (void)task_delete(victim);
@@ -785,7 +1039,8 @@ static void test_user_shm_map_region_exhaustion(void) {
 
 #if MPU_ENABLE && IPC_ENDPOINT && CAP_ENABLE
 static void user_endpoint_service_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *req = (uint32_t *)msg_buf;
     int err;
@@ -805,7 +1060,8 @@ static void user_endpoint_service_task(void *arg) {
 }
 
 static void user_endpoint_reply_cap_service_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *req = (uint32_t *)msg_buf;
     int err;
@@ -848,7 +1104,8 @@ static void user_endpoint_reply_cap_service_task(void *arg) {
 }
 
 static void user_endpoint_reply_cap_timeout_service_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     int err;
 
@@ -880,7 +1137,8 @@ static void user_endpoint_reply_cap_timeout_service_task(void *arg) {
 }
 
 static void user_endpoint_recv_timeout_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     int err;
 
@@ -893,7 +1151,8 @@ static void user_endpoint_recv_timeout_task(void *arg) {
 }
 
 static void user_endpoint_client_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     int err;
@@ -943,7 +1202,8 @@ static void user_endpoint_send_caps_task(void *arg) {
 }
 
 static void user_endpoint_recv_caps_service_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     cap_id_t caps[IPC_CAPS_MAX];
@@ -975,7 +1235,8 @@ static void user_endpoint_recv_caps_service_task(void *arg) {
 }
 
 static void user_endpoint_recv_mem_cap_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     cap_id_t caps[IPC_CAPS_MAX];
@@ -1005,7 +1266,8 @@ static void user_endpoint_recv_mem_cap_task(void *arg) {
 }
 
 static void user_endpoint_send_wait_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     int err;
@@ -1020,7 +1282,8 @@ static void user_endpoint_send_wait_task(void *arg) {
 }
 
 static void user_endpoint_send_nowait_task(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     uint8_t msg_buf[KERN_EP_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     int err;
@@ -1035,19 +1298,22 @@ static void user_endpoint_send_nowait_task(void *arg) {
 }
 
 static void user_sem_wait_task(void *arg) {
-    int sem_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int sem_cap = sys_cap_self_slot(CAP_OBJ_SEMAPHORE, 0);
     int err = sys_sem_wait(sem_cap, 1000);
     sys_task_exit((void *)(intptr_t)err);
 }
 
 static void user_sem_wait_timeout_task(void *arg) {
-    int sem_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int sem_cap = sys_cap_self_slot(CAP_OBJ_SEMAPHORE, 0);
     int err = sys_sem_wait(sem_cap, 2);
     sys_task_exit((void *)(intptr_t)err);
 }
 
 static void user_mutex_lock_task(void *arg) {
-    int mutex_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int mutex_cap = sys_cap_self_slot(CAP_OBJ_MUTEX, 0);
     int err = sys_mutex_lock(mutex_cap, 1000);
     if (err == KERN_OK) {
         err = sys_mutex_unlock(mutex_cap);
@@ -1056,13 +1322,15 @@ static void user_mutex_lock_task(void *arg) {
 }
 
 static void user_mutex_lock_timeout_task(void *arg) {
-    int mutex_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int mutex_cap = sys_cap_self_slot(CAP_OBJ_MUTEX, 0);
     int err = sys_mutex_lock(mutex_cap, 2);
     sys_task_exit((void *)(intptr_t)err);
 }
 
 static void user_mqueue_recv_task(void *arg) {
-    int mq_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int mq_cap = sys_cap_self_slot(CAP_OBJ_MQUEUE, 0);
     uint8_t msg_buf[KERN_MSG_MAX_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
 
@@ -1078,7 +1346,8 @@ static void user_mqueue_recv_task(void *arg) {
 }
 
 static void user_mqueue_recv_timeout_task(void *arg) {
-    int mq_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int mq_cap = sys_cap_self_slot(CAP_OBJ_MQUEUE, 0);
     uint8_t msg_buf[KERN_MSG_MAX_SIZE];
 
     for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
@@ -1090,7 +1359,8 @@ static void user_mqueue_recv_timeout_task(void *arg) {
 }
 
 static void user_mqueue_send_task(void *arg) {
-    int mq_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int mq_cap = sys_cap_self_slot(CAP_OBJ_MQUEUE, 0);
     uint8_t msg_buf[KERN_MSG_MAX_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
 
@@ -1104,19 +1374,22 @@ static void user_mqueue_send_task(void *arg) {
 }
 
 static void user_event_wait_task(void *arg) {
-    int event_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int event_cap = sys_cap_self_slot(CAP_OBJ_EVENT, 0);
     int err = sys_event_wait(event_cap, 0x4U, 1000);
     sys_task_exit((void *)(intptr_t)err);
 }
 
 static void user_event_wait_timeout_task(void *arg) {
-    int event_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int event_cap = sys_cap_self_slot(CAP_OBJ_EVENT, 0);
     int err = sys_event_wait(event_cap, 0x8U, 2);
     sys_task_exit((void *)(intptr_t)err);
 }
 
 static void user_channel_recv_task(void *arg) {
-    int ch_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ch_cap = sys_cap_self_slot(CAP_OBJ_CHANNEL, 0);
     uint8_t msg_buf[KERN_CH_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
 
@@ -1132,7 +1405,8 @@ static void user_channel_recv_task(void *arg) {
 }
 
 static void user_channel_recv_timeout_task(void *arg) {
-    int ch_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ch_cap = sys_cap_self_slot(CAP_OBJ_CHANNEL, 0);
     uint8_t msg_buf[KERN_CH_MSG_SIZE];
 
     for (uint32_t i = 0; i < sizeof(msg_buf); i++) {
@@ -1144,7 +1418,8 @@ static void user_channel_recv_timeout_task(void *arg) {
 }
 
 static void user_channel_send_twice_task(void *arg) {
-    int ch_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ch_cap = sys_cap_self_slot(CAP_OBJ_CHANNEL, 0);
     uint8_t msg_buf[KERN_CH_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
 
@@ -1192,7 +1467,8 @@ static void user_channel_send_caps_task(void *arg) {
 }
 
 static void user_channel_recv_caps_task(void *arg) {
-    int ch_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ch_cap = sys_cap_self_slot(CAP_OBJ_CHANNEL, 0);
     uint8_t msg_buf[KERN_CH_MSG_SIZE];
     uint32_t *msg = (uint32_t *)msg_buf;
     cap_id_t caps[IPC_CAPS_MAX];
@@ -1845,7 +2121,14 @@ static void test_user_endpoint_send_sleep_delete(void) {
     }
 
     task_start(client);
-    task_delay(1);
+    /* Do not use a one-tick timing guess here: on SMP the test runner and the
+     * new user task may be dispatched on different loaded cores.  Delete only
+     * after the syscall has actually entered its sleepable wait state. */
+    for (uint32_t wait = 0;
+         wait < 100U && task_get_state(client) != TASK_STATE_BLOCKED;
+         wait++) {
+        task_delay(1);
+    }
 
     err = endpoint_delete(ep);
     TEST_ASSERT_EQ((int)KERN_OK, (int)err, "endpoint delete woke send syscall");
@@ -2758,16 +3041,17 @@ static void test_user_channel_send_sleepable(void) {
     }
 
     task_start(sender);
-    task_delay(1);
 
     uint32_t got = 0;
-    err = channel_recv(ch, &got, 0);
+    /* A bounded blocking receive is the synchronization primitive being
+     * tested.  delay(1)+NOWAIT was scheduler-speed dependent on dual core. */
+    err = channel_recv(ch, &got, 1000);
     TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel recv opened channel slot");
     TEST_ASSERT_EQ((int)0x43485331U, (int)got,
                    "kernel received first channel msg");
 
     got = 0;
-    err = channel_recv(ch, &got, 0);
+    err = channel_recv(ch, &got, 1000);
     TEST_ASSERT_EQ((int)KERN_OK, (int)err, "kernel received second channel msg");
     TEST_ASSERT_EQ((int)0x43485332U, (int)got,
                    "sleepable channel send copied message");
@@ -2998,6 +3282,7 @@ static void test_syscall_module(void) {
     test_syscall_args();
     test_syscall_r2_integrity();
     test_syscall_bad_user_pointers();
+    test_user_local_cptr_lifecycle();
     test_syscall_security_negative();
     test_user_timer_endpoint_notification();
     test_user_mem_cap_syscalls();

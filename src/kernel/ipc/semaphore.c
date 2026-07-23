@@ -30,7 +30,8 @@ static irq_spinlock_t sem_lock;
 // 分配信号量 ID
 static sem_id_t alloc_sem_id(void) {
     for (int i = 0; i < KERN_MAX_SEMAPHORES; i++) {
-        if (!(sem_used_bitmap & (1U << i))) {
+        if (!(sem_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(sem_pool[i].hdr.generation)) {
             sem_used_bitmap |= (1U << i);
             return (sem_id_t)i;
         }
@@ -130,7 +131,7 @@ kern_err_t sem_delete(sem_id_t sem_id) {
     /* M2-Step3a: bump generation 并跨 memset 保留,使下次 alloc 拿到新 generation。
      * 即使 cap_revoke_object 漏撤某个 cap (例如 race),旧 cap 的 obj_generation
      * 与新对象的 hdr.generation 不匹配,cap_get_entry cross-check 拒绝。 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&sem->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&sem->hdr);
     memset(sem, 0, sizeof(sem_t));
     sem->hdr.obj_type   = CAP_OBJ_SEMAPHORE;
     sem->hdr.generation = next_gen;

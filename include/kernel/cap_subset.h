@@ -38,7 +38,7 @@
  *   - effective rights = requested_rights & parent->rights & ~CAP_GRANT
  *     (child ⊆ parent, CAP_GRANT always dropped).
  *   - the derived cap is linked under the parent in the cap tree and installed
- *     into new_task->cap_set[]; the supervisor does NOT receive a handle.
+ *     into new_task's CNode; the supervisor does NOT receive a handle.
  *   - new_task must be a user task with a free cspace slot.
  *
  * @param supervisor  the task authorizing the derive (must hold parent_cap).

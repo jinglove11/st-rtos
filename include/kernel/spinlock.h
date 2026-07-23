@@ -139,16 +139,18 @@ static inline void irq_spin_init_rank(irq_spinlock_t *s, uint8_t rank) {
 }
 
 static inline uint32_t irq_spin_lock(irq_spinlock_t *s) {
-    /* Check order before potentially waiting.  While contended, restore the
-     * caller's PRIMASK between try-lock attempts so a scheduler IPI can break
-     * cross-core dependencies (e.g. a remote quiesce).  Interrupts remain
-     * masked for the entire interval after the lock is actually acquired. */
+    /* Check order with local interrupts masked.  lockdep state is per-CPU and
+     * is also touched by IPI/IRQ handlers, so checking it before cpsid i left
+     * a window in which an interrupt could temporarily change the same stack
+     * and make a thread observe a lock it never held.  While contended,
+     * restore the caller's PRIMASK between attempts so a scheduler IPI can
+     * still break cross-core dependencies (e.g. a remote quiesce). */
     uint32_t primask;
     __asm volatile("mrs %0, primask" : "=r"(primask));
-    lockdep_check(s->rank, s);
 
     for (;;) {
         __asm volatile("cpsid i");
+        lockdep_check(s->rank, s);
         if (spin_trylock(&s->lock) == 0) {
             break;
         }

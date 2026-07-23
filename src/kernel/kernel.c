@@ -18,6 +18,7 @@
 #include "bh.h"
 #include "stats.h"
 #include "capability.h"
+#include "factory.h"
 #include "root_bootstrap.h"
 /* Phase F4: vfs.h 移除 (内核 VFS 已删) */
 #if DRIVER_ENABLE
@@ -43,6 +44,8 @@ void kern_init(void) {
      * 它们内部创建 cap (bh_sem/timer 等),需要 cap_pool_lock 已初始化。
      * 否则未初始化的自旋锁导致冷启动卡死。 */
     cap_init();
+    kframe_init();
+    factory_init();
     root_bootstrap_init();
 #endif
     irq_init();

@@ -63,15 +63,31 @@ static void int_to_str(int n, char *buf) {
 tcb_t task_pool[KERNEL_MAX_TASKS];
 
 /*
- * 已终止任务的 exit_value 保留表
+ * Generation-aware exit records for the legacy raw task_id join API.
  *
- * task_reclaim 会清零 TCB，但 task_join 可能还没读取 exit_value。
- * 在 TCB 被清零之前，将 exit_value 保存到这里。
- * task_join 读取后清除对应条目。
+ * Task slots must remain immediately reusable (many kernel workers are
+ * fire-and-forget), but an SMP creator can be delayed until after its child's
+ * raw ID has already been recycled.  A single record indexed only by ID then
+ * aliases the new task.  Keep a bounded history keyed by (id,generation), and
+ * remember which generation each creator received from task_create().
+ * User-facing task capabilities already carry this generation explicitly;
+ * this table is the compatibility bridge for in-kernel task_join(id).
  */
-static void *exit_retain[KERNEL_MAX_TASKS];
-static kern_err_t exit_retain_result[KERNEL_MAX_TASKS];
-static uint64_t exit_retain_bitmap = 0;
+#define TASK_EXIT_RECORD_MAX (KERNEL_MAX_TASKS * 4U)
+typedef struct {
+    task_id_t task_id;
+    uint16_t _pad;
+    uint32_t generation;
+    void *value;
+    kern_err_t result;
+    uint32_t sequence;
+    uint8_t valid;
+} task_exit_record_t;
+
+static task_exit_record_t task_exit_records[TASK_EXIT_RECORD_MAX];
+static uint32_t task_join_expected[KERNEL_MAX_TASKS][KERNEL_MAX_TASKS];
+static uint32_t task_exit_sequence;
+static uint16_t task_exit_next;
 
 /* 任务栈池 */
 static uint8_t task_stacks[KERNEL_MAX_TASKS][KERNEL_TASK_STACK_SIZE]
@@ -101,7 +117,7 @@ static tcb_t idle_tasks[SMP_MAX_CPUS];
  */
 static uint32_t task_used_words[2] = {0, 0};
 
-/* Spinlock protecting task_pool, task_used_bitmap, and exit_retain tables.
+/* Spinlock protecting task_pool, task_used_bitmap, and exit-record tables.
  * In single-core mode this is uncontended (degrades to IRQ disable). */
 static irq_spinlock_t task_lock;
 
@@ -156,7 +172,8 @@ static task_id_t find_free_task_id(void) {
     for (int i = 0; i < KERNEL_MAX_TASKS; i++) {
         uint32_t word = (uint32_t)i >> 5;
         uint32_t bit = 1u << ((uint32_t)i & 31u);
-        if ((task_used_words[word] & bit) == 0) {
+        if ((task_used_words[word] & bit) == 0 &&
+            !kobj_generation_is_retired(task_pool[i].hdr.generation)) {
             return (task_id_t)i;
         }
     }
@@ -184,6 +201,75 @@ static int task_id_is_used(task_id_t id) {
     }
     uint32_t uid = (uint32_t)id;
     return (task_used_words[uid >> 5] & (1u << (uid & 31u))) != 0;
+}
+
+/* All exit-record helpers are called with task_lock held. */
+static int task_exit_record_find(task_id_t id, uint32_t generation) {
+    for (uint32_t i = 0; i < TASK_EXIT_RECORD_MAX; i++) {
+        if (task_exit_records[i].valid &&
+            task_exit_records[i].task_id == id &&
+            task_exit_records[i].generation == generation) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int task_exit_record_latest(task_id_t id) {
+    int found = -1;
+    uint32_t newest = 0U;
+    for (uint32_t i = 0; i < TASK_EXIT_RECORD_MAX; i++) {
+        if (task_exit_records[i].valid &&
+            task_exit_records[i].task_id == id &&
+            (found < 0 || task_exit_records[i].sequence > newest)) {
+            found = (int)i;
+            newest = task_exit_records[i].sequence;
+        }
+    }
+    return found;
+}
+
+static void task_exit_record_store(tcb_t *tcb, void *value,
+                                   kern_err_t result) {
+    int slot = task_exit_record_find(tcb->id, tcb->hdr.generation);
+    if (slot < 0) {
+        slot = (int)task_exit_next;
+        task_exit_next = (uint16_t)((task_exit_next + 1U) %
+                                    TASK_EXIT_RECORD_MAX);
+    }
+    task_exit_record_t *record = &task_exit_records[slot];
+    record->task_id = tcb->id;
+    record->generation = tcb->hdr.generation;
+    record->value = value;
+    record->result = result;
+    record->sequence = ++task_exit_sequence;
+    record->valid = 1U;
+}
+
+static int task_exit_record_take(task_id_t id, uint32_t generation,
+                                 int latest, void **value,
+                                 kern_err_t *result) {
+    int slot = latest ? task_exit_record_latest(id)
+                      : task_exit_record_find(id, generation);
+    if (slot < 0) {
+        return 0;
+    }
+    task_exit_record_t *record = &task_exit_records[slot];
+    if (value != NULL) {
+        *value = record->value;
+    }
+    if (result != NULL) {
+        *result = record->result;
+    }
+    memset(record, 0, sizeof(*record));
+    return 1;
+}
+
+static void task_exit_record_remove(task_id_t id, uint32_t generation) {
+    int slot = task_exit_record_find(id, generation);
+    if (slot >= 0) {
+        memset(&task_exit_records[slot], 0, sizeof(task_exit_records[slot]));
+    }
 }
 
 static void task_cleanup_resources(tcb_t *tcb);
@@ -218,9 +304,7 @@ static void task_record_exit(tcb_t *tcb, void *retval, kern_err_t result) {
     }
 
     tcb->exit_value = retval;
-    exit_retain[tcb->id] = retval;
-    exit_retain_result[tcb->id] = result;
-    exit_retain_bitmap |= (1ULL << tcb->id);
+    task_exit_record_store(tcb, retval, result);
 }
 
 static void task_finish_termination(tcb_t *tcb, kern_err_t result) {
@@ -238,6 +322,13 @@ static void task_finish_termination(tcb_t *tcb, kern_err_t result) {
          * A remote woken joiner may run immediately, but task_delete() then
          * waits on task_lock and cannot observe a partially published exit. */
         tcb_t *joiners = task_detach_joiners_locked(tcb);
+        if (joiners != NULL) {
+            /* Every already-registered joiner has received exit_value above
+             * and will receive result from task_wake_joiner_list().  No late
+             * raw-id tombstone is needed, so normal reclaim may recycle the
+             * slot after the wakeup transaction. */
+            task_exit_record_remove(tcb->id, tcb->hdr.generation);
+        }
         tcb->reclaim_at = sched_get_tick_count() + 1U;
         tcb->state = TASK_STATE_TERMINATED;
         task_wake_joiner_list(joiners, result);
@@ -260,12 +351,21 @@ static void task_cleanup_resources(tcb_t *tcb) {
 
 #if CAP_ENABLE
     root_bootstrap_cleanup_task(tcb);
+    cnode_t *cspace = cap_space_of(tcb);
     cap_revoke_all((uint8_t)tcb->id);
     /* M2: 撤销其他任务持有的指向此 task 的 cap。
      * 防止 task id 复用后旧 cap 控制无关新 task (陈旧授权)。
      * M2-Step3c: 改用真指针 &tcb (header 在 offset 0)。 */
-    extern kern_err_t cap_revoke_object(void *object, uint8_t obj_type);
-    cap_revoke_object(tcb, CAP_OBJ_TASK);
+    (void)cap_revoke_object(tcb, CAP_OBJ_TASK);
+    if (cspace != NULL) {
+        /* A CNode is a first-class kernel object: revoke handles held by any
+         * other task before retiring this task's namespace generation. */
+        (void)cap_revoke_object(cspace, CAP_OBJ_CNODE);
+        if (cap_space_destroy(tcb) != KERN_OK) {
+            extern void kern_panic(const char *msg);
+            kern_panic("task CSpace cleanup failed");
+        }
+    }
     /* generation bump 不在此做 — task_delete 的 memset 会清零;
      * 由 task_delete 在 memset 后写回。 */
 #endif
@@ -397,9 +497,10 @@ void task_init(void) {
 
     task_used_words[0] = 0;
     task_used_words[1] = 0;
-    memset(exit_retain, 0, sizeof(exit_retain));
-    memset(exit_retain_result, 0, sizeof(exit_retain_result));
-    exit_retain_bitmap = 0;
+    memset(task_exit_records, 0, sizeof(task_exit_records));
+    memset(task_join_expected, 0, sizeof(task_join_expected));
+    task_exit_sequence = 0U;
+    task_exit_next = 0U;
 
     /* 初始化 per-CPU 空闲任务 */
     memset(idle_tasks, 0, sizeof(idle_tasks));
@@ -451,23 +552,21 @@ task_id_t task_create(const char   *name,
         return KERN_INVALID_ID;
     }
 
-    /* 清除保留表条目 (ID 可能被复用) */
-    exit_retain[id] = NULL;
-    exit_retain_result[id] = KERN_OK;
-    exit_retain_bitmap &= ~(1ULL << id);
-
     tcb_t *tcb = &task_pool[id];
 
     // 初始化 TCB
     /* M2-Step3c: 跨 memset 保留 generation。task 池复用 id 时,上次
      * task_cleanup_resources 已 bump 了 hdr.generation,这里恢复。
      * 首次分配 generation=0 → kobj_header_init 设 1。 */
-    uint16_t saved_gen = tcb->hdr.generation;
+    uint32_t saved_gen = tcb->hdr.generation;
     memset(tcb, 0, sizeof(tcb_t));
     kobj_header_init(&tcb->hdr, CAP_OBJ_TASK);
     if (saved_gen != 0) {
         tcb->hdr.generation = saved_gen;
     }
+    /* A reused creator slot must not inherit tickets issued to the task that
+     * previously occupied it. */
+    memset(task_join_expected[id], 0, sizeof(task_join_expected[id]));
     tcb->id = id;
     tcb->priority = priority;
     tcb->base_priority = priority;
@@ -477,6 +576,30 @@ task_id_t task_create(const char   *name,
     tcb->migration_state = TASK_MIGRATION_STABLE;
     tcb->attrs = TASK_ATTR_PRIVILEGED;  /* 默认创建特权任务，兼容现有代码 */
     tcb->exc_return = TASK_INITIAL_EXC_RETURN;
+
+    tcb_t *creator = sched_get_current();
+    if (creator != NULL && creator->id >= 0 &&
+        creator->id < KERNEL_MAX_TASKS && creator != tcb) {
+        task_join_expected[creator->id][id] = tcb->hdr.generation;
+    }
+
+#if CAP_ENABLE
+    /* Every ordinary task owns an independent CNode even while privileged.
+     * Privileged caps are not installed yet, but a later task_create_user()
+     * transition can populate the already-live namespace safely. */
+    if (cap_space_init(tcb) != KERN_OK) {
+        uint32_t failed_gen = tcb->hdr.generation;
+        if (creator != NULL && creator->id >= 0 &&
+            creator->id < KERNEL_MAX_TASKS) {
+            task_join_expected[creator->id][id] = 0U;
+        }
+        memset(tcb, 0, sizeof(*tcb));
+        tcb->hdr.obj_type = CAP_OBJ_TASK;
+        tcb->hdr.generation = failed_gen;
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_INVALID_ID;
+    }
+#endif
 
     // 设置名称
     if (name) {
@@ -731,12 +854,27 @@ kern_err_t task_delete(task_id_t task_id) {
 
     tcb_t *tcb = &task_pool[task_id];
     uint32_t crit = irq_spin_lock(&task_lock);
+    tcb_t *caller = sched_get_current();
+    uint32_t expected_generation = 0U;
+    if (caller != NULL && caller->id >= 0 &&
+        caller->id < KERNEL_MAX_TASKS) {
+        expected_generation = task_join_expected[caller->id][task_id];
+    }
+
+    /* A creator may delete an old generation after another core has already
+     * reused the numeric ID.  Treat that as deleting/detaching the creator's
+     * generation; never kill the unrelated live occupant. */
+    if (expected_generation != 0U &&
+        (!task_id_is_used(task_id) ||
+         tcb->hdr.generation != expected_generation)) {
+        task_exit_record_remove(task_id, expected_generation);
+        task_join_expected[caller->id][task_id] = 0U;
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_OK;
+    }
 
     if (!task_id_is_used(task_id)) {
-        if (exit_retain_bitmap & (1ULL << task_id)) {
-            exit_retain_result[task_id] = KERN_OK;
-            exit_retain_bitmap &= ~(1ULL << task_id);
-            exit_retain[task_id] = NULL;
+        if (task_exit_record_take(task_id, 0U, 1, NULL, NULL)) {
             irq_spin_unlock(&task_lock, crit);
             return KERN_OK;
         }
@@ -758,11 +896,12 @@ kern_err_t task_delete(task_id_t task_id) {
             return KERN_ERR_BUSY;
         }
 
-        exit_retain_bitmap &= ~(1ULL << task_id);
-        exit_retain[task_id] = NULL;
-        exit_retain_result[task_id] = KERN_OK;
+        task_exit_record_remove(task_id, tcb->hdr.generation);
+        if (expected_generation != 0U) {
+            task_join_expected[caller->id][task_id] = 0U;
+        }
         free_task_id(task_id);
-        uint16_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
+        uint32_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
         memset(tcb, 0, sizeof(tcb_t));
         tcb->hdr.obj_type = CAP_OBJ_TASK;
         tcb->hdr.generation = next_gen;
@@ -823,14 +962,22 @@ kern_err_t task_delete(task_id_t task_id) {
     }
 
     /* Detach joiners before the slot becomes reusable.  Their join_value is
-     * already copied and exit_retain preserves the result across memset. */
+     * already copied; generation-aware exit records cover late joiners. */
     tcb_t *joiners = task_detach_joiners_locked(tcb);
+
+    /* Explicit delete is also the detach operation for an unjoined zombie.
+     * Registered joiners are woken below with NOEXIST, while a future raw-id
+     * join must not consume a record belonging to the deleted generation. */
+    task_exit_record_remove(task_id, tcb->hdr.generation);
+    if (expected_generation != 0U) {
+        task_join_expected[caller->id][task_id] = 0U;
+    }
 
     // 先撤销可见性，再清零 TCB，避免扫描路径看到半清理槽位
     free_task_id(task_id);
     /* 跨 memset bump generation:task_create 复用此 slot 时 saved_gen
      * 非 0 → 用新 generation → 旧 task cap cross-check 失效 (M2 验收 A1)。 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
     memset(tcb, 0, sizeof(tcb_t));
     tcb->hdr.obj_type   = CAP_OBJ_TASK;
     tcb->hdr.generation = next_gen;
@@ -1058,13 +1205,30 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     }
 
     uint32_t crit = irq_spin_lock(&task_lock);
+    uint32_t expected_generation = 0U;
+    if (current->id >= 0 && current->id < KERNEL_MAX_TASKS) {
+        expected_generation = task_join_expected[current->id][task_id];
+    }
+
+    /* The slot may already contain a newer task.  Resolve the creator's
+     * generation ticket before consulting the raw live-ID bitmap. */
+    if (expected_generation != 0U &&
+        (!task_id_is_used(task_id) ||
+         task_pool[task_id].hdr.generation != expected_generation)) {
+        kern_err_t result = KERN_OK;
+        if (task_exit_record_take(task_id, expected_generation, 0,
+                                  retval, &result)) {
+            irq_spin_unlock(&task_lock, crit);
+            return result;
+        }
+        task_join_expected[current->id][task_id] = 0U;
+        irq_spin_unlock(&task_lock, crit);
+        return KERN_ERR_NOEXIST;
+    }
+
     if (!task_id_is_used(task_id)) {
-        if (exit_retain_bitmap & (1ULL << task_id)) {
-            if (retval) *retval = exit_retain[task_id];
-            kern_err_t result = exit_retain_result[task_id];
-            exit_retain_bitmap &= ~(1ULL << task_id);
-            exit_retain[task_id] = NULL;
-            exit_retain_result[task_id] = KERN_OK;
+        kern_err_t result = KERN_OK;
+        if (task_exit_record_take(task_id, 0U, 1, retval, &result)) {
             irq_spin_unlock(&task_lock, crit);
             return result;
         }
@@ -1091,13 +1255,11 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
      * this list under the same task_lock before waking us. */
     if (tcb->state == TASK_STATE_TERMINATED &&
         tcb->reclaim_at != TASK_RECLAIM_CLEANING) {
-        if (retval) *retval = tcb->exit_value;
-        kern_err_t result = (exit_retain_bitmap & (1ULL << task_id))
-                            ? exit_retain_result[task_id] : KERN_OK;
-        /* 清除保留表条目 */
-        exit_retain_bitmap &= ~(1ULL << task_id);
-        exit_retain[task_id] = NULL;
-        exit_retain_result[task_id] = KERN_OK;
+        kern_err_t result = KERN_OK;
+        if (!task_exit_record_take(task_id, tcb->hdr.generation, 0,
+                                   retval, &result) && retval != NULL) {
+            *retval = tcb->exit_value;
+        }
         irq_spin_unlock(&task_lock, crit);
         return result;
     }
@@ -1263,11 +1425,8 @@ void task_reclaim(tcb_t *tcb) {
     /* 还有 joiner 在等 — 延迟回收 */
     if (tcb->joiners) return;
 
-    /*
-     * 设置 reclaim_at 延迟回收，给 task_join 一拍的时间读取
-     * exit_value/state。避免 PendSV 立即清零 TCB 导致 joiner
-     * 看不到 TERMINATED 状态。
-     */
+    /* Delay one tick so an already-running joiner can still observe the live
+     * TERMINATED TCB.  Later joins use the separate generation-aware record. */
     uint32_t crit = irq_spin_lock(&task_lock);
     if (tcb->reclaim_at == 0) {
         tcb->reclaim_at = sched_get_tick_count() + 1;
@@ -1289,7 +1448,7 @@ void task_reclaim_expired(void) {
         if (tcb->joiners) continue;
 
         free_task_id(id);
-        uint16_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
+        uint32_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
         memset(tcb, 0, sizeof(tcb_t));
         tcb->hdr.obj_type = CAP_OBJ_TASK;
         tcb->hdr.generation = next_gen;

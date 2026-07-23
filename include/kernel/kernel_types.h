@@ -52,9 +52,14 @@ typedef int16_t mutex_id_t;      // 互斥锁 ID
 typedef int16_t queue_id_t;      // 消息队列 ID
 typedef int16_t event_id_t;      // 事件标志组 ID
 typedef int16_t timer_id_t;      // 定时器 ID
-typedef int16_t         cap_id_t;        // 能力 ID
+/* Capability handles use bit 31 as the invalid/sign bit and keep every valid
+ * handle positive.  The capability implementation currently assigns bits
+ * [6:0] to the global slot and bits [30:7] to a non-wrapping generation. */
+typedef int32_t         cap_id_t;        // 能力句柄 (slot + generation)
 typedef int16_t ep_id_t;         // Endpoint ID
 typedef int16_t ch_id_t;         // Channel ID
+
+struct cnode;
 
 #define KERN_INVALID_ID      (-1)
 #define KERN_WAIT_FOREVER    UINT32_MAX
@@ -208,12 +213,10 @@ typedef struct tcb {
 
     // --- 能力 ---
 #if CAP_ENABLE
-    /* M2-#4: CSpace 扩容 32→64 slot/task。
-     * capabilities 位图 uint32→uint64 (支持 64 slot);
-     * cap_set[] 用 KERN_TASK_CAP_SLOTS 配置驱动 (Kconfig range 8-64)。
-     * 128 slot 留待 mint/copy 大量派生时再加 uint64[2] 两级。 */
-    uint64_t    capabilities;         // 能力位图 (64 bit)
-    cap_id_t    cap_set[KERN_TASK_CAP_SLOTS];  // 持有的能力集
+    /* M2 CSpace: 叶 CNode 存储与 TCB 分离，TCB 只持有指针。
+     * 这使 task slot 复用/清零 TCB 时，CNode 自己的 slot generation
+     * 仍能持续递增，为后续 local CPtr ABI 提供不回绕基础。 */
+    struct cnode *cspace;
 #endif
 
     // --- 统计信息 ---
@@ -370,8 +373,8 @@ typedef struct {
 
 #if KERN_ENABLE_CAPABILITY
 typedef struct {
-    uint16_t    token;                 // 能力令牌
-    uint16_t    rights;                // 权限位图
+    cap_id_t    token;                 // 32-bit 能力句柄
+    uint8_t     rights;                // 权限位图
     task_id_t   owner;                 // 拥有者
     void       *object;                // 关联对象
 } capability_t;

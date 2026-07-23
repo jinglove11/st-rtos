@@ -80,7 +80,8 @@ static uint8_t *ch_syscall_recv_cap_count[KERNEL_MAX_TASKS];
 
 static ch_id_t alloc_ch_id(void) {
     for (int i = 0; i < KERN_MAX_CHANNELS; i++) {
-        if (!(ch_used_bitmap & (1U << i))) {
+        if (!(ch_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(ch_pool[i].hdr.generation)) {
             ch_used_bitmap |= (1U << i);
             return (ch_id_t)i;
         }
@@ -323,7 +324,7 @@ ch_id_t channel_create(uint16_t msg_size, uint32_t shm_size) {
 
     channel_t *ch = &ch_pool[id];
     /* M2-Step3b: 跨 memset 保留 generation */
-    uint16_t saved_gen = ch->hdr.generation;
+    uint32_t saved_gen = ch->hdr.generation;
     memset(ch, 0, sizeof(channel_t));
     kobj_header_init(&ch->hdr, CAP_OBJ_CHANNEL);
     if (saved_gen != 0) {
@@ -385,7 +386,7 @@ kern_err_t channel_delete(ch_id_t ch_id) {
     (void)cap_revoke_object(ch, CAP_OBJ_CHANNEL);
 #endif
     /* M2-Step3b: bump generation 跨 memset 保留 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&ch->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&ch->hdr);
     memset(ch, 0, sizeof(channel_t));
     ch->hdr.obj_type   = CAP_OBJ_CHANNEL;
     ch->hdr.generation = next_gen;

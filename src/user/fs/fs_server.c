@@ -518,7 +518,7 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
         }
     }
 
-    /* fs_server 的 fd 表在 ctx 里,随 memblock 释放自动消失 */
+    /* fs_server 的 fd 表在 ctx 里,随 Frame 释放自动消失 */
     if (store_mem_cap > 0) {
         (void)sys_mem_free(store_mem_cap);
     }

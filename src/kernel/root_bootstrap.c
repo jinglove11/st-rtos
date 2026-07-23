@@ -6,6 +6,7 @@
 #include "root_bootstrap.h"
 #include "capability.h"
 #include "endpoint.h"
+#include "factory.h"
 #include "task.h"
 #include <string.h>
 
@@ -27,6 +28,7 @@ void root_bootstrap_init(void) {
     memset(root_services, 0, sizeof(root_services));
     root_bootstrap.task_id = KERN_INVALID_ID;
     root_bootstrap.root_endpoint = KERN_INVALID_ID;
+    root_bootstrap.factory_cap = KERN_INVALID_ID;
     for (int i = 0; i < ROOT_BOOTSTRAP_SERVICE_MAX; i++) {
         root_services[i].task_id = KERN_INVALID_ID;
         root_services[i].endpoint = KERN_INVALID_ID;
@@ -117,8 +119,18 @@ kern_err_t root_bootstrap_prepare(tcb_t *root_task) {
         return err;
     }
 
+    cap_id_t factory_cap = factory_create_root_cap(
+        root_task, factory_supported_mask(), CAP_FULL);
+    if (factory_cap < 0) {
+        cap_delete(task_cap);
+        root_bootstrap_init();
+        return KERN_ERR_RESOURCE;
+    }
+    root_bootstrap.factory_cap = factory_cap;
+
     ep_id_t ep_id = endpoint_create("root", KERN_EP_MSG_SIZE, 4);
     if (ep_id < 0) {
+        cap_delete(factory_cap);
         cap_delete(task_cap);
         root_bootstrap_init();
         return KERN_ERR_RESOURCE;
@@ -127,6 +139,7 @@ kern_err_t root_bootstrap_prepare(tcb_t *root_task) {
     cap_id_t ep_cap = cap_create_for(root_task, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL);
     if (ep_cap < 0) {
         (void)endpoint_delete(ep_id);
+        cap_delete(factory_cap);
         cap_delete(task_cap);
         root_bootstrap_init();
         return KERN_ERR_RESOURCE;
@@ -136,6 +149,17 @@ kern_err_t root_bootstrap_prepare(tcb_t *root_task) {
     err = root_bootstrap_add_cap(ep_cap, CAP_OBJ_ENDPOINT, CAP_FULL);
     if (err != KERN_OK) {
         cap_delete(ep_cap);
+        cap_delete(factory_cap);
+        cap_delete(task_cap);
+        root_bootstrap_init();
+        return err;
+    }
+
+    err = root_bootstrap_add_cap(factory_cap, CAP_OBJ_FACTORY, CAP_FULL);
+    if (err != KERN_OK) {
+        cap_delete(ep_cap);
+        (void)endpoint_delete(ep_id);
+        cap_delete(factory_cap);
         cap_delete(task_cap);
         root_bootstrap_init();
         return err;
@@ -210,19 +234,29 @@ kern_err_t root_bootstrap_create_service(const char *name,
         return KERN_ERR_NOEXIST;
     }
 
-    task_id_t tid = task_create_user(name ? name : "service", entry, arg,
-                                     priority, stack_size);
-    if (tid < 0) {
-        return KERN_ERR_RESOURCE;
+    factory_create_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.obj_type = CAP_OBJ_TASK;
+    request.rights = CAP_FULL;
+    request.entry = (uint32_t)(uintptr_t)entry;
+    request.arg = (uint32_t)(uintptr_t)arg;
+    request.param0 = priority;
+    request.param1 = stack_size;
+    if (name != NULL) {
+        strncpy(request.name, name, sizeof(request.name) - 1U);
     }
 
-    cap_id_t cap = cap_create_for(root_task,
-                                  task_obj_for_cap(tid),
-                                  CAP_OBJ_TASK, CAP_FULL);
+    cap_id_t cap = factory_create_for(root_task, root_bootstrap.factory_cap,
+                                      &request);
     if (cap < 0) {
-        (void)task_delete(tid);
-        return KERN_ERR_RESOURCE;
+        return (kern_err_t)cap;
     }
+    void *task_obj = cap_lookup_for(root_task, cap, CAP_OBJ_TASK, CAP_MANAGE);
+    if (task_obj == NULL) {
+        cap_delete(cap);
+        return KERN_ERR_CAP;
+    }
+    task_id_t tid = task_id_from_obj(task_obj);
 
     if (out_task != NULL) {
         *out_task = tid;
@@ -289,20 +323,31 @@ kern_err_t root_bootstrap_create_service_endpoint(cap_id_t service_task_cap,
         return KERN_ERR_NOEXIST;
     }
 
-    ep_id_t ep_id = endpoint_create(name ? name : "service",
-                                    msg_size, max_pending);
-    if (ep_id < 0) {
-        return KERN_ERR_RESOURCE;
+    factory_create_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.obj_type = CAP_OBJ_ENDPOINT;
+    request.rights = CAP_FULL;
+    request.param0 = msg_size;
+    request.param1 = max_pending;
+    if (name != NULL) {
+        strncpy(request.name, name, sizeof(request.name) - 1U);
     }
 
-    cap_id_t root_cap = cap_create_for(root_task, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT, CAP_FULL);
+    cap_id_t root_cap = factory_create_for(
+        root_task, root_bootstrap.factory_cap, &request);
     if (root_cap < 0) {
-        (void)endpoint_delete(ep_id);
-        return KERN_ERR_RESOURCE;
+        return (kern_err_t)root_cap;
     }
+    void *endpoint_obj = cap_lookup_for(root_task, root_cap,
+                                        CAP_OBJ_ENDPOINT, CAP_MANAGE);
+    if (endpoint_obj == NULL) {
+        cap_delete(root_cap);
+        return KERN_ERR_CAP;
+    }
+    ep_id_t ep_id = endpoint_id_from_obj(endpoint_obj);
 
-    cap_id_t service_cap = cap_create_for(service_task, endpoint_obj_for_cap(ep_id), CAP_OBJ_ENDPOINT,
-                                          CAP_READ | CAP_WRITE);
+    cap_id_t service_cap = cap_copy_to(root_task, root_cap, service_task,
+                                       CAP_READ | CAP_WRITE);
     if (service_cap < 0) {
         cap_delete(root_cap);
         (void)endpoint_delete(ep_id);
@@ -346,6 +391,7 @@ kern_err_t root_bootstrap_get_info(root_bootstrap_info_t *out) {
         memset(out, 0, sizeof(*out));
         out->task_id = KERN_INVALID_ID;
         out->root_endpoint = KERN_INVALID_ID;
+        out->factory_cap = KERN_INVALID_ID;
         return KERN_ERR_NOEXIST;
     }
 

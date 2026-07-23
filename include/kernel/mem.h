@@ -39,6 +39,15 @@ uint32_t mem_get_outstanding_allocs(void);
 uint32_t mem_get_fail_count(void);
 
 #if CAP_ENABLE
+/* M2 Frame object.  The persistent metadata pool keeps object generation
+ * across backing-memory release/reuse; kmem_* remains the compatibility API. */
+#ifndef KFRAME_OBJECT_MAX
+#define KFRAME_OBJECT_MAX 16
+#endif
+
+void     kframe_init(void);
+cap_id_t kframe_create_cap_for(tcb_t *owner, size_t size, uint8_t rights);
+cap_id_t kframe_create_cap(size_t size, uint8_t rights);
 cap_id_t kmem_alloc_cap(size_t size, uint8_t rights);
 void    *kmem_resolve_cap(cap_id_t cap, uint8_t required_rights);
 kern_err_t kmem_free_cap(cap_id_t cap);

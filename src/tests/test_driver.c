@@ -1481,7 +1481,7 @@ static void test_uart_user_server_ipc(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "driver server root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "driver server cleanup restored caps");
 }
 
@@ -1684,7 +1684,7 @@ static void test_uart_user_server_protocol_errors(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "driver error server root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "driver error server cleanup restored caps");
 }
 
@@ -1956,6 +1956,10 @@ static void test_uart_driver_lookup_release_caps(void) {
     }
     TEST_ASSERT(inbox_cap >= 0, "driver release inbox cap created");
 
+    void *inbox_obj = inbox_ep >= 0
+        ? endpoint_obj_for_cap(inbox_ep) : NULL;
+    uint16_t inbox_refs_before = inbox_obj != NULL
+        ? cap_object_refcount(inbox_obj, CAP_OBJ_ENDPOINT) : 0U;
     uint16_t cap_free_before_lookups = cap_free_count();
     for (uint32_t i = 0; i < 4U; i++) {
         cap_id_t lookup_cap = KERN_INVALID_ID;
@@ -1968,16 +1972,23 @@ static void test_uart_driver_lookup_release_caps(void) {
         TEST_ASSERT_EQ((int)KERN_OK,
                        driver_release_service(inbox_cap, lookup_cap),
                        "driver release service ACK OK");
-        if (lookup_cap > 0) {
-            cap_delete(lookup_cap);
-            test_pass("driver release deletes lookup cap");
-        }
+        TEST_ASSERT(cap_resolve(lookup_cap, CAP_OBJ_ENDPOINT, CAP_READ) == NULL,
+                    "driver release deletes lookup cap");
+        /*
+         * The ACK wakes the lower-priority name server; it does not wait for
+         * that task to revoke its temporary inbox cap.  A global free-slot
+         * count is also racy on SMP because unrelated tasks may allocate caps
+         * concurrently.  Follow the exact endpoint object instead.
+         */
         for (uint32_t wait = 0;
-             wait < 4U && cap_free_count() != cap_free_before_lookups;
+             wait < 100U && inbox_obj != NULL &&
+             cap_object_refcount(inbox_obj, CAP_OBJ_ENDPOINT) >
+                 inbox_refs_before;
              wait++) {
             task_delay(1);
         }
-        TEST_ASSERT(cap_free_count() >= cap_free_before_lookups,
+        TEST_ASSERT_EQ((int)inbox_refs_before,
+                    (int)cap_object_refcount(inbox_obj, CAP_OBJ_ENDPOINT),
                     "driver release restores temporary cap");
     }
 
@@ -2443,7 +2454,7 @@ static void test_uart_driver_resource_attach_missing_cap(void) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
                        "driver missing-cap root deleted");
     }
-    TEST_ASSERT_EQ((int)cap_free_after_root + 2, (int)cap_free_count(),
+    TEST_ASSERT_EQ((int)cap_free_after_root + 3, (int)cap_free_count(),
                    "driver missing-cap cleanup restored caps");
 }
 

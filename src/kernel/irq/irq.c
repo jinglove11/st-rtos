@@ -173,9 +173,10 @@ static void irq_record_event(int16_t irq, uint8_t action,
 static irq_cap_object_t *irq_cap_alloc_object(void) {
     uint32_t crit = irq_spin_lock(&irq_table_lock);
     for (int i = 0; i < IRQ_MAX_USER; i++) {
-        if (!irq_cap_objects[i].in_use) {
+        if (!irq_cap_objects[i].in_use &&
+            !kobj_generation_is_retired(irq_cap_objects[i].hdr.generation)) {
             /* M2-Step3d: 跨 memset 保留 generation (free 时已 bump) */
-            uint16_t saved_gen = irq_cap_objects[i].hdr.generation;
+            uint32_t saved_gen = irq_cap_objects[i].hdr.generation;
             memset(&irq_cap_objects[i], 0, sizeof(irq_cap_objects[i]));
             kobj_header_init(&irq_cap_objects[i].hdr, CAP_OBJ_IRQ);
             if (saved_gen != 0) {
@@ -194,7 +195,7 @@ static void irq_cap_free_object(irq_cap_object_t *obj) {
     if (obj != NULL) {
         uint32_t crit = irq_spin_lock(&irq_table_lock);
         /* M2-Step3d: bump generation 跨 memset 保留 */
-        uint16_t next_gen = kobj_header_prepare_reuse(&obj->hdr);
+        uint32_t next_gen = kobj_header_prepare_reuse(&obj->hdr);
         memset(obj, 0, sizeof(*obj));
         obj->hdr.obj_type   = CAP_OBJ_IRQ;
         obj->hdr.generation = next_gen;

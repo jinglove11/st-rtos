@@ -66,7 +66,7 @@
 
 /* 能力管理 */
 #define SYSCALL_CAP_DERIVE       29
-#define SYSCALL_CAP_TRANSFER     30
+#define SYSCALL_CAP_TRANSFER     30  /* legacy raw-target ABI; kernel only */
 #define SYSCALL_CAP_REVOKE       31
 
 /* VFS */
@@ -125,12 +125,13 @@
 #define SYSCALL_MMIO_UNMAP       76
 #define SYSCALL_MMIO_REQUEST     77
 #define SYSCALL_TASK_SET_POLICY  78
-#define SYSCALL_MEM_MAP          79            /* map memblock into task MPU */
+#define SYSCALL_MEM_MAP          79            /* compatibility: map Frame into task MPU */
 #define SYSCALL_CAP_TRANSFER_TO  80            /* transfer cap to task (via task cap) */
 #define SYSCALL_EP_SENDER        81            /* get last IPC sender task id */
 #define SYSCALL_CAP_SELF_SLOT    82            /* M2-Step2c: find nth cap of obj_type in self CSpace */
 #define SYSCALL_CAP_MINT         83            /* M2-#7: derive cap with rights subset + badge */
 #define SYSCALL_CAP_BADGE        84            /* M2-#7: read badge of a cap */
+#define SYSCALL_FACTORY_CREATE   85            /* M2: capability-authorized object creation */
 
 /*============================================================================
  * Syscall 分发

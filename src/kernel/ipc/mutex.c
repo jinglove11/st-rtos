@@ -28,7 +28,8 @@ static irq_spinlock_t mux_lock; /* M1: SMP safe */
 // 分配互斥锁 ID
 static mutex_id_t alloc_mutex_id(void) {
     for (int i = 0; i < KERN_MAX_MUTEXES; i++) {
-        if (!(mutex_used_bitmap & (1U << i))) {
+        if (!(mutex_used_bitmap & (1U << i)) &&
+            !kobj_generation_is_retired(mutex_pool[i].hdr.generation)) {
             mutex_used_bitmap |= (1U << i);
             return (mutex_id_t)i;
         }
@@ -234,7 +235,7 @@ kern_err_t mutex_delete(mutex_id_t mutex_id) {
     (void)cap_revoke_object(mutex, CAP_OBJ_MUTEX);
 #endif
     /* M2-Step3a: bump generation 跨 memset 保留 */
-    uint16_t next_gen = kobj_header_prepare_reuse(&mutex->hdr);
+    uint32_t next_gen = kobj_header_prepare_reuse(&mutex->hdr);
     memset(mutex, 0, sizeof(mutex_t));
     mutex->hdr.obj_type   = CAP_OBJ_MUTEX;
     mutex->hdr.generation = next_gen;

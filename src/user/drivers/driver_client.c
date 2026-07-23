@@ -5,6 +5,7 @@
 
 #include "driver_client.h"
 #include "nameserver.h"
+#include "user_api.h"
 
 #if DRIVER_ENABLE && CAP_ENABLE
 
@@ -57,12 +58,13 @@ int driver_lookup_uart(int ns_ep_cap, cap_id_t inbox_cap,
 }
 
 int driver_release_service(cap_id_t inbox_cap, cap_id_t service_cap) {
-    if (inbox_cap <= 0) {
+    if (inbox_cap <= 0 || service_cap <= 0) {
         return KERN_ERR_PARAM;
     }
 
-    (void)service_cap;
-    return nameserver_lookup_ack(inbox_cap);
+    int ack_err = nameserver_lookup_ack(inbox_cap);
+    int cap_err = sys_cap_revoke(service_cap);
+    return ack_err != KERN_OK ? ack_err : cap_err;
 }
 
 int driver_name_server_status(int ns_ep_cap, uint32_t timeout) {

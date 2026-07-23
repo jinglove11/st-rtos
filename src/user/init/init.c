@@ -35,16 +35,18 @@
 #define NS_PRIORITY           6
 #define NS_STACK              1536
 
-/* fs_server 的任务体:arg = ep_cap */
+/* 服务启动后从自己的 CNode 取 cap；Move 后目标 CPtr 与源 CPtr 不同。 */
 static void fs_server_entry(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     int err = fs_server_run(ep_cap, 0);
     sys_task_exit((void *)(intptr_t)err);
 }
 
 /* nameserver 的任务体:arg = ep_cap */
 static void ns_entry(void *arg) {
-    int ep_cap = (int)(uintptr_t)arg;
+    (void)arg;
+    int ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     int err = nameserver_service_run(ep_cap, 0);
     sys_task_exit((void *)(intptr_t)err);
 }
@@ -67,15 +69,14 @@ static int init_spawn_service(const char *name, task_func_t entry,
         return self_cap;
     }
 
-    /* 创建服务任务,arg=ep_cap (r0 收到) */
-    int task_cap = sys_task_create(name, entry,
-                                   (void *)(uintptr_t)ep_cap,
+    /* 创建服务任务；服务从目标 CNode 查询 Move 后的新 CPtr。 */
+    int task_cap = sys_task_create(name, entry, NULL,
                                    prio, stack);
     if (task_cap < 0) {
         return task_cap;
     }
 
-    /* 把原始 ep_cap 转移给服务 (cap_id 不变,r0 的 arg 就是它的 ep_cap) */
+    /* 把原始 ep_cap Move 给服务，目标 CNode 会生成新的本地 CPtr。 */
     int xfer = sys_cap_transfer_to(ep_cap, task_cap);
     if (xfer != KERN_OK) {
         return xfer;
