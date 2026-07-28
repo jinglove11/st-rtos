@@ -17,14 +17,6 @@
  * 事件等待控制块 (存储在任务的 block_obj 中)
  *============================================================================*/
 
-typedef struct {
-    uint32_t    wait_flags;
-    uint32_t    wait_opt;
-    uint32_t   *received;
-} event_wait_t;
-
-static event_wait_t event_wait_info[KERN_MAX_TASKS];
-
 /*============================================================================
  * 静态分配的事件标志组池
  *============================================================================*/
@@ -85,7 +77,6 @@ static int event_check(uint32_t current, uint32_t wait, uint32_t opt) {
 void event_init(void) {
     irq_spin_init_rank(&event_lock, LOCKDEP_RANK_OBJECT);
     memset(event_pool, 0, sizeof(event_pool));
-    memset(event_wait_info, 0, sizeof(event_wait_info));
     event_used_bitmap = 0;
 }
 
@@ -128,10 +119,7 @@ kern_err_t event_delete(event_id_t event_id) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
-        if (tcb->id >= 0 && tcb->id < KERN_MAX_TASKS) {
-            memset(&event_wait_info[tcb->id], 0,
-                   sizeof(event_wait_info[tcb->id]));
-        }
+        memset(&tcb->cont.u.event, 0, sizeof(tcb->cont.u.event));
         tcb->block_result = KERN_ERR_NOEXIST;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
@@ -226,12 +214,10 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
     current->block_reason = BLOCK_REASON_EVENT;
     current->block_obj = evt;
 
-    task_id_t tid = current->id;
-    if (tid >= 0 && tid < KERN_MAX_TASKS) {
-        event_wait_info[tid].wait_flags = flags;
-        event_wait_info[tid].wait_opt = opt;
-        event_wait_info[tid].received = received;
-    }
+    /* M3-Task3: continuation 存 TCB 而非全局 side table */
+    current->cont.u.event.wait_flags = flags;
+    current->cont.u.event.wait_opt = opt;
+    current->cont.u.event.received = received;
 
     wait_queue_add(&evt->wait_queue, current);
 
@@ -321,9 +307,9 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
         return KERN_ERR_STATE;
     }
 
-    event_wait_info[current->id].wait_flags = flags;
-    event_wait_info[current->id].wait_opt = opt;
-    event_wait_info[current->id].received = NULL;
+    current->cont.u.event.wait_flags = flags;
+    current->cont.u.event.wait_opt = opt;
+    current->cont.u.event.received = NULL;
 
     current->syscall_blocked = 1;
     current->block_reason = BLOCK_REASON_EVENT;
@@ -360,25 +346,24 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
         tcb_t *next = tcb->wait_next;
 
         task_id_t tid = tcb->id;
-        uint32_t wait_flags = 0;
-        uint32_t wait_opt = 0;
 
         if (tid < 0 || tid >= KERN_MAX_TASKS) {
             tcb = next;
             continue;
         }
 
-        wait_flags = event_wait_info[tid].wait_flags;
-        wait_opt = event_wait_info[tid].wait_opt;
+        /* M3-Task3: continuation 从 TCB 读 */
+        uint32_t wait_flags = tcb->cont.u.event.wait_flags;
+        uint32_t wait_opt = tcb->cont.u.event.wait_opt;
 
         if (event_check(evt->flags, wait_flags, wait_opt)) {
-            if (event_wait_info[tid].received != NULL) {
-                *event_wait_info[tid].received = evt->flags;
+            if (tcb->cont.u.event.received != NULL) {
+                *tcb->cont.u.event.received = evt->flags;
             }
             if (wait_opt & EVENT_OPT_CLEAR) {
                 evt->flags &= ~wait_flags;
             }
-            memset(&event_wait_info[tid], 0, sizeof(event_wait_info[tid]));
+            memset(&tcb->cont.u.event, 0, sizeof(tcb->cont.u.event));
             wait_queue_remove(&evt->wait_queue, tcb);
             tcb->block_result = KERN_OK;
             sched_wakeup(tcb, KERN_OK);

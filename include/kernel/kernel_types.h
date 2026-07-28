@@ -145,6 +145,36 @@ typedef struct {
 } shm_mapping_t;
 #endif
 
+/*============================================================================
+ * M3-Task3: 统一 continuation 状态
+ *
+ * 一个任务同一时刻只能阻塞在一个 IPC 操作上。用 union 收拢原先散在
+ * endpoint.c/channel.c/mqueue.c/event.c 按 task_id 索引的 side table。
+ * SVC handler asm 不引用这些字段 (只用 sp/exc_return/attrs/sp_limit)。
+ *============================================================================*/
+
+typedef struct {
+    void *msg_buf;          /* user 消息缓冲区指针 (通用) */
+    union {
+        /* endpoint recv continuation */
+        struct {
+            cap_id_t *out_caps;
+            uint8_t  *out_cap_count;
+        } ep_recv;
+        /* channel recv continuation */
+        struct {
+            cap_id_t *out_caps;
+            uint8_t  *out_cap_count;
+        } ch;
+        /* event wait continuation */
+        struct {
+            uint32_t  wait_flags;
+            uint32_t  wait_opt;
+            uint32_t *received;
+        } event;
+    } u;
+} syscall_cont_t;
+
 typedef struct tcb {
     /* M2-Step3c: kobject_header_t 在 offset 0。
      * sp 移到 hdr 之后 (offset 12),asm 用 [rX, #OFF_SP] 访问
@@ -198,6 +228,9 @@ typedef struct tcb {
     // --- 等待队列链表节点 ---
     struct tcb *wait_next;            // 下一个 (等待队列)
     struct tcb *wait_prev;            // 前一个 (等待队列)
+
+    // --- M3-Task3: 统一 continuation payload ---
+    syscall_cont_t cont;              // 阻塞 IPC 的 continuation 状态
 
     // --- MPU 内存保护 (Phase 1) ---
     uint8_t     attrs;                // TASK_ATTR_PRIVILEGED / TASK_ATTR_USER
