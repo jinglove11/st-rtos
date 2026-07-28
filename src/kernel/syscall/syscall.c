@@ -29,6 +29,7 @@
 
 #if CAP_ENABLE
 #include "capability.h"
+#include "abi.h"
 #include "factory.h"
 #endif
 #if CAP_RESTART_SUBSET
@@ -1350,6 +1351,14 @@ static int sys_factory_create(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+/* M3-Step1: 返回内核 ABI 版本 (MAJOR << 16) | MINOR。
+ * 无参数,任何上下文可调用 (含 ISR)。 */
+static int sys_abi_version(uint32_t a1, uint32_t a2, uint32_t a3,
+                                    uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    return (int)KERN_ABI_VERSION;
+}
+
 static int sys_cap_revoke(uint32_t a1, uint32_t a2, uint32_t a3,
                                   uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a2);U(a3);U(a4);U(a5);U(a6);
@@ -1825,6 +1834,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_MINT,      sys_cap_mint,      3),
     SYSDEF(SYSCALL_CAP_BADGE,     sys_cap_badge,     1),
     SYSDEF(SYSCALL_FACTORY_CREATE, sys_factory_create, 3),
+    SYSDEF(SYSCALL_ABI_VERSION,    sys_abi_version,    0),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),

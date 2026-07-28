@@ -76,6 +76,9 @@
 #define KERN_VERSION_MAJOR (1)
 #define KERN_VERSION_MINOR (0)
 #define KERN_VERSION_PATCH (0)
+/* M3-Step1: 内核 syscall ABI 版本 (跟项目版本独立) */
+#define KERN_ABI_MAJOR (1)
+#define KERN_ABI_MINOR (0)
 #define MBEDTLS 1
 #define MEM_DYNAMIC 1
 #define MEM_HEAP_SIZE (16384)

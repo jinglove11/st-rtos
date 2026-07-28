@@ -132,6 +132,7 @@
 #define SYSCALL_CAP_MINT         83            /* M2-#7: derive cap with rights subset + badge */
 #define SYSCALL_CAP_BADGE        84            /* M2-#7: read badge of a cap */
 #define SYSCALL_FACTORY_CREATE   85            /* M2: capability-authorized object creation */
+#define SYSCALL_ABI_VERSION      86            /* M3-Step1: query kernel ABI version */
 
 /*============================================================================
  * Syscall 分发

@@ -396,6 +396,11 @@ static inline int sys_factory_create(
                      (int)sizeof(factory_create_request_t));
 }
 
+/* M3-Step1: 查询内核 ABI 版本。返回 (MAJOR << 16) | MINOR。 */
+static inline uint32_t sys_abi_version(void) {
+    return (uint32_t)sys_call0(SYSCALL_ABI_VERSION);
+}
+
 /*============================================================================
  * Channel (P2P) — 用户态内联封装
  *============================================================================*/
