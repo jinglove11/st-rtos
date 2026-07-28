@@ -12,6 +12,7 @@
 #define FACTORY_H
 
 #include "capability.h"
+#include "abi.h"
 
 #if CAP_ENABLE
 
@@ -33,8 +34,10 @@
      FACTORY_OBJECT_BIT(CAP_OBJ_FRAME))
 
 /* Fixed-size syscall request.  Pointer fields are represented as 32-bit
- * target addresses so this structure remains an explicit Cortex-M ABI. */
+ * target addresses so this structure remains an explicit Cortex-M ABI.
+ * M3-Step2: 以 abi_header_t 开头 (version + size),内核用 ABI_CHECK 校验。 */
 typedef struct {
+    abi_header_t hdr;         /* M3-Step2: version=0, size=sizeof(this) */
     uint8_t  obj_type;
     uint8_t  rights;       /* zero selects CAP_FULL */
     uint16_t flags;        /* reserved; must be zero */
@@ -45,6 +48,10 @@ typedef struct {
     uint32_t arg;
     char     name[KERN_TASK_NAME_LEN];
 } factory_create_request_t;
+
+_Static_assert(sizeof(factory_create_request_t) ==
+               sizeof(abi_header_t) + 4 + 12 + 8 + KERN_TASK_NAME_LEN,
+               "factory_create_request_t layout guard");
 
 /* Request parameter mapping:
  * TASK:      entry, arg, param0=priority, param1=stack size

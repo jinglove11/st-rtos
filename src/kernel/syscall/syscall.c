@@ -1324,12 +1324,21 @@ static int sys_factory_create(uint32_t a1, uint32_t a2, uint32_t a3,
                               uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a4);U(a5);U(a6);
 #if CAP_ENABLE
-    if (a3 != sizeof(factory_create_request_t)) {
+    (void)a3;  /* M3-Step2: size 不再作为单独参数,由 abi_header_t 携带 */
+
+    /* M3-Step2: 先 copy abi_header_t 验证,再 copy 完整结构 */
+    abi_header_t user_hdr;
+    kern_err_t err = copy_from_user(
+        &user_hdr, (const void *)(uintptr_t)a2, sizeof(abi_header_t));
+    if (err != KERN_OK) {
+        return err;
+    }
+    if (!ABI_CHECK(&user_hdr, sizeof(factory_create_request_t))) {
         return KERN_ERR_PARAM;
     }
 
     factory_create_request_t request;
-    kern_err_t err = copy_from_user(
+    err = copy_from_user(
         &request, (const void *)(uintptr_t)a2, sizeof(request));
     if (err != KERN_OK) {
         return err;
@@ -1833,7 +1842,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_SELF_SLOT, sys_cap_self_slot, 2),
     SYSDEF(SYSCALL_CAP_MINT,      sys_cap_mint,      3),
     SYSDEF(SYSCALL_CAP_BADGE,     sys_cap_badge,     1),
-    SYSDEF(SYSCALL_FACTORY_CREATE, sys_factory_create, 3),
+    SYSDEF(SYSCALL_FACTORY_CREATE, sys_factory_create, 2),
     SYSDEF(SYSCALL_ABI_VERSION,    sys_abi_version,    0),
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),

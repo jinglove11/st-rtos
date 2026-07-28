@@ -390,10 +390,12 @@ static inline int sys_cap_rights(int cap) {
 }
 
 static inline int sys_factory_create(
-    int factory_cap, const factory_create_request_t *request) {
-    return sys_call3(SYSCALL_FACTORY_CREATE, factory_cap,
-                     (int)(uintptr_t)request,
-                     (int)sizeof(factory_create_request_t));
+    int factory_cap, factory_create_request_t *request) {
+    /* M3-Step2: request 自带 abi_header_t (version+size),不再单独传 size */
+    request->hdr.version = KERN_ABI_MINOR;
+    request->hdr.size = sizeof(factory_create_request_t);
+    return sys_call2(SYSCALL_FACTORY_CREATE, factory_cap,
+                     (int)(uintptr_t)request);
 }
 
 /* M3-Step1: 查询内核 ABI 版本。返回 (MAJOR << 16) | MINOR。 */
