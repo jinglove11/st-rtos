@@ -86,9 +86,7 @@ static uint32_t ep_server_gen[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static uint8_t ep_server_dead[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static task_id_t ep_last_receiver[KERN_MAX_ENDPOINTS];
 static uint32_t ep_last_receiver_gen[KERN_MAX_ENDPOINTS];
-static void *ep_syscall_recv_msg[KERNEL_MAX_TASKS];
-static cap_id_t *ep_syscall_recv_caps[KERNEL_MAX_TASKS];
-static uint8_t *ep_syscall_recv_cap_count[KERNEL_MAX_TASKS];
+/* M3-Task3: recv continuation 移到 TCB->cont (msg_buf + ep_recv union) */
 static uint32_t ep_request_gen_buffers[KERN_MAX_ENDPOINTS][KERN_EP_MAX_PENDING];
 static ipc_cap_xfer_t ep_cap_xfer_buffers[KERN_MAX_ENDPOINTS]
                                           [KERN_EP_MAX_PENDING]
@@ -290,9 +288,7 @@ void endpoint_init(void) {
         ep_last_receiver[ep] = KERN_INVALID_ID;
         ep_last_receiver_gen[ep] = 0;
     }
-    memset(ep_syscall_recv_msg, 0, sizeof(ep_syscall_recv_msg));
-    memset(ep_syscall_recv_caps, 0, sizeof(ep_syscall_recv_caps));
-    memset(ep_syscall_recv_cap_count, 0, sizeof(ep_syscall_recv_cap_count));
+    /* M3-Task3: recv side table 已移到 TCB->cont,不再 memset */
     memset(ep_request_gen_buffers, 0, sizeof(ep_request_gen_buffers));
     memset(ep_cap_xfer_buffers, 0, sizeof(ep_cap_xfer_buffers));
     memset(ep_cap_count_buffers, 0, sizeof(ep_cap_count_buffers));
@@ -388,9 +384,9 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     while (tcb) {
         tcb_t *next = tcb->wait_next;
         if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
-            ep_syscall_recv_msg[tcb->id] = NULL;
-            ep_syscall_recv_caps[tcb->id] = NULL;
-            ep_syscall_recv_cap_count[tcb->id] = NULL;
+            tcb->cont.msg_buf = NULL;
+            tcb->cont.u.ep_recv.out_caps = NULL;
+            tcb->cont.u.ep_recv.out_cap_count = NULL;
         }
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
@@ -497,9 +493,9 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
         ep_client_msg[tcb->id] = NULL;
         ep_client_gen[tcb->id] = 0;
         ep_syscall_client_msg[tcb->id] = NULL;
-        ep_syscall_recv_msg[tcb->id] = NULL;
-        ep_syscall_recv_caps[tcb->id] = NULL;
-        ep_syscall_recv_cap_count[tcb->id] = NULL;
+        tcb->cont.msg_buf = NULL;
+        tcb->cont.u.ep_recv.out_caps = NULL;
+        tcb->cont.u.ep_recv.out_cap_count = NULL;
         ep_id_t ep_id = (ep_id_t)(ep - ep_pool);
         if (ep_last_receiver[ep_id] == tcb->id) {
             ep_last_receiver[ep_id] = KERN_INVALID_ID;
@@ -523,34 +519,34 @@ static int endpoint_deliver_to_syscall_recv(ep_id_t ep_id,
     if (server->id < 0 || server->id >= KERNEL_MAX_TASKS) {
         return 0;
     }
-    if (server->syscall_blocked == 0 || ep_syscall_recv_msg[server->id] == NULL) {
+    if (server->syscall_blocked == 0 || server->cont.msg_buf == NULL) {
         return 0;
     }
     if (cap_count > 0 &&
-        (ep_syscall_recv_caps[server->id] == NULL ||
-         ep_syscall_recv_cap_count[server->id] == NULL)) {
+        (server->cont.u.ep_recv.out_caps == NULL ||
+         server->cont.u.ep_recv.out_cap_count == NULL)) {
         return 0;
     }
 
-    memcpy(ep_syscall_recv_msg[server->id], msg, ep->msg_size);
+    memcpy(server->cont.msg_buf, msg, ep->msg_size);
     if (cap_count > 0) {
         kern_err_t err = ipc_transfer_caps(sender,
                                            server,
                                            caps,
                                            cap_count,
-                                           ep_syscall_recv_caps[server->id]);
+                                           server->cont.u.ep_recv.out_caps);
         if (err != KERN_OK) {
             sender->block_result = err;
             return 0;
         }
-        *ep_syscall_recv_cap_count[server->id] = cap_count;
-    } else if (ep_syscall_recv_cap_count[server->id] != NULL) {
-        *ep_syscall_recv_cap_count[server->id] = 0;
+        *server->cont.u.ep_recv.out_cap_count = cap_count;
+    } else if (server->cont.u.ep_recv.out_cap_count != NULL) {
+        *server->cont.u.ep_recv.out_cap_count = 0;
     }
 
-    ep_syscall_recv_msg[server->id] = NULL;
-    ep_syscall_recv_caps[server->id] = NULL;
-    ep_syscall_recv_cap_count[server->id] = NULL;
+    server->cont.msg_buf = NULL;
+    server->cont.u.ep_recv.out_caps = NULL;
+    server->cont.u.ep_recv.out_cap_count = NULL;
     ep_server_dead[ep_id][server->id] = 0;
     ep_server_sender[ep_id][server->id] = sender;
     ep_server_gen[ep_id][server->id] = request_gen;
@@ -786,14 +782,14 @@ kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
         if (server != NULL &&
             server->syscall_blocked &&
             server->id >= 0 && server->id < KERNEL_MAX_TASKS &&
-            ep_syscall_recv_msg[server->id] != NULL) {
-            memcpy(ep_syscall_recv_msg[server->id], msg, ep->msg_size);
-            if (ep_syscall_recv_cap_count[server->id] != NULL) {
-                *ep_syscall_recv_cap_count[server->id] = 0;
+            server->cont.msg_buf != NULL) {
+            memcpy(server->cont.msg_buf, msg, ep->msg_size);
+            if (server->cont.u.ep_recv.out_cap_count != NULL) {
+                *server->cont.u.ep_recv.out_cap_count = 0;
             }
-            ep_syscall_recv_msg[server->id] = NULL;
-            ep_syscall_recv_caps[server->id] = NULL;
-            ep_syscall_recv_cap_count[server->id] = NULL;
+            server->cont.msg_buf = NULL;
+            server->cont.u.ep_recv.out_caps = NULL;
+            server->cont.u.ep_recv.out_cap_count = NULL;
             ep_server_dead[ep_id][server->id] = 0;
             ep_server_sender[ep_id][server->id] = NULL;
             ep_server_gen[ep_id][server->id] = 0;
@@ -1223,7 +1219,7 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
         return KERN_ERR_TIMEOUT;
     }
 
-    ep_syscall_recv_msg[current->id] = user_msg;
+    current->cont.msg_buf = user_msg;
     current->syscall_blocked = 1;
     current->block_reason = BLOCK_REASON_EP_RECV;
     current->block_obj = ep;
@@ -1289,9 +1285,9 @@ kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
         return KERN_ERR_TIMEOUT;
     }
 
-    ep_syscall_recv_msg[current->id] = user_msg;
-    ep_syscall_recv_caps[current->id] = out_caps;
-    ep_syscall_recv_cap_count[current->id] = out_cap_count;
+    current->cont.msg_buf = user_msg;
+    current->cont.u.ep_recv.out_caps = out_caps;
+    current->cont.u.ep_recv.out_cap_count = out_cap_count;
     current->syscall_blocked = 1;
     current->block_reason = BLOCK_REASON_EP_RECV;
     current->block_obj = ep;
