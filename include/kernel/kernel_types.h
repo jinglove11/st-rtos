@@ -154,7 +154,10 @@ typedef struct {
  *============================================================================*/
 
 typedef struct {
-    void *msg_buf;          /* user 消息缓冲区指针 (通用) */
+    void *msg_buf;          /* user 消息缓冲区指针 (recv: out buf) */
+    void *reply_buf;        /* endpoint send: client reply-out buffer (独立于 msg_buf,
+                               生命周期不同: send 时设,reply 后清) */
+    uint32_t request_gen;   /* endpoint send: per-client request generation token */
     union {
         /* endpoint recv continuation */
         struct {
