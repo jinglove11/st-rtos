@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "continuation.h"
 #include "capability.h"
 #include <string.h>
 
@@ -311,22 +312,12 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
     current->cont.u.event.wait_opt = opt;
     current->cont.u.event.received = NULL;
 
-    current->cont.active = 1;
-    current->cont.op = BLOCK_REASON_EVENT;
-    current->cont.object = evt;
-    current->cont.result = KERN_OK;
+    /* M3-Task3: 两阶段阻塞协议 */
+    syscall_cont_prepare_locked(BLOCK_REASON_EVENT, evt);
     wait_queue_add(&evt->wait_queue, current);
 
-    {
-        extern void sched_remove_ready(tcb_t *tcb);
-        sched_remove_ready(current);
-    }
-
-    current->state = TASK_STATE_BLOCKED;
-    current->cont.deadline = sched_timeout_deadline(timeout);
-
     irq_spin_unlock(&event_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_cont_commit(timeout);
 }
 #endif
 

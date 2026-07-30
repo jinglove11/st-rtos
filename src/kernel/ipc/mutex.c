@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "continuation.h"
 #include "capability.h"
 #include <string.h>
 
@@ -414,19 +415,11 @@ kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
     mutex_priority_inherit(mutex, current);
 #endif
 
-    current->cont.active = 1;
-    current->cont.op = BLOCK_REASON_MUTEX;
-    current->cont.object = mutex;
-    current->cont.result = KERN_OK;
+    syscall_cont_prepare_locked(BLOCK_REASON_MUTEX, mutex);
     wait_queue_add(&mutex->wait_queue, current);
 
-    sched_remove_ready(current);
-    current->state = TASK_STATE_BLOCKED;
-
-    current->cont.deadline = sched_timeout_deadline(timeout);
-
     irq_spin_unlock(&mux_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_cont_commit(timeout);
 }
 #endif
 

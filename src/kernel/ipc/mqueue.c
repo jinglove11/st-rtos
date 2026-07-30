@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "continuation.h"
 #include "capability.h"
 #include <string.h>
 
@@ -398,19 +399,11 @@ kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
 
     memcpy(mqueue_syscall_send_msg[current->id], msg, mq->msg_size);
 
-    current->cont.active = 1;
-    current->cont.op = BLOCK_REASON_QUEUE;
-    current->cont.object = mq;
-    current->cont.result = KERN_OK;
+    syscall_cont_prepare_locked(BLOCK_REASON_QUEUE, mq);
     wait_queue_add(&mq->send_queue, current);
 
-    {
-        extern void sched_remove_ready(tcb_t *tcb);
-        sched_remove_ready(current);
-    }
-
-    current->state = TASK_STATE_BLOCKED;
-    current->cont.deadline = sched_timeout_deadline(timeout);
+    irq_spin_unlock(&mqueue_lock, crit);
+    return syscall_cont_commit(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;
@@ -563,22 +556,11 @@ kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
     }
 
     current->cont.msg_buf = user_msg;
-    current->cont.active = 1;
-    current->cont.op = BLOCK_REASON_QUEUE;
-    current->cont.object = mq;
-    current->cont.result = KERN_OK;
+    syscall_cont_prepare_locked(BLOCK_REASON_QUEUE, mq);
     wait_queue_add(&mq->recv_queue, current);
 
-    {
-        extern void sched_remove_ready(tcb_t *tcb);
-        sched_remove_ready(current);
-    }
-
-    current->state = TASK_STATE_BLOCKED;
-    current->cont.deadline = sched_timeout_deadline(timeout);
-
     irq_spin_unlock(&mqueue_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_cont_commit(timeout);
 }
 #endif
 
