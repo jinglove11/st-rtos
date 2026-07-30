@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "spinlock.h"
 #include "syscall.h"
+#include "continuation.h"
 #include "capability.h"
 #include <string.h>
 
@@ -272,19 +273,10 @@ kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
         return KERN_ERR_STATE;
     }
 
-    current->syscall_blocked = 1;
-    current->block_reason = BLOCK_REASON_SEM;
-    current->block_obj = sem;
-    current->block_result = KERN_OK;
     wait_queue_add(&sem->wait_queue, current);
 
-    sched_remove_ready(current);
-    current->state = TASK_STATE_BLOCKED;
-
-    current->wake_tick = sched_timeout_deadline(timeout);
-
     irq_spin_unlock(&sem_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_block_current(BLOCK_REASON_SEM, sem, timeout);
 }
 #endif
 
