@@ -120,7 +120,7 @@ kern_err_t event_delete(event_id_t event_id) {
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
         memset(&tcb->cont.u.event, 0, sizeof(tcb->cont.u.event));
-        tcb->block_result = KERN_ERR_NOEXIST;
+        tcb->cont.result = KERN_ERR_NOEXIST;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
@@ -211,8 +211,8 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
     }
 
     tcb_t *current = sched_get_current();
-    current->block_reason = BLOCK_REASON_EVENT;
-    current->block_obj = evt;
+    current->cont.op = BLOCK_REASON_EVENT;
+    current->cont.object = evt;
 
     /* M3-Task3: continuation 存 TCB 而非全局 side table */
     current->cont.u.event.wait_flags = flags;
@@ -229,9 +229,9 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
 
     /* 设置阻塞状态 */
     current->state = TASK_STATE_BLOCKED;
-    current->block_result = KERN_OK;
+    current->cont.result = KERN_OK;
 
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&event_lock, crit);
 
@@ -244,7 +244,7 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
         __asm volatile("dmb");
     }
 
-    kern_err_t result = current->block_result;
+    kern_err_t result = current->cont.result;
 
     if (result == KERN_OK) {
         /* The signaler (event_set) already copied the matched word into
@@ -255,16 +255,16 @@ kern_err_t event_wait(event_id_t event_id, uint32_t flags, uint32_t opt,
          * copy+clear. Only ensure the task is unlinked from the wait queue if
          * the signaler didn't (it normally does). */
         crit = irq_spin_lock(&event_lock);
-        if (current->block_obj == evt) {
+        if (current->cont.object == evt) {
             wait_queue_remove(&evt->wait_queue, current);
-            current->block_obj = NULL;
+            current->cont.object = NULL;
         }
         irq_spin_unlock(&event_lock, crit);
     } else {
         crit = irq_spin_lock(&event_lock);
-        if (current->block_obj == evt) {
+        if (current->cont.object == evt) {
             wait_queue_remove(&evt->wait_queue, current);
-            current->block_obj = NULL;
+            current->cont.object = NULL;
         }
         irq_spin_unlock(&event_lock, crit);
     }
@@ -311,10 +311,10 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
     current->cont.u.event.wait_opt = opt;
     current->cont.u.event.received = NULL;
 
-    current->syscall_blocked = 1;
-    current->block_reason = BLOCK_REASON_EVENT;
-    current->block_obj = evt;
-    current->block_result = KERN_OK;
+    current->cont.active = 1;
+    current->cont.op = BLOCK_REASON_EVENT;
+    current->cont.object = evt;
+    current->cont.result = KERN_OK;
     wait_queue_add(&evt->wait_queue, current);
 
     {
@@ -323,7 +323,7 @@ kern_err_t event_wait_syscall(event_id_t event_id, uint32_t flags,
     }
 
     current->state = TASK_STATE_BLOCKED;
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&event_lock, crit);
     return KERN_SYSCALL_BLOCKED;
@@ -365,7 +365,7 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
             }
             memset(&tcb->cont.u.event, 0, sizeof(tcb->cont.u.event));
             wait_queue_remove(&evt->wait_queue, tcb);
-            tcb->block_result = KERN_OK;
+            tcb->cont.result = KERN_OK;
             sched_wakeup(tcb, KERN_OK);
         }
 

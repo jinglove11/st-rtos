@@ -79,12 +79,12 @@ static kern_err_t syscall_block_sleep(uint32_t ticks) {
 
     uint32_t crit = hal_enter_critical();
     sched_remove_ready(cur);
-    cur->syscall_blocked = 1;
+    cur->cont.active = 1;
     cur->state = TASK_STATE_BLOCKED;
-    cur->block_reason = BLOCK_REASON_SLEEP;
-    cur->block_obj = NULL;
-    cur->block_result = KERN_OK;
-    cur->wake_tick = sched_get_tick_count() + ticks;
+    cur->cont.op = BLOCK_REASON_SLEEP;
+    cur->cont.object = NULL;
+    cur->cont.result = KERN_OK;
+    cur->cont.deadline = sched_get_tick_count() + ticks;
     hal_exit_critical(crit);
 
     return KERN_SYSCALL_BLOCKED;

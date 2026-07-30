@@ -179,13 +179,7 @@ typedef struct {
     } u;
 } syscall_cont_t;
 
-/* M3-Task3 兼容宏: 让现有代码用旧字段名访问 cont 内字段。
- * Step 2 迁移完所有子系统后删除这些宏。 */
-#define block_reason   cont.op
-#define block_obj      cont.object
-#define block_result   cont.result
-#define wake_tick      cont.deadline
-#define syscall_blocked cont.active
+/* M3-Task3: 兼容宏已删除,所有引用改为 cont.* 直接访问。 */
 
 typedef struct tcb {
     /* M2-Step3c: kobject_header_t 在 offset 0。

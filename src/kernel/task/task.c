@@ -373,7 +373,7 @@ static void task_cleanup_resources(tcb_t *tcb) {
 }
 
 static void task_unlink_from_join_target(tcb_t *tcb) {
-    tcb_t *target = (tcb_t *)tcb->block_obj;
+    tcb_t *target = (tcb_t *)tcb->cont.object;
 
     if (target == NULL) {
         return;
@@ -395,7 +395,7 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
         return KERN_OK;
     }
 
-    switch (tcb->block_reason) {
+    switch (tcb->cont.op) {
     case BLOCK_REASON_NONE:
     case BLOCK_REASON_SLEEP:
     case BLOCK_REASON_TIMER:
@@ -407,33 +407,33 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
         break;
 
     case BLOCK_REASON_SEM:
-        if (tcb->block_obj) {
-            sem_cleanup_task(tcb->block_obj, tcb);
+        if (tcb->cont.object) {
+            sem_cleanup_task(tcb->cont.object, tcb);
         }
         break;
 
     case BLOCK_REASON_MUTEX:
-        if (tcb->block_obj) {
-            mutex_cleanup_task(tcb->block_obj, tcb);
+        if (tcb->cont.object) {
+            mutex_cleanup_task(tcb->cont.object, tcb);
         }
         break;
 
     case BLOCK_REASON_QUEUE:
-        if (tcb->block_obj) {
-            mqueue_cleanup_task(tcb->block_obj, tcb);
+        if (tcb->cont.object) {
+            mqueue_cleanup_task(tcb->cont.object, tcb);
         }
         break;
 
     case BLOCK_REASON_EVENT:
-        if (tcb->block_obj) {
-            event_cleanup_task(tcb->block_obj, tcb);
+        if (tcb->cont.object) {
+            event_cleanup_task(tcb->cont.object, tcb);
         }
         break;
 
     case BLOCK_REASON_EP_SEND:
     case BLOCK_REASON_EP_RECV:
 #if IPC_ENDPOINT
-        endpoint_cleanup_task(tcb->block_obj, tcb);
+        endpoint_cleanup_task(tcb->cont.object, tcb);
 #else
         return KERN_ERR_BUSY;
 #endif
@@ -442,7 +442,7 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
     case BLOCK_REASON_CH_SEND:
     case BLOCK_REASON_CH_RECV:
 #if IPC_CHANNEL
-        channel_cleanup_task(tcb->block_obj, tcb);
+        channel_cleanup_task(tcb->cont.object, tcb);
 #else
         return KERN_ERR_BUSY;
 #endif
@@ -454,9 +454,9 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
 
     tcb->wait_next = NULL;
     tcb->wait_prev = NULL;
-    tcb->block_reason = BLOCK_REASON_NONE;
-    tcb->block_obj = NULL;
-    tcb->wake_tick = 0;
+    tcb->cont.op = BLOCK_REASON_NONE;
+    tcb->cont.object = NULL;
+    tcb->cont.deadline = 0;
     return KERN_OK;
 }
 
@@ -476,12 +476,12 @@ kern_err_t task_cancel_blocked_wait(tcb_t *tcb) {
 }
 
 void task_complete_blocked_syscall(tcb_t *tcb, kern_err_t result) {
-    if (tcb == NULL || tcb->syscall_blocked == 0) {
+    if (tcb == NULL || tcb->cont.active == 0) {
         return;
     }
 
     task_write_saved_svc_r0(tcb, result);
-    tcb->syscall_blocked = 0;
+    tcb->cont.active = 0;
 }
 
 /*============================================================================
@@ -1271,14 +1271,14 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     current->join_next = tcb->joiners;
     tcb->joiners = current;
     current->state = TASK_STATE_BLOCKED;
-    current->block_reason = BLOCK_REASON_JOIN;
-    current->block_obj = tcb;
-    current->block_result = KERN_OK;
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.op = BLOCK_REASON_JOIN;
+    current->cont.object = tcb;
+    current->cont.result = KERN_OK;
+    current->cont.deadline = sched_timeout_deadline(timeout);
     irq_spin_unlock(&task_lock, crit);
 
     sched_yield();
-    kern_err_t err = current->block_result;
+    kern_err_t err = current->cont.result;
 
     if (err == KERN_OK) {
         if (retval) {
@@ -1297,9 +1297,9 @@ void task_cancel_join_wait(tcb_t *tcb) {
 
     uint32_t crit = irq_spin_lock(&task_lock);
     if (tcb->state == TASK_STATE_BLOCKED &&
-        tcb->block_reason == BLOCK_REASON_JOIN) {
+        tcb->cont.op == BLOCK_REASON_JOIN) {
         task_unlink_from_join_target(tcb);
-        tcb->block_obj = NULL;
+        tcb->cont.object = NULL;
     }
     irq_spin_unlock(&task_lock, crit);
 }

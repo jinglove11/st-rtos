@@ -116,7 +116,7 @@ kern_err_t sem_delete(sem_id_t sem_id) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
-        tcb->block_result = KERN_ERR_NOEXIST;  // 对象已删除
+        tcb->cont.result = KERN_ERR_NOEXIST;  // 对象已删除
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
@@ -199,8 +199,8 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
     }
 
     tcb_t *current = sched_get_current();
-    current->block_reason = BLOCK_REASON_SEM;
-    current->block_obj = sem;
+    current->cont.op = BLOCK_REASON_SEM;
+    current->cont.object = sem;
 
     wait_queue_add(&sem->wait_queue, current);
 
@@ -212,9 +212,9 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
 
     /* 设置阻塞状态 */
     current->state = TASK_STATE_BLOCKED;
-    current->block_result = KERN_OK;
+    current->cont.result = KERN_OK;
 
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&sem_lock, crit);
 
@@ -227,13 +227,13 @@ kern_err_t sem_wait(sem_id_t sem_id, uint32_t timeout) {
         __asm volatile("dmb");
     }
 
-    kern_err_t result = current->block_result;
+    kern_err_t result = current->cont.result;
 
     crit = irq_spin_lock(&sem_lock);
     if (result != KERN_OK) {
-        if (current->block_obj == sem) {
+        if (current->cont.object == sem) {
             wait_queue_remove(&sem->wait_queue, current);
-            current->block_obj = NULL;
+            current->cont.object = NULL;
         }
     }
     irq_spin_unlock(&sem_lock, crit);
@@ -272,16 +272,16 @@ kern_err_t sem_wait_syscall(sem_id_t sem_id, uint32_t timeout) {
         return KERN_ERR_STATE;
     }
 
-    current->syscall_blocked = 1;
-    current->block_reason = BLOCK_REASON_SEM;
-    current->block_obj = sem;
-    current->block_result = KERN_OK;
+    current->cont.active = 1;
+    current->cont.op = BLOCK_REASON_SEM;
+    current->cont.object = sem;
+    current->cont.result = KERN_OK;
     wait_queue_add(&sem->wait_queue, current);
 
     sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
 
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&sem_lock, crit);
     return KERN_SYSCALL_BLOCKED;
@@ -322,7 +322,7 @@ kern_err_t sem_post(sem_id_t sem_id) {
         tcb_t *tcb = wait_queue_get_highest(&sem->wait_queue);
         if (tcb) {
             wait_queue_remove(&sem->wait_queue, tcb);
-            tcb->block_result = KERN_OK;
+            tcb->cont.result = KERN_OK;
             sched_wakeup(tcb, KERN_OK);
         }
     } else {

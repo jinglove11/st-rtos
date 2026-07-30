@@ -289,7 +289,9 @@ SVC_Handler:
     bx      lr
 
 .L_svc_halt:
-    b       .
+    /* M3-Task3: 不再静默 spin。触发 UsageFault (UDF) 让 fault handler
+     * 报告 "no runnable task after SVC block"。 */
+    udf     #0
 
     .size SVC_Handler, . - SVC_Handler
     .thumb_set isr_svcall, SVC_Handler

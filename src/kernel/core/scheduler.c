@@ -734,16 +734,16 @@ static void sched_process_timeouts(void) {
 
         tcb_t *tcb = task_get_tcb(id);
         if (tcb == NULL || tcb->state != TASK_STATE_BLOCKED ||
-            tcb->wake_tick == 0U || tcb->wake_tick > now) {
+            tcb->cont.deadline == 0U || tcb->cont.deadline > now) {
             continue;
         }
 
         kern_err_t wake_result =
-            (tcb->block_reason == BLOCK_REASON_SLEEP) ? KERN_OK :
+            (tcb->cont.op == BLOCK_REASON_SLEEP) ? KERN_OK :
                                                         KERN_ERR_TIMEOUT;
-        if (tcb->block_reason == BLOCK_REASON_JOIN) {
+        if (tcb->cont.op == BLOCK_REASON_JOIN) {
             task_cancel_join_wait(tcb);
-        } else if (tcb->syscall_blocked) {
+        } else if (tcb->cont.active) {
             (void)task_cancel_blocked_wait(tcb);
         }
         sched_wakeup(tcb, wake_result);
@@ -1104,12 +1104,12 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
 
     /* 设置阻塞状态 */
     current->state = TASK_STATE_BLOCKED;
-    current->block_reason = reason;
-    current->block_obj = obj;
-    current->block_result = KERN_OK;
+    current->cont.op = reason;
+    current->cont.object = obj;
+    current->cont.result = KERN_OK;
 
     /* 设置超时唤醒时间；0/WAIT_FOREVER 均表示无期限等待。 */
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     rq->need_resched = 1;
 
@@ -1125,7 +1125,7 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
      * 当任务被唤醒后，会从这里继续执行
      * block_result 已经由 sched_wakeup() 设置
      */
-    return current->block_result;
+    return current->cont.result;
 }
 
 /**
@@ -1157,9 +1157,9 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     uint32_t crit = hal_irq_save();
 
     /* 清除阻塞信息 (block_obj 保留，由 IPC 原语负责清理等待队列) */
-    tcb->block_reason = BLOCK_REASON_NONE;
-    tcb->block_result = result;
-    tcb->wake_tick = 0;
+    tcb->cont.op = BLOCK_REASON_NONE;
+    tcb->cont.result = result;
+    tcb->cont.deadline = 0;
     task_complete_blocked_syscall(tcb, result);
 
     hal_irq_restore(crit);
@@ -1332,8 +1332,8 @@ void sched_tick_handler(void) {
      * with IRQs already masked and never waits for a cross-core lock. */
     if (timeout_service_tcb != NULL &&
         timeout_service_tcb->state == TASK_STATE_BLOCKED &&
-        timeout_service_tcb->block_reason == BLOCK_REASON_TIMER &&
-        timeout_service_tcb->block_obj == &scheduler) {
+        timeout_service_tcb->cont.op == BLOCK_REASON_TIMER &&
+        timeout_service_tcb->cont.object == &scheduler) {
         sched_wakeup(timeout_service_tcb, KERN_OK);
     }
 

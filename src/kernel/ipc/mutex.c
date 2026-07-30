@@ -150,15 +150,15 @@ static bool mutex_would_deadlock(mutex_t *mutex, tcb_t *caller)
             return false;
         }
 
-        if (owner_tcb->block_reason != BLOCK_REASON_MUTEX) {
+        if (owner_tcb->cont.op != BLOCK_REASON_MUTEX) {
             return false;
         }
 
-        if (owner_tcb->block_obj == NULL) {
+        if (owner_tcb->cont.object == NULL) {
             return false;
         }
 
-        mutex_t *owner_mutex = (mutex_t *)owner_tcb->block_obj;
+        mutex_t *owner_mutex = (mutex_t *)owner_tcb->cont.object;
         current_owner = owner_mutex->owner;
     }
 
@@ -224,7 +224,7 @@ kern_err_t mutex_delete(mutex_id_t mutex_id) {
         tcb_t *next = tcb->wait_next;
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
-        tcb->block_result = KERN_ERR_NOEXIST;
+        tcb->cont.result = KERN_ERR_NOEXIST;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
@@ -321,8 +321,8 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
      * mutex_priority_inherit(); RUNNING owners only need the priority write. */
 #endif
 
-    current->block_reason = BLOCK_REASON_MUTEX;
-    current->block_obj = mutex;
+    current->cont.op = BLOCK_REASON_MUTEX;
+    current->cont.object = mutex;
 
     wait_queue_add(&mutex->wait_queue, current);
 
@@ -334,9 +334,9 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
 
     /* 设置阻塞状态 */
     current->state = TASK_STATE_BLOCKED;
-    current->block_result = KERN_OK;
+    current->cont.result = KERN_OK;
 
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mux_lock, crit);
 
@@ -349,13 +349,13 @@ kern_err_t mutex_lock(mutex_id_t mutex_id, uint32_t timeout) {
         __asm volatile("dmb");
     }
 
-    kern_err_t result = current->block_result;
+    kern_err_t result = current->cont.result;
 
     crit = irq_spin_lock(&mux_lock);
     if (result != KERN_OK) {
-        if (current->block_obj == mutex) {
+        if (current->cont.object == mutex) {
             wait_queue_remove(&mutex->wait_queue, current);
-            current->block_obj = NULL;
+            current->cont.object = NULL;
         }
     }
     irq_spin_unlock(&mux_lock, crit);
@@ -414,16 +414,16 @@ kern_err_t mutex_lock_syscall(mutex_id_t mutex_id, uint32_t timeout) {
     mutex_priority_inherit(mutex, current);
 #endif
 
-    current->syscall_blocked = 1;
-    current->block_reason = BLOCK_REASON_MUTEX;
-    current->block_obj = mutex;
-    current->block_result = KERN_OK;
+    current->cont.active = 1;
+    current->cont.op = BLOCK_REASON_MUTEX;
+    current->cont.object = mutex;
+    current->cont.result = KERN_OK;
     wait_queue_add(&mutex->wait_queue, current);
 
     sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
 
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mux_lock, crit);
     return KERN_SYSCALL_BLOCKED;
@@ -502,7 +502,7 @@ kern_err_t mutex_unlock(mutex_id_t mutex_id) {
             mutex->lock_count = 1;
             mutex->owner_original_prio = tcb->priority;
 
-            tcb->block_result = KERN_OK;
+            tcb->cont.result = KERN_OK;
             sched_wakeup(tcb, KERN_OK);
         }
     } else {
@@ -534,14 +534,14 @@ int mutex_deadlock_check(void)
         if (tcb->state != TASK_STATE_BLOCKED) {
             continue;
         }
-        if (tcb->block_reason != BLOCK_REASON_MUTEX) {
+        if (tcb->cont.op != BLOCK_REASON_MUTEX) {
             continue;
         }
-        if (tcb->block_obj == NULL) {
+        if (tcb->cont.object == NULL) {
             continue;
         }
 
-        mutex_t *blocking_mutex = (mutex_t *)tcb->block_obj;
+        mutex_t *blocking_mutex = (mutex_t *)tcb->cont.object;
         if (mutex_would_deadlock(blocking_mutex, tcb)) {
             deadlocked_count++;
         }

@@ -94,22 +94,22 @@ static void mqueue_wake_recv_waiter(mqueue_t *mq) {
     }
 
 #if SYSCALL_ENABLE
-    if (tcb->syscall_blocked &&
+    if (tcb->cont.active &&
         tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS &&
         tcb->cont.msg_buf != NULL) {
         mqueue_do_get(mq, tcb->cont.msg_buf);
         tcb->cont.msg_buf = NULL;
         wait_queue_remove(&mq->recv_queue, tcb);
-        tcb->block_result = KERN_OK;
-        tcb->block_obj = NULL;
+        tcb->cont.result = KERN_OK;
+        tcb->cont.object = NULL;
         sched_wakeup(tcb, KERN_OK);
         return;
     }
 #endif
 
     wait_queue_remove(&mq->recv_queue, tcb);
-    tcb->block_result = KERN_OK;
-    tcb->block_obj = NULL;
+    tcb->cont.result = KERN_OK;
+    tcb->cont.object = NULL;
     sched_wakeup(tcb, KERN_OK);
 }
 
@@ -124,12 +124,12 @@ static void mqueue_wake_send_waiter(mqueue_t *mq) {
     }
 
 #if SYSCALL_ENABLE
-    if (tcb->syscall_blocked &&
+    if (tcb->cont.active &&
         tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
         mqueue_do_put(mq, mqueue_syscall_send_msg[tcb->id]);
         wait_queue_remove(&mq->send_queue, tcb);
-        tcb->block_result = KERN_OK;
-        tcb->block_obj = NULL;
+        tcb->cont.result = KERN_OK;
+        tcb->cont.object = NULL;
         sched_wakeup(tcb, KERN_OK);
         mqueue_wake_recv_waiter(mq);
         return;
@@ -137,8 +137,8 @@ static void mqueue_wake_send_waiter(mqueue_t *mq) {
 #endif
 
     wait_queue_remove(&mq->send_queue, tcb);
-    tcb->block_result = KERN_OK;
-    tcb->block_obj = NULL;
+    tcb->cont.result = KERN_OK;
+    tcb->cont.object = NULL;
     sched_wakeup(tcb, KERN_OK);
 }
 
@@ -217,8 +217,8 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
                    sizeof(mqueue_syscall_send_msg[tcb->id]));
         }
 #endif
-        tcb->block_result = KERN_ERR_NOEXIST;
-        tcb->block_obj = NULL;
+        tcb->cont.result = KERN_ERR_NOEXIST;
+        tcb->cont.object = NULL;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
@@ -234,8 +234,8 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
             tcb->cont.msg_buf = NULL;
         }
 #endif
-        tcb->block_result = KERN_ERR_NOEXIST;
-        tcb->block_obj = NULL;
+        tcb->cont.result = KERN_ERR_NOEXIST;
+        tcb->cont.object = NULL;
         sched_wakeup(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
@@ -312,8 +312,8 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
     }
 
     tcb_t *current = sched_get_current();
-    current->block_reason = BLOCK_REASON_QUEUE;
-    current->block_obj = mq;
+    current->cont.op = BLOCK_REASON_QUEUE;
+    current->cont.object = mq;
 
     wait_queue_add(&mq->send_queue, current);
 
@@ -325,10 +325,10 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
 
     /* 设置阻塞状态 */
     current->state = TASK_STATE_BLOCKED;
-    current->block_result = KERN_OK;
+    current->cont.result = KERN_OK;
 
     /* 设置超时唤醒时间 */
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
 
@@ -341,7 +341,7 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
         __asm volatile("dmb");
     }
 
-    kern_err_t result = current->block_result;
+    kern_err_t result = current->cont.result;
 
     if (result == KERN_OK) {
         crit = irq_spin_lock(&mqueue_lock);
@@ -351,9 +351,9 @@ kern_err_t mqueue_send(queue_id_t queue_id, const void *msg, uint32_t timeout) {
         irq_spin_unlock(&mqueue_lock, crit);
     } else {
         crit = irq_spin_lock(&mqueue_lock);
-        if (current->block_obj == mq) {
+        if (current->cont.object == mq) {
             wait_queue_remove(&mq->send_queue, current);
-            current->block_obj = NULL;
+            current->cont.object = NULL;
         }
         irq_spin_unlock(&mqueue_lock, crit);
     }
@@ -398,10 +398,10 @@ kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
 
     memcpy(mqueue_syscall_send_msg[current->id], msg, mq->msg_size);
 
-    current->syscall_blocked = 1;
-    current->block_reason = BLOCK_REASON_QUEUE;
-    current->block_obj = mq;
-    current->block_result = KERN_OK;
+    current->cont.active = 1;
+    current->cont.op = BLOCK_REASON_QUEUE;
+    current->cont.object = mq;
+    current->cont.result = KERN_OK;
     wait_queue_add(&mq->send_queue, current);
 
     {
@@ -410,7 +410,7 @@ kern_err_t mqueue_send_syscall(queue_id_t queue_id, const void *msg,
     }
 
     current->state = TASK_STATE_BLOCKED;
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;
@@ -469,8 +469,8 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
     }
 
     tcb_t *current = sched_get_current();
-    current->block_reason = BLOCK_REASON_QUEUE;
-    current->block_obj = mq;
+    current->cont.op = BLOCK_REASON_QUEUE;
+    current->cont.object = mq;
 
     /* 先加入等待队列 */
     wait_queue_add(&mq->recv_queue, current);
@@ -489,10 +489,10 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
 
     /* 设置阻塞状态 */
     current->state = TASK_STATE_BLOCKED;
-    current->block_result = KERN_OK;
+    current->cont.result = KERN_OK;
 
     /* 设置超时唤醒时间 */
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
 
@@ -507,7 +507,7 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
         __asm volatile("dmb");
     }
 
-    kern_err_t result = current->block_result;
+    kern_err_t result = current->cont.result;
 
     if (result == KERN_OK) {
         crit = irq_spin_lock(&mqueue_lock);
@@ -517,9 +517,9 @@ kern_err_t mqueue_recv(queue_id_t queue_id, void *msg, uint32_t timeout) {
         irq_spin_unlock(&mqueue_lock, crit);
     } else {
         crit = irq_spin_lock(&mqueue_lock);
-        if (current->block_obj == mq) {
+        if (current->cont.object == mq) {
             wait_queue_remove(&mq->recv_queue, current);
-            current->block_obj = NULL;
+            current->cont.object = NULL;
         }
         irq_spin_unlock(&mqueue_lock, crit);
     }
@@ -563,10 +563,10 @@ kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
     }
 
     current->cont.msg_buf = user_msg;
-    current->syscall_blocked = 1;
-    current->block_reason = BLOCK_REASON_QUEUE;
-    current->block_obj = mq;
-    current->block_result = KERN_OK;
+    current->cont.active = 1;
+    current->cont.op = BLOCK_REASON_QUEUE;
+    current->cont.object = mq;
+    current->cont.result = KERN_OK;
     wait_queue_add(&mq->recv_queue, current);
 
     {
@@ -575,7 +575,7 @@ kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
     }
 
     current->state = TASK_STATE_BLOCKED;
-    current->wake_tick = sched_timeout_deadline(timeout);
+    current->cont.deadline = sched_timeout_deadline(timeout);
 
     irq_spin_unlock(&mqueue_lock, crit);
     return KERN_SYSCALL_BLOCKED;

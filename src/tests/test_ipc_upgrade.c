@@ -99,7 +99,7 @@ static void test_mqueue_wait_forever(void) {
     if (waiter_tcb != NULL) {
         TEST_ASSERT_EQ((int)TASK_STATE_BLOCKED, (int)waiter_tcb->state,
                        "mqueue forever waiter remains blocked");
-        TEST_ASSERT_EQ(0, (int)waiter_tcb->wake_tick,
+        TEST_ASSERT_EQ(0, (int)waiter_tcb->cont.deadline,
                        "mqueue forever waiter has no deadline");
     }
 
