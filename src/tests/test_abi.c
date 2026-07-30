@@ -8,6 +8,7 @@
 #include "abi.h"
 #include "user_api.h"
 #include "kernel_types.h"
+#include "factory.h"
 
 /*============================================================================
  * Test 1: sys_abi_version 返回正确值
@@ -72,6 +73,63 @@ static void test_abi_header_layout(void) {
 }
 
 /*============================================================================
+ * Test 4: ABI 兼容性 — 版本不匹配拒绝 (验收 D)
+ *
+ * 模拟"前一版本用户应用"场景:
+ * - 旧 MAJOR 版本 → 拒绝 (不兼容)
+ * - 未来 MAJOR 版本 → 拒绝
+ * - 旧 MINOR 版本 → 接受 (向后兼容)
+ * - 未来 MINOR 版本 → 拒绝 (内核不认识)
+ * - size 不匹配 → 拒绝
+ *============================================================================*/
+
+static void test_abi_compatibility(void) {
+    test_section("Test 4: ABI compatibility accept/reject (D)");
+
+    /* 当前内核版本 */
+    uint32_t kern_ver = sys_abi_version();
+    TEST_ASSERT_EQ(KERN_ABI_MAJOR, (int)((kern_ver >> 16) & 0xFFFF),
+                   "kernel ABI major is current");
+
+    /* 模拟旧版本结构 (version=0, size 正确) → 接受 (向后兼容) */
+    abi_header_t old_hdr = { .version = 0, .size = sizeof(abi_header_t) };
+    TEST_ASSERT(ABI_CHECK(&old_hdr, sizeof(abi_header_t)),
+                "ABI_CHECK accepts older minor version (backward compat)");
+
+    /* 模拟未来版本结构 (version 超过当前 MINOR) → 拒绝 */
+    abi_header_t future_hdr = { .version = KERN_ABI_MINOR + 1,
+                                .size = sizeof(abi_header_t) };
+    TEST_ASSERT(!ABI_CHECK(&future_hdr, sizeof(abi_header_t)),
+                "ABI_CHECK rejects future minor version");
+
+    /* size 不匹配 → 拒绝 (模拟结构体大小变化) */
+    abi_header_t wrong_size = { .version = 0, .size = 999 };
+    TEST_ASSERT(!ABI_CHECK(&wrong_size, sizeof(abi_header_t)),
+                "ABI_CHECK rejects mismatched size");
+
+    /* version=0 + size=0 → 拒绝 (空结构) */
+    abi_header_t empty_hdr = { .version = 0, .size = 0 };
+    TEST_ASSERT(!ABI_CHECK(&empty_hdr, sizeof(abi_header_t)),
+                "ABI_CHECK rejects zero-size structure");
+
+    /* 模拟 factory_create_request_t 的 ABI 校验 */
+    abi_header_t factory_hdr = {
+        .version = KERN_ABI_MINOR,
+        .size = sizeof(factory_create_request_t)
+    };
+    TEST_ASSERT(ABI_CHECK(&factory_hdr, sizeof(factory_create_request_t)),
+                "factory_create_request_t ABI_CHECK passes");
+
+    /* 旧版 factory (size 不对) → 拒绝 */
+    abi_header_t old_factory = {
+        .version = 0,
+        .size = sizeof(factory_create_request_t) - 4  /* 少了 hdr */
+    };
+    TEST_ASSERT(!ABI_CHECK(&old_factory, sizeof(factory_create_request_t)),
+                "old factory struct (wrong size) rejected");
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -79,6 +137,7 @@ static void test_abi_module(void) {
     test_abi_version_value();
     test_error_codes_frozen();
     test_abi_header_layout();
+    test_abi_compatibility();
 }
 
 TEST_MODULE_REGISTER(abi, test_abi_module);
