@@ -146,37 +146,46 @@ typedef struct {
 #endif
 
 /*============================================================================
- * M3-Task3: 统一 continuation 状态
+ * M3-Task3: 统一 continuation 状态机
  *
- * 一个任务同一时刻只能阻塞在一个 IPC 操作上。用 union 收拢原先散在
- * endpoint.c/channel.c/mqueue.c/event.c 按 task_id 索引的 side table。
+ * 替代原先散在 TCB 的 5 个阻塞字段:
+ *   block_reason → cont.op
+ *   block_obj    → cont.object
+ *   block_result → cont.result
+ *   wake_tick    → cont.deadline
+ *   syscall_blocked → cont.active
+ *
+ * 加 3 个统一 helper: syscall_block_current / syscall_complete / syscall_cancel
  * SVC handler asm 不引用这些字段 (只用 sp/exc_return/attrs/sp_limit)。
  *============================================================================*/
 
 typedef struct {
-    void *msg_buf;          /* user 消息缓冲区指针 (recv: out buf) */
-    void *reply_buf;        /* endpoint send: client reply-out buffer (独立于 msg_buf,
-                               生命周期不同: send 时设,reply 后清) */
-    uint32_t request_gen;   /* endpoint send: per-client request generation token */
+    /* --- 状态机字段 (替代散在 TCB 的 5 个标量) --- */
+    uint8_t     active;         /* 1 = 阻塞中 (替代 syscall_blocked) */
+    uint8_t     op;             /* block_reason_t (替代 block_reason) */
+    uint16_t    flags;          /* 预留 */
+    void       *object;         /* 等待的内核对象指针 (替代 block_obj) */
+    uint32_t    deadline;       /* 超时 tick, 0=永久 (替代 wake_tick) */
+    kern_err_t  result;         /* 唤醒结果 (替代 block_result) */
+
+    /* --- payload (替代全局 side table) --- */
+    void       *msg_buf;        /* user 消息缓冲区指针 (recv: out buf) */
+    void       *reply_buf;      /* endpoint send: reply-out buffer */
+    uint32_t    request_gen;    /* endpoint send: request generation */
     union {
-        /* endpoint recv continuation */
-        struct {
-            cap_id_t *out_caps;
-            uint8_t  *out_cap_count;
-        } ep_recv;
-        /* channel recv continuation */
-        struct {
-            cap_id_t *out_caps;
-            uint8_t  *out_cap_count;
-        } ch;
-        /* event wait continuation */
-        struct {
-            uint32_t  wait_flags;
-            uint32_t  wait_opt;
-            uint32_t *received;
-        } event;
+        struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ep_recv;
+        struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ch;
+        struct { uint32_t wait_flags; uint32_t wait_opt; uint32_t *received; } event;
     } u;
 } syscall_cont_t;
+
+/* M3-Task3 兼容宏: 让现有代码用旧字段名访问 cont 内字段。
+ * Step 2 迁移完所有子系统后删除这些宏。 */
+#define block_reason   cont.op
+#define block_obj      cont.object
+#define block_result   cont.result
+#define wake_tick      cont.deadline
+#define syscall_blocked cont.active
 
 typedef struct tcb {
     /* M2-Step3c: kobject_header_t 在 offset 0。
@@ -206,16 +215,14 @@ typedef struct tcb {
     uint32_t    time_slice;           // 剩余时间片
     uint32_t    time_slice_reload;    // 时间片重载值
     uint32_t    total_ticks;          // 总运行时间 (统计用)
-    uint32_t    wake_tick;            // 唤醒时间 (用于延时)
+    /* M3-Task3: wake_tick → cont.deadline (兼容宏) */
     uint32_t    affinity_mask;        // 允许运行的 CPU 位图
     uint8_t     cpu_owner;            // 所属运行队列/CPU，KERN_CPU_NONE=未分配
     uint8_t     migration_state;      // task_migration_state_t
     uint8_t     _smp_pad[2];          // 4 字节对齐
 
     // --- 阻塞信息 ---
-    block_reason_t block_reason;      // 阻塞原因
-    void       *block_obj;            // 阻塞对象指针
-    kern_err_t  block_result;         // 阻塞结果
+    /* M3-Task3: block_reason/block_obj/block_result → cont.* (兼容宏) */
 
     /* --- join 支持 --- */
     void       *exit_value;           // task_exit 存储的返回值
@@ -237,7 +244,7 @@ typedef struct tcb {
 
     // --- MPU 内存保护 (Phase 1) ---
     uint8_t     attrs;                // TASK_ATTR_PRIVILEGED / TASK_ATTR_USER
-    uint8_t     syscall_blocked;      // blocked inside SVC, resume via saved frame
+    /* M3-Task3: syscall_blocked → cont.active (兼容宏) */
     uint8_t     sched_policy;         // SCHED_NORMAL / SCHED_FIFO / SCHED_RR
     uint8_t     _pad1[2];             // 4 字节对齐
 #if MPU_ENABLE
