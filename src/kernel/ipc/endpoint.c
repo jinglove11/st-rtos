@@ -126,6 +126,29 @@ static endpoint_t *ep_get(ep_id_t id) {
 }
 
 #if CAP_ENABLE
+/* M3-Task7: reply cap revoke hook。
+ * 当 reply cap 被 cap_revoke/cap_delete_for 撤销时,清理对应的
+ * endpoint_reply_t 状态 (active=0, used=1)。覆盖验收要求的
+ * "cap revoke" 场景 (另外 3 种: timeout/server death/endpoint delete
+ * 已由现有 endpoint_invalidate_reply_cap 覆盖)。 */
+static void endpoint_reply_cap_revoke_hook(cap_id_t cap, void *object,
+                                            uint8_t obj_type) {
+    (void)cap;
+    (void)obj_type;
+    if (obj_type != CAP_OBJ_REPLY || object == NULL) {
+        return;
+    }
+    endpoint_reply_t *reply = (endpoint_reply_t *)object;
+    if (reply->ep_id >= 0 && reply->ep_id < KERN_MAX_ENDPOINTS &&
+        reply->server_id >= 0 && reply->server_id < KERNEL_MAX_TASKS) {
+        ep_server_reply_cap[reply->ep_id][reply->server_id] = KERN_INVALID_ID;
+        reply->active = 0;
+        reply->used = 1;
+        reply->sender = NULL;
+        reply->request_gen = 0;
+    }
+}
+
 static void endpoint_invalidate_reply_cap(ep_id_t ep_id, task_id_t server_id) {
     if (ep_id < 0 || ep_id >= KERN_MAX_ENDPOINTS ||
         server_id < 0 || server_id >= KERNEL_MAX_TASKS) {
@@ -299,6 +322,8 @@ void endpoint_init(void) {
             ep_server_reply_cap[ep][tid] = KERN_INVALID_ID;
         }
     }
+    /* M3-Task7: 注册 reply cap revoke hook */
+    (void)cap_register_revoke_hook(CAP_OBJ_REPLY, endpoint_reply_cap_revoke_hook);
 #endif
 }
 
