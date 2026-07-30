@@ -231,12 +231,78 @@ static void test_cap_fuzz(void) {
 }
 
 /*============================================================================
+ * Test 3: cap 创建/删除 fuzz — 创建 cap 后全部清理,验证无泄漏
+ *
+ * 随机调 cap_create/cap_derive/cap_mint 创建 cap,记录返回的 cap_id,
+ * 跑完后全部 cap_delete。验证 cap_free_count 回到初始值。
+ *============================================================================*/
+
+#define CAP_MUTATE_COUNT 32
+
+static void test_cap_mutate_fuzz(void) {
+    test_section("Test 3: cap create/delete fuzz (no leak)");
+
+    fuzz_state = 0xBADC0FFEU;
+    uint16_t free_before = cap_free_count();
+
+    /* 创建一个 parent cap 作为 derive/mint 的源 */
+    int parent_obj = 0x42;
+    cap_id_t parent = cap_create(&parent_obj, CAP_OBJ_SEMAPHORE,
+                                 CAP_FULL, 0);
+    TEST_ASSERT(parent > 0, "mutate fuzz: parent cap created");
+
+    /* 收集所有创建的 cap (不含 parent) */
+    cap_id_t created[CAP_MUTATE_COUNT];
+    int created_count = 0;
+
+    for (int i = 0; i < CAP_MUTATE_COUNT; i++) {
+        uint32_t op = fuzz_rand() % 3;
+        cap_id_t cap = KERN_INVALID_ID;
+
+        switch (op) {
+            case 0: /* create new cap on random object */
+                cap = cap_create(&parent_obj, CAP_OBJ_SEMAPHORE,
+                                 CAP_READ | (fuzz_rand() & 0x1F), 0);
+                break;
+            case 1: /* derive from parent */
+                cap = cap_derive(parent, CAP_READ | CAP_WRITE);
+                break;
+            case 2: /* mint from parent */
+                cap = cap_mint_for(NULL, parent, CAP_READ, fuzz_rand());
+                break;
+        }
+
+        if (cap > 0 && cap != KERN_INVALID_ID) {
+            if (created_count < CAP_MUTATE_COUNT) {
+                created[created_count++] = cap;
+            } else {
+                /* 数组满了,立即删 */
+                cap_delete(cap);
+            }
+        }
+    }
+
+    /* 全部清理 */
+    for (int i = 0; i < created_count; i++) {
+        cap_delete(created[i]);
+    }
+    cap_delete(parent);
+
+    /* 关键断言:cap 池回到初始值 (无泄漏) */
+    TEST_ASSERT_EQ((int)free_before, (int)cap_free_count(),
+                   "mutate fuzz: no cap pool leak after create/delete cycle");
+
+    test_pass("cap mutate fuzz completed without crash or leak");
+}
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
 static void test_fuzz_module(void) {
     test_syscall_fuzz_random();
     test_cap_fuzz();
+    test_cap_mutate_fuzz();
 }
 
 TEST_MODULE_REGISTER(fuzz, test_fuzz_module);
