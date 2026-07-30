@@ -28,7 +28,7 @@ static uint8_t mqueue_buffers[KERN_MAX_MQUEUES][KERN_MQUEUE_DEPTH * KERN_MSG_MAX
 #if SYSCALL_ENABLE
 static uint8_t mqueue_syscall_send_msg[KERNEL_MAX_TASKS][KERN_MSG_MAX_SIZE]
     __attribute__((aligned(4)));
-static void *mqueue_syscall_recv_msg[KERNEL_MAX_TASKS];
+/* M3-Task3: recv continuation 移到 TCB->cont.msg_buf */
 #endif
 
 /*============================================================================
@@ -96,9 +96,9 @@ static void mqueue_wake_recv_waiter(mqueue_t *mq) {
 #if SYSCALL_ENABLE
     if (tcb->syscall_blocked &&
         tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS &&
-        mqueue_syscall_recv_msg[tcb->id] != NULL) {
-        mqueue_do_get(mq, mqueue_syscall_recv_msg[tcb->id]);
-        mqueue_syscall_recv_msg[tcb->id] = NULL;
+        tcb->cont.msg_buf != NULL) {
+        mqueue_do_get(mq, tcb->cont.msg_buf);
+        tcb->cont.msg_buf = NULL;
         wait_queue_remove(&mq->recv_queue, tcb);
         tcb->block_result = KERN_OK;
         tcb->block_obj = NULL;
@@ -152,7 +152,7 @@ void mqueue_init(void) {
     mqueue_used_bitmap = 0;
 #if SYSCALL_ENABLE
     memset(mqueue_syscall_send_msg, 0, sizeof(mqueue_syscall_send_msg));
-    memset(mqueue_syscall_recv_msg, 0, sizeof(mqueue_syscall_recv_msg));
+    /* M3-Task3: recv side table 已移到 TCB->cont */
 #endif
 }
 
@@ -231,7 +231,7 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
         tcb->wait_prev = NULL;
 #if SYSCALL_ENABLE
         if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
-            mqueue_syscall_recv_msg[tcb->id] = NULL;
+            tcb->cont.msg_buf = NULL;
         }
 #endif
         tcb->block_result = KERN_ERR_NOEXIST;
@@ -562,7 +562,7 @@ kern_err_t mqueue_recv_syscall(queue_id_t queue_id, void *user_msg,
         return KERN_ERR_STATE;
     }
 
-    mqueue_syscall_recv_msg[current->id] = user_msg;
+    current->cont.msg_buf = user_msg;
     current->syscall_blocked = 1;
     current->block_reason = BLOCK_REASON_QUEUE;
     current->block_obj = mq;

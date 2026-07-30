@@ -69,9 +69,7 @@ static uint8_t ch_syscall_send_msg[KERNEL_MAX_TASKS][KERN_CH_MSG_SIZE]
     __attribute__((aligned(4)));
 static ipc_cap_xfer_t ch_syscall_send_caps[KERNEL_MAX_TASKS][IPC_CAPS_MAX];
 static uint8_t ch_syscall_send_cap_count[KERNEL_MAX_TASKS];
-static void *ch_syscall_recv_msg[KERNEL_MAX_TASKS];
-static cap_id_t *ch_syscall_recv_caps[KERNEL_MAX_TASKS];
-static uint8_t *ch_syscall_recv_cap_count[KERNEL_MAX_TASKS];
+/* M3-Task3: recv continuation 移到 TCB->cont (msg_buf + ch union) */
 #endif
 
 /*============================================================================
@@ -115,9 +113,9 @@ static void channel_wake_all(wait_queue_t *queue, kern_err_t result) {
             memset(ch_syscall_send_caps[tcb->id], 0,
                    sizeof(ch_syscall_send_caps[tcb->id]));
             ch_syscall_send_cap_count[tcb->id] = 0;
-            ch_syscall_recv_msg[tcb->id] = NULL;
-            ch_syscall_recv_caps[tcb->id] = NULL;
-            ch_syscall_recv_cap_count[tcb->id] = NULL;
+            tcb->cont.msg_buf = NULL;
+            tcb->cont.u.ch.out_caps = NULL;
+            tcb->cont.u.ch.out_cap_count = NULL;
         }
 #endif
         tcb->block_result = result;
@@ -193,27 +191,27 @@ static void channel_wake_recv_waiter(wait_queue_t *recv_wq,
 #if SYSCALL_ENABLE
     if (waiter->syscall_blocked &&
         waiter->id >= 0 && waiter->id < KERNEL_MAX_TASKS &&
-        ch_syscall_recv_msg[waiter->id] != NULL) {
+        waiter->cont.msg_buf != NULL) {
         if (*cap_count_src > 0) {
-            if (ch_syscall_recv_caps[waiter->id] == NULL ||
-                ch_syscall_recv_cap_count[waiter->id] == NULL) {
-                ch_syscall_recv_msg[waiter->id] = NULL;
+            if (waiter->cont.u.ch.out_caps == NULL ||
+                waiter->cont.u.ch.out_cap_count == NULL) {
+                waiter->cont.msg_buf = NULL;
                 wait_queue_remove(recv_wq, waiter);
                 waiter->block_result = KERN_ERR_RESOURCE;
                 sched_wakeup(waiter, KERN_ERR_RESOURCE);
                 return;
             }
-            memcpy(ch_syscall_recv_caps[waiter->id], cap_src,
+            memcpy(waiter->cont.u.ch.out_caps, cap_src,
                    sizeof(cap_id_t) * (*cap_count_src));
-            *ch_syscall_recv_cap_count[waiter->id] = *cap_count_src;
-        } else if (ch_syscall_recv_cap_count[waiter->id] != NULL) {
-            *ch_syscall_recv_cap_count[waiter->id] = 0;
+            *waiter->cont.u.ch.out_cap_count = *cap_count_src;
+        } else if (waiter->cont.u.ch.out_cap_count != NULL) {
+            *waiter->cont.u.ch.out_cap_count = 0;
         }
 
-        memcpy(ch_syscall_recv_msg[waiter->id], buf, KERN_CH_MSG_SIZE);
-        ch_syscall_recv_msg[waiter->id] = NULL;
-        ch_syscall_recv_caps[waiter->id] = NULL;
-        ch_syscall_recv_cap_count[waiter->id] = NULL;
+        memcpy(waiter->cont.msg_buf, buf, KERN_CH_MSG_SIZE);
+        waiter->cont.msg_buf = NULL;
+        waiter->cont.u.ch.out_caps = NULL;
+        waiter->cont.u.ch.out_cap_count = NULL;
         *ready_flag = 0;
         *cap_count_src = 0;
         memset(cap_src, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
@@ -304,9 +302,7 @@ void channel_init(void) {
     memset(ch_syscall_send_msg, 0, sizeof(ch_syscall_send_msg));
     memset(ch_syscall_send_caps, 0, sizeof(ch_syscall_send_caps));
     memset(ch_syscall_send_cap_count, 0, sizeof(ch_syscall_send_cap_count));
-    memset(ch_syscall_recv_msg, 0, sizeof(ch_syscall_recv_msg));
-    memset(ch_syscall_recv_caps, 0, sizeof(ch_syscall_recv_caps));
-    memset(ch_syscall_recv_cap_count, 0, sizeof(ch_syscall_recv_cap_count));
+    /* M3-Task3: recv side table 已移到 TCB->cont */
 #endif
     ch_used_bitmap = 0;
 }
@@ -436,9 +432,9 @@ void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {
         memset(ch_syscall_send_caps[tcb->id], 0,
                sizeof(ch_syscall_send_caps[tcb->id]));
         ch_syscall_send_cap_count[tcb->id] = 0;
-        ch_syscall_recv_msg[tcb->id] = NULL;
-        ch_syscall_recv_caps[tcb->id] = NULL;
-        ch_syscall_recv_cap_count[tcb->id] = NULL;
+        tcb->cont.msg_buf = NULL;
+        tcb->cont.u.ch.out_caps = NULL;
+        tcb->cont.u.ch.out_cap_count = NULL;
     }
 #endif
 
@@ -1038,7 +1034,7 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
             return KERN_ERR_TIMEOUT;
         }
 
-        ch_syscall_recv_msg[current->id] = user_msg;
+        current->cont.msg_buf = user_msg;
         current->syscall_blocked = 1;
         current->block_reason = BLOCK_REASON_CH_RECV;
         current->block_obj = ch;
@@ -1138,9 +1134,9 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
             return KERN_ERR_TIMEOUT;
         }
 
-        ch_syscall_recv_msg[current->id] = user_msg;
-        ch_syscall_recv_caps[current->id] = out_caps;
-        ch_syscall_recv_cap_count[current->id] = out_cap_count;
+        current->cont.msg_buf = user_msg;
+        current->cont.u.ch.out_caps = out_caps;
+        current->cont.u.ch.out_cap_count = out_cap_count;
         current->syscall_blocked = 1;
         current->block_reason = BLOCK_REASON_CH_RECV;
         current->block_obj = ch;
