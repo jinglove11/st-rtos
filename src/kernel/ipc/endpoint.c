@@ -660,6 +660,17 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
 
             return result;
         }
+        /* M3-Step2c Gap A: deliver 失败 (cap transfer 错误)。
+         * endpoint_deliver_to_syscall_recv 已经把 msg memcpy 到 server 的
+         * user buffer 但没唤醒 server。cont.result 记录了失败原因。
+         * 不能 fall-through 到 buffered path (会覆盖 cont.result 让 sender
+         * 误以为成功)。直接返回错误给调用者。 */
+        if (current->cont.result != KERN_OK) {
+            kern_err_t deliver_err = current->cont.result;
+            current->cont.result = KERN_OK;
+            irq_spin_unlock(&ep_lock, crit);
+            return deliver_err;
+        }
     }
 
     /* 如果缓冲区已满，等待服务端腾出空间 */
