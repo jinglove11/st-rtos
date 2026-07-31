@@ -17,6 +17,7 @@
 #include "spinlock.h"
 #include "trace.h"
 #include "syscall.h"
+#include "continuation.h"
 #include "capability.h"
 #include "task.h"
 #include <string.h>
@@ -902,19 +903,14 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
     ep_syscall_client_msg[current->id] = user_reply_msg;
     ep_client_gen[current->id] = request_gen;
 
+    /* M3-Task3: 用 prepare_locked 统一设 cont 字段 */
+    syscall_cont_prepare_locked(BLOCK_REASON_EP_SEND, ep);
     wait_queue_add(&ep->reply_waiters, current);
-    {
-        extern void sched_remove_ready(tcb_t *tcb);
-        sched_remove_ready(current);
-    }
-
-    current->cont.active = 1;
+    sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
-    current->cont.op = BLOCK_REASON_EP_SEND;
-    current->cont.object = ep;
-    current->cont.result = KERN_OK;
+    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
+
     if (timeout != KERN_WAIT_FOREVER) {
-        extern uint32_t sched_get_tick_count(void);
         current->cont.deadline = sched_get_tick_count() + timeout;
     } else {
         current->cont.deadline = 0;
@@ -1245,20 +1241,14 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
     }
 
     current->cont.msg_buf = user_msg;
-    current->cont.active = 1;
-    current->cont.op = BLOCK_REASON_EP_RECV;
-    current->cont.object = ep;
+    syscall_cont_prepare_locked(BLOCK_REASON_EP_RECV, ep);
     wait_queue_add(&ep->recv_waiters, current);
 
-    {
-        extern void sched_remove_ready(tcb_t *tcb);
-        sched_remove_ready(current);
-    }
-
+    sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
+    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
     current->cont.result = KERN_OK;
     if (timeout != KERN_WAIT_FOREVER) {
-        extern uint32_t sched_get_tick_count(void);
         current->cont.deadline = sched_get_tick_count() + timeout;
     } else {
         current->cont.deadline = 0;
@@ -1313,20 +1303,14 @@ kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
     current->cont.msg_buf = user_msg;
     current->cont.u.ep_recv.out_caps = out_caps;
     current->cont.u.ep_recv.out_cap_count = out_cap_count;
-    current->cont.active = 1;
-    current->cont.op = BLOCK_REASON_EP_RECV;
-    current->cont.object = ep;
+    syscall_cont_prepare_locked(BLOCK_REASON_EP_RECV, ep);
     wait_queue_add(&ep->recv_waiters, current);
 
-    {
-        extern void sched_remove_ready(tcb_t *tcb);
-        sched_remove_ready(current);
-    }
-
+    sched_remove_ready(current);
     current->state = TASK_STATE_BLOCKED;
+    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
     current->cont.result = KERN_OK;
     if (timeout != KERN_WAIT_FOREVER) {
-        extern uint32_t sched_get_tick_count(void);
         current->cont.deadline = sched_get_tick_count() + timeout;
     } else {
         current->cont.deadline = 0;

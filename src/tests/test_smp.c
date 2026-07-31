@@ -583,7 +583,84 @@ static void test_cross_core_event_interleavings(void) {
 }
 
 /*============================================================================
- * Test 8: both cores have distinct current tasks after workload
+ * Test 8: continuation arming race — prepare/commit 窗口双核定点竞态
+ *
+ * core0 task 反复 sem_wait (走 prepare→commit 路径)。
+ * core1 task 反复 sem_post,在 core0 的 ARMING/BLOCKED 窗口投递唤醒。
+ * 验证:
+ *   - 无 lost wakeup (sem_wait 不永久阻塞)
+ *   - 无 double-wakeup (wait_queue invariant 不 panic)
+ *   - 最终计数匹配
+ *============================================================================*/
+
+#define ARMING_RACE_ITERATIONS 500U
+
+static sem_id_t arming_race_sem;
+static volatile uint32_t arming_race_wait_count;
+static volatile uint32_t arming_race_post_count;
+
+static void arming_race_waiter(void *arg) {
+    (void)arg;
+    for (uint32_t i = 0; i < ARMING_RACE_ITERATIONS; i++) {
+        kern_err_t err = sem_wait(arming_race_sem, SMP_OPERATION_TIMEOUT_TICKS);
+        if (err != KERN_OK) {
+            task_exit((void *)(intptr_t)err);
+        }
+        arming_race_wait_count++;
+    }
+    task_exit(NULL);
+}
+
+static void arming_race_poster(void *arg) {
+    (void)arg;
+    for (uint32_t i = 0; i < ARMING_RACE_ITERATIONS; i++) {
+        kern_err_t err = sem_post(arming_race_sem);
+        if (err != KERN_OK) {
+            task_exit((void *)(intptr_t)err);
+        }
+        arming_race_post_count++;
+    }
+    task_exit(NULL);
+}
+
+static void test_continuation_arming_race(void) {
+    test_section("Test 8: continuation arming race");
+
+    arming_race_wait_count = 0;
+    arming_race_post_count = 0;
+    arming_race_sem = sem_create(0, ARMING_RACE_ITERATIONS);
+    TEST_ASSERT(arming_race_sem >= 0, "arming race sem created");
+    if (arming_race_sem < 0) return;
+
+    task_id_t waiter = task_create("arm_w", arming_race_waiter, NULL, 8, 1024);
+    task_id_t poster = task_create("arm_p", arming_race_poster, NULL, 8, 1024);
+    TEST_ASSERT(waiter >= 0 && poster >= 0, "arming race tasks created");
+
+    if (waiter >= 0 && poster >= 0) {
+        (void)task_set_affinity(waiter, 1UL << 0);
+        (void)task_set_affinity(poster, 1UL << 1);
+        (void)task_start(waiter);
+        (void)task_start(poster);
+
+        void *wret = NULL, *pret = NULL;
+        kern_err_t werr = smp_join_bounded(waiter, &wret, SMP_JOIN_TIMEOUT_TICKS);
+        kern_err_t perr = smp_join_bounded(poster, &pret, SMP_JOIN_TIMEOUT_TICKS);
+
+        TEST_ASSERT_EQ(KERN_OK, (int)werr, "arming race waiter joined");
+        TEST_ASSERT_EQ(KERN_OK, (int)perr, "arming race poster joined");
+        TEST_ASSERT(wret == NULL, "arming race waiter no error");
+        TEST_ASSERT(pret == NULL, "arming race poster no error");
+        TEST_ASSERT_EQ(ARMING_RACE_ITERATIONS, (int)arming_race_wait_count,
+                       "arming race: all wakeups received");
+        TEST_ASSERT_EQ(ARMING_RACE_ITERATIONS, (int)arming_race_post_count,
+                       "arming race: all posts completed");
+    }
+
+    sem_delete(arming_race_sem);
+}
+
+/*============================================================================
+ * Test 9: both cores have distinct current tasks after workload
  *============================================================================*/
 
 static void test_dual_core_active(void) {
@@ -618,7 +695,9 @@ static void test_smp_module(void) {
     test_cross_core_task_reuse();
     test_print("[SMP] 7 event interleavings\r\n");
     test_cross_core_event_interleavings();
-    test_print("[SMP] 8 final core state\r\n");
+    test_print("[SMP] 8 continuation arming race\r\n");
+    test_continuation_arming_race();
+    test_print("[SMP] 9 final core state\r\n");
     test_dual_core_active();
     test_print("[SMP] complete\r\n");
 }

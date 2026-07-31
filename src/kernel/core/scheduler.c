@@ -46,6 +46,7 @@
 #include "kernel_config.h"
 #include "kernel_types.h"
 #include "task.h"
+#include "continuation.h"
 #include "hal.h"
 #include "spinlock.h"
 #if CAP_ENABLE
@@ -1107,6 +1108,8 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
     current->cont.op = reason;
     current->cont.object = obj;
     current->cont.result = KERN_OK;
+    current->cont.active = 0;  /* thread-mode 阻塞,不走 SVC frame 恢复 */
+    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
 
     /* 设置超时唤醒时间；0/WAIT_FOREVER 均表示无期限等待。 */
     current->cont.deadline = sched_timeout_deadline(timeout);

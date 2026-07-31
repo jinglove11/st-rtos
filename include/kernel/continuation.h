@@ -2,24 +2,25 @@
  * @file continuation.h
  * @brief M3-Task3: 统一阻塞 syscall continuation 状态机 — 两阶段协议
  *
- * 两阶段设计解决 SMP 唤醒竞态:
+ * 状态机: IDLE → ARMING → BLOCKED → COMPLETING → IDLE
  *
  * 1. 持对象锁调 syscall_cont_prepare_locked():
- *    - 设 cont.active=1/op/object/result
- *    - 子系统紧接着 wait_queue_add (仍持锁)
- *    - 此时 waker 在另一核上被同一把锁挡住,看不到半初始化状态
+ *    IDLE → ARMING。设 active/op/object。Task 仍在 RUNNING。
+ *    子系统紧接着 wait_queue_add (仍持锁)。
+ *    如果 waker 在此阶段看到 task (ARMING),只记录 pending result,
+ *    不唤醒 (task 还在 running)。
  *
  * 2. 释放对象锁后调 syscall_cont_commit():
- *    - 设 cont.deadline
- *    - sched_remove_ready + state=BLOCKED
- *    - return KERN_SYSCALL_BLOCKED (调用者直接 return)
+ *    ARMING → BLOCKED。设 deadline/state=BLOCKED/sched_remove_ready。
+ *    如果 ARMING 期间已被 waker 记录 pending result,直接返回它。
+ *    否则返回 KERN_SYSCALL_BLOCKED。
  *
- * 如果 waker 在阶段 1 和 2 之间获锁:
- *    - waker 看到 cont.active=1 + task 在 wait_queue → 正常唤醒
- *    - syscall_cont_commit 的 sched_remove_ready 不会移除已唤醒的 task
- *      (sched_wakeup 的 CAS 保证只唤醒一次)
+ * 3. waker 调 syscall_cont_complete():
+ *    BLOCKED → COMPLETING → IDLE。CAS 保证只唤醒一次。
  *
- * complete/cancel 由 waker/timeout 调用,不需拆阶段。
+ * 4. timeout/delete/fault 调 syscall_cont_cancel():
+ *    复用 task_cancel_blocked_wait() 从子系统 wait queue 移除,
+ *    然后 complete。
  */
 
 #ifndef CONTINUATION_H
@@ -31,57 +32,21 @@
 extern "C" {
 #endif
 
-/*============================================================================
- * 两阶段阻塞协议
- *============================================================================*/
-
-/**
- * @brief 阶段 1: 持对象锁内调 — 设 continuation 状态
- *
- * 设 cont.active=1/op/object/result。调用方紧接着 wait_queue_add
- * (仍持锁)。然后释放锁,调 syscall_cont_commit()。
- *
- * @param op      block_reason_t
- * @param object  等待的内核对象
- */
 void syscall_cont_prepare_locked(uint8_t op, void *object);
-
-/**
- * @brief 阶段 2: 释放对象锁后调 — 完成阻塞提交
- *
- * 设 cont.deadline; sched_remove_ready; state=BLOCKED。
- * 返回 KERN_SYSCALL_BLOCKED。
- *
- * @param timeout 超时 ticks (0=永久)
- * @return KERN_SYSCALL_BLOCKED (调用者直接 return)
- */
-int syscall_cont_commit(uint32_t timeout);
-
-/*============================================================================
- * 唤醒/取消 (waker 和 timeout/fault 路径用)
- *============================================================================*/
-
-/**
- * @brief 唤醒阻塞任务 (waker 调)
- *
- * 如果 cont.active==1,写 result 到 saved SVC frame R0。
- * 设 active=0; sched_wakeup。
- *
- * @param tcb    要唤醒的任务
- * @param result 唤醒结果
- */
+int  syscall_cont_commit(uint32_t timeout);
 void syscall_cont_complete(tcb_t *tcb, kern_err_t result);
-
-/**
- * @brief 取消阻塞 (timeout/delete/fault 调)
- *
- * 按 cont.op 分发子系统 cleanup; 然后 complete。
- * 使用公开的 task_cancel_blocked_wait() (不依赖 static 函数)。
- *
- * @param tcb    要取消的任务
- * @param result 取消原因
- */
 void syscall_cont_cancel(tcb_t *tcb, kern_err_t result);
+
+/* M3-Task3: continuation 阶段 (存在 cont.flags 低字节)。
+ * 复杂子系统 (endpoint/channel) 的同步 deliver 路径用这些宏手动
+ * 管理阶段,不走 commit。 */
+#define CONT_PHASE_IDLE        0
+#define CONT_PHASE_ARMING      1
+#define CONT_PHASE_BLOCKED     2
+#define CONT_PHASE_COMPLETING  3
+
+#define CONT_PHASE_SET(c, p)  do { (c)->flags = ((c)->flags & 0xFF00) | (p); } while (0)
+#define CONT_PHASE_GET(c)     ((c)->flags & 0xFF)
 
 #ifdef __cplusplus
 }

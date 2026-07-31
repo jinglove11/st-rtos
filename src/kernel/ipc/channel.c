@@ -16,6 +16,7 @@
 #include "spinlock.h"
 #include "trace.h"
 #include "syscall.h"
+#include "continuation.h"
 #include "capability.h"
 #include <string.h>
 
@@ -671,16 +672,11 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
         }
 
         memcpy(ch_syscall_send_msg[current->id], msg, ch->msg_size);
-        current->cont.active = 1;
-        current->cont.op = BLOCK_REASON_CH_SEND;
-        current->cont.object = ch;
-        current->cont.result = KERN_OK;
+        syscall_cont_prepare_locked(BLOCK_REASON_CH_SEND, ch);
         wait_queue_add(send_wq, current);
-        {
-            extern void sched_remove_ready(tcb_t *tcb);
-            sched_remove_ready(current);
-        }
+        sched_remove_ready(current);
         current->state = TASK_STATE_BLOCKED;
+        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
         current->cont.deadline = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
@@ -769,16 +765,11 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
                    sizeof(ipc_cap_xfer_t) * cap_count);
         }
         ch_syscall_send_cap_count[current->id] = cap_count;
-        current->cont.active = 1;
-        current->cont.op = BLOCK_REASON_CH_SEND;
-        current->cont.object = ch;
-        current->cont.result = KERN_OK;
+        syscall_cont_prepare_locked(BLOCK_REASON_CH_SEND, ch);
         wait_queue_add(send_wq, current);
-        {
-            extern void sched_remove_ready(tcb_t *tcb);
-            sched_remove_ready(current);
-        }
+        sched_remove_ready(current);
         current->state = TASK_STATE_BLOCKED;
+        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
         current->cont.deadline = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
@@ -1035,16 +1026,11 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
         }
 
         current->cont.msg_buf = user_msg;
-        current->cont.active = 1;
-        current->cont.op = BLOCK_REASON_CH_RECV;
-        current->cont.object = ch;
-        current->cont.result = KERN_OK;
+        syscall_cont_prepare_locked(BLOCK_REASON_CH_RECV, ch);
         wait_queue_add(recv_wq, current);
-        {
-            extern void sched_remove_ready(tcb_t *tcb);
-            sched_remove_ready(current);
-        }
+        sched_remove_ready(current);
         current->state = TASK_STATE_BLOCKED;
+        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
         current->cont.deadline = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
@@ -1137,16 +1123,11 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
         current->cont.msg_buf = user_msg;
         current->cont.u.ch.out_caps = out_caps;
         current->cont.u.ch.out_cap_count = out_cap_count;
-        current->cont.active = 1;
-        current->cont.op = BLOCK_REASON_CH_RECV;
-        current->cont.object = ch;
-        current->cont.result = KERN_OK;
+        syscall_cont_prepare_locked(BLOCK_REASON_CH_RECV, ch);
         wait_queue_add(recv_wq, current);
-        {
-            extern void sched_remove_ready(tcb_t *tcb);
-            sched_remove_ready(current);
-        }
+        sched_remove_ready(current);
         current->state = TASK_STATE_BLOCKED;
+        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
         current->cont.deadline = sched_timeout_deadline(timeout);
 
         irq_spin_unlock(&ch_lock, crit);
