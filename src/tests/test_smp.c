@@ -660,7 +660,151 @@ static void test_continuation_arming_race(void) {
 }
 
 /*============================================================================
- * Test 9: both cores have distinct current tasks after workload
+ * Test 9: cross-core concurrent cap transfer to one shared dst CSpace
+ *
+ * 两个核同时向同一 dst task 传输 cap (COPY)。dst CSpace 64 slots,
+ * 每核 60 次 → 120 次请求并发打满 CSpace:
+ * - 成功的传输必须原子发布 (dst cap 有效,指向正确的发送方对象)
+ * - CSpace 满时返回 KERN_ERR_RESOURCE (cap_txn reservation 在 CAP_LOCK 下)
+ * - 不允许其他错误 (generation 破坏/部分传输)
+ *============================================================================*/
+
+#define SMP_CAP_XFER_ITERATIONS 60U
+
+static uint64_t test_cspace_occupied(tcb_t *task) {
+    cnode_t *cnode = cap_space_of(task);
+    return cnode != NULL ? cnode->occupied : 0;
+}
+
+static uint32_t smp_cap_xfer_object[2];
+static volatile uint32_t smp_xfer_ok[2];
+static volatile uint32_t smp_xfer_busy[2];
+static volatile uint32_t smp_xfer_err[2];
+static cap_id_t smp_xfer_out[2][SMP_CAP_XFER_ITERATIONS];
+static task_id_t smp_xfer_dst_id = (task_id_t)-1;
+
+static void smp_cap_xfer_dst_task(void *arg) {
+    (void)arg;
+    for (;;) {
+        (void)task_delay(1000);
+    }
+}
+
+static void smp_cap_xfer_task(void *arg) {
+    uint32_t index = (uint32_t)(uintptr_t)arg;
+    tcb_t *me = task_get_tcb(task_self());
+    tcb_t *dst = task_get_tcb(smp_xfer_dst_id);
+
+    for (uint32_t i = 0; i < SMP_CAP_XFER_ITERATIONS; i++) {
+        cap_id_t cap = cap_create(&smp_cap_xfer_object[index],
+                                  CAP_OBJ_SYSTEM, CAP_FULL,
+                                  (uint8_t)task_self());
+        if (cap < 0) {
+            smp_xfer_err[index]++;
+            continue;
+        }
+        ipc_cap_xfer_t xfer;
+        xfer.src_cap = cap;
+        xfer.rights = CAP_READ;
+        xfer.flags = IPC_CAP_COPY;
+        cap_id_t out = (cap_id_t)-1;
+        kern_err_t err = ipc_transfer_caps(me, dst, &xfer, 1, &out);
+        if (err == KERN_OK) {
+            smp_xfer_out[index][smp_xfer_ok[index]] = out;
+            smp_xfer_ok[index]++;
+        } else if (err == KERN_ERR_RESOURCE) {
+            smp_xfer_busy[index]++;
+        } else {
+            smp_xfer_err[index]++;
+        }
+        (void)cap_delete(cap);
+    }
+    task_exit(NULL);
+}
+
+static void test_cross_core_cap_transfer(void) {
+    test_section("Test 9: cross-core concurrent cap transfer");
+
+    smp_xfer_ok[0] = smp_xfer_ok[1] = 0U;
+    smp_xfer_busy[0] = smp_xfer_busy[1] = 0U;
+    smp_xfer_err[0] = smp_xfer_err[1] = 0U;
+    smp_cap_xfer_object[0] = 3301U;
+    smp_cap_xfer_object[1] = 3302U;
+
+    task_id_t dst = task_create("smp_dst", smp_cap_xfer_dst_task, NULL, 8, 1024);
+    TEST_ASSERT(dst >= 0, "shared dst task created");
+    if (dst < 0) {
+        return;
+    }
+    tcb_t *dst_tcb = task_get_tcb(dst);
+    dst_tcb->attrs = TASK_ATTR_USER;
+    smp_xfer_dst_id = dst;
+
+    uint16_t pool_before = cap_free_count();
+
+    task_id_t a = task_create("smp_t0", smp_cap_xfer_task,
+                              (void *)(uintptr_t)0U, 9, 1024);
+    task_id_t b = task_create("smp_t1", smp_cap_xfer_task,
+                              (void *)(uintptr_t)1U, 9, 1024);
+    TEST_ASSERT(a >= 0 && b >= 0, "cap transfer workers created");
+
+    if (a >= 0 && b >= 0) {
+        (void)task_set_affinity(a, 1UL << 0);
+        (void)task_set_affinity(b, 1UL << 1);
+        (void)task_start(a);
+        (void)task_start(b);
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(a, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "cap transfer core0 joined");
+        TEST_ASSERT_EQ(KERN_OK,
+                       smp_join_bounded(b, NULL, SMP_JOIN_TIMEOUT_TICKS),
+                       "cap transfer core1 joined");
+
+        TEST_ASSERT_EQ((int)SMP_CAP_XFER_ITERATIONS,
+                       (int)(smp_xfer_ok[0] + smp_xfer_busy[0]),
+                       "cap transfer core0 fully accounted");
+        TEST_ASSERT_EQ((int)SMP_CAP_XFER_ITERATIONS,
+                       (int)(smp_xfer_ok[1] + smp_xfer_busy[1]),
+                       "cap transfer core1 fully accounted");
+        TEST_ASSERT_EQ(0, (int)(smp_xfer_err[0] + smp_xfer_err[1]),
+                       "cap transfer: no unexpected errors");
+
+        uint32_t total_ok = smp_xfer_ok[0] + smp_xfer_ok[1];
+        TEST_ASSERT(total_ok > 0, "cap transfer: at least one succeeded");
+        /* occupied 是位图 (uint64),用 popcount 数实际占用 slot 数 */
+        uint64_t occupied = test_cspace_occupied(dst_tcb);
+        TEST_ASSERT_EQ((int)total_ok, (int)__builtin_popcountll(occupied),
+                       "dst cspace holds exactly the received caps");
+
+        /* 每个成功传输的 cap 必须解析到发送方的对象 */
+        for (uint32_t k = 0; k < 2U; k++) {
+            for (uint32_t i = 0; i < smp_xfer_ok[k]; i++) {
+                void *ptr = cap_lookup_for(dst_tcb, smp_xfer_out[k][i],
+                                           CAP_OBJ_SYSTEM, CAP_READ);
+                TEST_ASSERT(ptr == &smp_cap_xfer_object[k],
+                            "received cap resolves to sender object");
+            }
+        }
+
+        /* 清理: 撤销全部 dst caps → CSpace 清空 */
+        for (uint32_t k = 0; k < 2U; k++) {
+            for (uint32_t i = 0; i < smp_xfer_ok[k]; i++) {
+                (void)cap_revoke_for(dst_tcb, smp_xfer_out[k][i]);
+            }
+        }
+        TEST_ASSERT_EQ(0, (int)test_cspace_occupied(dst_tcb),
+                       "dst cspace drained after revoke");
+    }
+
+    (void)task_delete(a);
+    (void)task_delete(b);
+    (void)task_delete(dst);
+    TEST_ASSERT_EQ((int)pool_before, (int)cap_free_count(),
+                   "cap transfer: pool balanced after cleanup");
+}
+
+/*============================================================================
+ * Test 10: both cores have distinct current tasks after workload
  *============================================================================*/
 
 static void test_dual_core_active(void) {
@@ -697,7 +841,11 @@ static void test_smp_module(void) {
     test_cross_core_event_interleavings();
     test_print("[SMP] 8 continuation arming race\r\n");
     test_continuation_arming_race();
-    test_print("[SMP] 9 final core state\r\n");
+#if CAP_ENABLE
+    test_print("[SMP] 9 concurrent cap transfer\r\n");
+    test_cross_core_cap_transfer();
+#endif
+    test_print("[SMP] 10 final core state\r\n");
     test_dual_core_active();
     test_print("[SMP] complete\r\n");
 }
