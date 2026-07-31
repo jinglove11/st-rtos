@@ -78,10 +78,7 @@ static uint8_t ep_msg_buffers[KERN_MAX_ENDPOINTS]
 /* 发送者指针缓冲区: [endpoint][slot] */
 static tcb_t *ep_sender_buffers[KERN_MAX_ENDPOINTS][KERN_EP_MAX_PENDING];
 
-/* 每任务: 客户端的 msg 指针 (用于 reply 写回) */
-static void *ep_client_msg[KERNEL_MAX_TASKS];
-static uint32_t ep_client_gen[KERNEL_MAX_TASKS];
-static void *ep_syscall_client_msg[KERNEL_MAX_TASKS];
+/* M3-Step2a: send continuation 移到 TCB->cont (reply_buf/syscall_reply_buf/request_gen) */
 static tcb_t *ep_server_sender[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static uint32_t ep_server_gen[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
 static uint8_t ep_server_dead[KERN_MAX_ENDPOINTS][KERNEL_MAX_TASKS];
@@ -288,9 +285,9 @@ static void endpoint_cancel_sender(ep_id_t ep_id, endpoint_t *ep, tcb_t *sender)
     endpoint_clear_server_bindings(ep_id, sender);
 
     if (sender->id >= 0 && sender->id < KERNEL_MAX_TASKS) {
-        ep_client_msg[sender->id] = NULL;
-        ep_client_gen[sender->id] = 0;
-        ep_syscall_client_msg[sender->id] = NULL;
+        sender->cont.reply_buf = NULL;
+        sender->cont.request_gen = 0;
+        sender->cont.syscall_reply_buf = NULL;
     }
 }
 
@@ -302,9 +299,7 @@ void endpoint_init(void) {
     irq_spin_init_rank(&ep_lock, LOCKDEP_RANK_OBJECT);
     memset(ep_pool, 0, sizeof(ep_pool));
     ep_used_bitmap = 0;
-    memset(ep_client_msg, 0, sizeof(ep_client_msg));
-    memset(ep_client_gen, 0, sizeof(ep_client_gen));
-    memset(ep_syscall_client_msg, 0, sizeof(ep_syscall_client_msg));
+    /* M3-Step2a: send side table 已移到 TCB->cont */
     memset(ep_server_sender, 0, sizeof(ep_server_sender));
     memset(ep_server_gen, 0, sizeof(ep_server_gen));
     memset(ep_server_dead, 0, sizeof(ep_server_dead));
@@ -437,9 +432,9 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
     while (tcb) {
         tcb_t *next = tcb->wait_next;
         if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
-            ep_client_msg[tcb->id] = NULL;
-            ep_client_gen[tcb->id] = 0;
-            ep_syscall_client_msg[tcb->id] = NULL;
+            tcb->cont.reply_buf = NULL;
+            tcb->cont.request_gen = 0;
+            tcb->cont.syscall_reply_buf = NULL;
         }
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
@@ -516,9 +511,9 @@ void endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb) {
     }
 
     if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
-        ep_client_msg[tcb->id] = NULL;
-        ep_client_gen[tcb->id] = 0;
-        ep_syscall_client_msg[tcb->id] = NULL;
+        tcb->cont.reply_buf = NULL;
+        tcb->cont.request_gen = 0;
+        tcb->cont.syscall_reply_buf = NULL;
         tcb->cont.msg_buf = NULL;
         tcb->cont.u.ep_recv.out_caps = NULL;
         tcb->cont.u.ep_recv.out_cap_count = NULL;
@@ -621,8 +616,8 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
 
         if (endpoint_deliver_to_syscall_recv(ep_id, ep, server, current,
                                              msg, caps, cap_count, request_gen)) {
-            ep_client_msg[current->id] = msg;
-            ep_client_gen[current->id] = request_gen;
+            current->cont.reply_buf = msg;
+            current->cont.request_gen = request_gen;
 
             wait_queue_add(&ep->reply_waiters, current);
             {
@@ -745,8 +740,8 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
     ep->pending_count++;
 
     /* 保存客户端 msg 指针，reply 时写回 */
-    ep_client_msg[current->id] = msg;
-    ep_client_gen[current->id] = request_gen;
+    current->cont.reply_buf = msg;
+    current->cont.request_gen = request_gen;
 
     /* 如果有服务端在等待接收，唤醒它 */
     if (ep->recv_waiters.count > 0) {
@@ -910,9 +905,9 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
         ep->next_request_gen = 1;
     }
 
-    ep_client_msg[current->id] = user_reply_msg;
-    ep_syscall_client_msg[current->id] = user_reply_msg;
-    ep_client_gen[current->id] = request_gen;
+    current->cont.reply_buf = user_reply_msg;
+    current->cont.syscall_reply_buf = user_reply_msg;
+    current->cont.request_gen = request_gen;
 
     /* M3-Task3: 用 prepare_locked 统一设 cont 字段 */
     syscall_cont_prepare_locked(BLOCK_REASON_EP_SEND, ep);
@@ -934,9 +929,9 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
             if (current->cont.result != KERN_OK) {
                 kern_err_t err = current->cont.result;
                 wait_queue_remove_safe(&ep->reply_waiters, current);
-                ep_client_msg[current->id] = NULL;
-                ep_syscall_client_msg[current->id] = NULL;
-                ep_client_gen[current->id] = 0;
+                current->cont.reply_buf = NULL;
+                current->cont.syscall_reply_buf = NULL;
+                current->cont.request_gen = 0;
                 current->cont.active = 0;
                 current->state = TASK_STATE_RUNNING;
                 current->cont.op = BLOCK_REASON_NONE;
@@ -1360,7 +1355,7 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
         sender->cont.op != BLOCK_REASON_EP_SEND ||
         sender->id < 0 ||
         sender->id >= KERNEL_MAX_TASKS ||
-        ep_client_gen[sender->id] != request_gen) {
+        sender->cont.request_gen != request_gen) {
         if (server != NULL && server->id >= 0 && server->id < KERNEL_MAX_TASKS) {
             ep_server_sender[ep_id][server->id] = NULL;
             ep_server_gen[ep_id][server->id] = 0;
@@ -1374,7 +1369,7 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
     }
 
     /* 将回复写入客户端的原始 msg 缓冲区 */
-    void *client_buf = ep_client_msg[sender->id];
+    void *client_buf = sender->cont.reply_buf;
     if (client_buf) {
         memcpy(client_buf, msg, ep->msg_size);
     }
@@ -1392,9 +1387,9 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
         endpoint_invalidate_reply_cap(ep_id, server->id);
 #endif
     }
-    ep_client_msg[sender->id] = NULL;
-    ep_client_gen[sender->id] = 0;
-    ep_syscall_client_msg[sender->id] = NULL;
+    sender->cont.reply_buf = NULL;
+    sender->cont.request_gen = 0;
+    sender->cont.syscall_reply_buf = NULL;
 
     /* 从 reply_waiters 移除并唤醒客户端 */
     wait_queue_remove_safe(&ep->reply_waiters, sender);
@@ -1468,7 +1463,7 @@ cap_id_t endpoint_take_reply_cap(ep_id_t ep_id) {
                 sender->id >= 0 && sender->id < KERNEL_MAX_TASKS &&
                 sender->cont.object == ep &&
                 sender->cont.op == BLOCK_REASON_EP_SEND) {
-                request_gen = ep_client_gen[sender->id];
+                request_gen = sender->cont.request_gen;
                 ep_server_sender[ep_id][server->id] = sender;
                 ep_server_gen[ep_id][server->id] = request_gen;
                 ep_server_dead[ep_id][server->id] = 0;

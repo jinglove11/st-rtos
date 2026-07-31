@@ -170,7 +170,9 @@ typedef struct {
 
     /* --- payload (替代全局 side table) --- */
     void       *msg_buf;        /* user 消息缓冲区指针 (recv: out buf) */
-    void       *reply_buf;      /* endpoint send: reply-out buffer */
+    void       *reply_buf;      /* endpoint thread-mode send: reply-out buffer */
+    void       *syscall_reply_buf; /* endpoint SVC send: reply-out buffer
+                                     (独立于 reply_buf: 生命周期不同) */
     uint32_t    request_gen;    /* endpoint send: request generation */
     union {
         struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ep_recv;
