@@ -2077,6 +2077,192 @@ static void test_local_cptr_generation_exhaustion(void) {
     (void)task_delete(tid);
 }
 
+/*============================================================================
+ * M3-Step2: cap transaction 异常组合测试
+ *
+ * prepare 只记录 op (不解析 cap),commit 时 cap_txn_validate_locked 才
+ * 校验 task generation + cap 存在性。因此 prepare 与 commit 之间发生的
+ * revoke / 对象删除 / sender fault 必须在 commit 被检测,且零残留。
+ *============================================================================*/
+
+static void test_txn_revoke_between_prepare_commit(void) {
+    test_section("Test 27a: cap revoke between prepare and commit");
+
+    task_id_t src_id = task_create("txnrs", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("txnrd", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "create txn revoke tasks");
+    if (src_id < 0 || dst_id < 0) {
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int obj = 2301;
+    cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
+                                  CAP_READ | CAP_TRANSFER);
+    TEST_ASSERT(cap >= 0, "create transferable cap");
+
+    cap_transaction_t txn;
+    cap_txn_begin(&txn);
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_txn_prepare_copy(&txn, src, cap, dst, CAP_READ),
+                   "COPY prepared before revoke");
+
+    (void)cap_revoke_for(src, cap);
+
+    /* 基线在 revoke 之后、commit 之前:commit 失败必须零残留 */
+    uint16_t pool_at_commit = cap_free_count();
+    uint64_t occupied_before = test_cspace_occupied(dst);
+
+    kern_err_t commit_err = cap_txn_commit(&txn);
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, (int)commit_err,
+                   "commit fails after source revoke");
+    TEST_ASSERT_EQ((int)CAP_TXN_STATE_ABORTED, (int)txn.state,
+                   "failed commit records aborted state");
+    TEST_ASSERT_EQ((int)pool_at_commit, (int)cap_free_count(),
+                   "aborted commit consumes no pool slot");
+    TEST_ASSERT(test_cspace_occupied(dst) == occupied_before,
+                "aborted commit publishes no dst cap");
+    TEST_ASSERT(cap_lookup_for(dst, txn.results[0], CAP_OBJ_ENDPOINT,
+                               CAP_READ) == NULL,
+                "no dst cap after aborted commit");
+
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+}
+
+static void test_txn_object_delete_between_prepare_commit(void) {
+    test_section("Test 27b: object delete between prepare and commit");
+
+    task_id_t src_id = task_create("txnob", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("txnod", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "create txn object tasks");
+    if (src_id < 0 || dst_id < 0) {
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int obj = 2302;
+    cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
+                                  CAP_READ | CAP_TRANSFER);
+    TEST_ASSERT(cap >= 0, "create transferable cap");
+
+    cap_transaction_t txn;
+    cap_txn_begin(&txn);
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_txn_prepare_copy(&txn, src, cap, dst, CAP_READ),
+                   "COPY prepared before object delete");
+
+    (void)cap_revoke_object(&obj, CAP_OBJ_ENDPOINT);
+
+    /* 基线在对象删除之后、commit 之前:commit 失败必须零残留 */
+    uint16_t pool_at_commit = cap_free_count();
+    uint64_t occupied_before = test_cspace_occupied(dst);
+
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, (int)cap_txn_commit(&txn),
+                   "commit fails after object delete");
+    TEST_ASSERT_EQ((int)CAP_TXN_STATE_ABORTED, (int)txn.state,
+                   "failed commit records aborted state");
+    TEST_ASSERT_EQ((int)pool_at_commit, (int)cap_free_count(),
+                   "aborted commit consumes no pool slot");
+    TEST_ASSERT(test_cspace_occupied(dst) == occupied_before,
+                "aborted commit publishes no dst cap");
+
+    (void)task_delete(src_id);
+    (void)task_delete(dst_id);
+}
+
+static void test_txn_sender_fault_after_transfer(void) {
+    test_section("Test 27c: sender fault after transfer keeps dst cap");
+
+    task_id_t src_id = task_create("txnsf", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("txnfd", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "create sender fault tasks");
+    if (src_id < 0 || dst_id < 0) {
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int obj = 2303;
+    cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
+                                  CAP_READ | CAP_TRANSFER);
+    TEST_ASSERT(cap >= 0, "create transferable cap");
+
+    ipc_cap_xfer_t xfers[1];
+    xfers[0].src_cap = cap;
+    xfers[0].rights = CAP_READ;
+    xfers[0].flags = IPC_CAP_COPY;
+    cap_id_t out[1] = { (cap_id_t)-1 };
+    kern_err_t err = ipc_transfer_caps(src, dst, xfers, 1, out);
+    TEST_ASSERT_EQ((int)KERN_OK, (int)err, "COPY succeeds before fault");
+    TEST_ASSERT(out[0] >= 0, "COPY publishes dst cap id");
+
+    /* sender fault: 传输完成后删除 src task */
+    (void)task_delete(src_id);
+
+    void *ptr = cap_lookup_for(dst, out[0], CAP_OBJ_ENDPOINT, CAP_READ);
+    TEST_ASSERT(ptr == &obj, "dst cap survives sender fault");
+
+    (void)cap_revoke_for(dst, out[0]);
+    (void)task_delete(dst_id);
+}
+
+static void test_txn_sender_fault_between_prepare_commit(void) {
+    test_section("Test 27d: sender fault between prepare and commit");
+
+    task_id_t src_id = task_create("txnpf", cap_test_task, NULL, 10, 512);
+    task_id_t dst_id = task_create("txnpd", cap_test_task, NULL, 10, 512);
+    TEST_ASSERT(src_id >= 0 && dst_id >= 0, "create txn prepare tasks");
+    if (src_id < 0 || dst_id < 0) {
+        return;
+    }
+
+    tcb_t *src = task_get_tcb(src_id);
+    tcb_t *dst = task_get_tcb(dst_id);
+    src->attrs = TASK_ATTR_USER;
+    dst->attrs = TASK_ATTR_USER;
+
+    int obj = 2304;
+    cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
+                                  CAP_READ | CAP_TRANSFER);
+    TEST_ASSERT(cap >= 0, "create transferable cap");
+
+    cap_transaction_t txn;
+    cap_txn_begin(&txn);
+    TEST_ASSERT_EQ((int)KERN_OK,
+                   (int)cap_txn_prepare_copy(&txn, src, cap, dst, CAP_READ),
+                   "COPY prepared before sender fault");
+
+    /* sender fault: prepare 与 commit 之间删除 src (task generation bump) */
+    (void)task_delete(src_id);
+
+    /* 基线在 sender 删除之后、commit 之前:commit 失败必须零残留 */
+    uint16_t pool_at_commit = cap_free_count();
+    uint64_t occupied_before = test_cspace_occupied(dst);
+
+    TEST_ASSERT_EQ((int)KERN_ERR_CAP, (int)cap_txn_commit(&txn),
+                   "commit fails after sender deletion");
+    TEST_ASSERT_EQ((int)CAP_TXN_STATE_ABORTED, (int)txn.state,
+                   "failed commit records aborted state");
+    TEST_ASSERT_EQ((int)pool_at_commit, (int)cap_free_count(),
+                   "aborted commit consumes no pool slot");
+    TEST_ASSERT(test_cspace_occupied(dst) == occupied_before,
+                "aborted commit publishes no dst cap");
+
+    (void)task_delete(dst_id);
+}
+
 static void test_capability_module(void) {
     test_cap_create_basic();
     test_cap_create_pool_full();
@@ -2119,6 +2305,10 @@ static void test_capability_module(void) {
     test_cap_cleanup_callback();
     test_cap_cleanup_outer_lock_safe_point();
     test_cap_revoke_deep_tree_cleanup_once();
+    test_txn_revoke_between_prepare_commit();
+    test_txn_object_delete_between_prepare_commit();
+    test_txn_sender_fault_after_transfer();
+    test_txn_sender_fault_between_prepare_commit();
     test_mmio_cap_lifecycle();
 #if CAP_RESTART_SUBSET
     test_cap_derive_for_restart_strips_grant();
