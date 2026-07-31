@@ -59,6 +59,16 @@ typedef int32_t         cap_id_t;        // 能力句柄 (slot + generation)
 typedef int16_t ep_id_t;         // Endpoint ID
 typedef int16_t ch_id_t;         // Channel ID
 
+/* IPC cap transfer 格式 (M3-Step2b: 从 ipc_transfer.h 上移,
+ * 供 syscall_cont_t 的 ch_send payload 内联到 TCB)。 */
+#define IPC_CAPS_MAX 4
+
+typedef struct {
+    cap_id_t src_cap;
+    uint8_t  rights;
+    uint8_t  flags;
+} ipc_cap_xfer_t;
+
 struct cnode;
 
 #define KERN_INVALID_ID      (-1)
@@ -178,6 +188,11 @@ typedef struct {
         struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ep_recv;
         struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ch;
         struct { uint32_t wait_flags; uint32_t wait_opt; uint32_t *received; } event;
+        struct {
+            uint8_t body[KERN_CH_MSG_SIZE];
+            ipc_cap_xfer_t caps[IPC_CAPS_MAX];
+            uint8_t cap_count;
+        } ch_send;
     } u;
 } syscall_cont_t;
 

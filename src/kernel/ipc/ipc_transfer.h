@@ -11,16 +11,11 @@
 
 #if CAP_ENABLE
 
-#define IPC_CAPS_MAX 4
+/* IPC_CAPS_MAX 与 ipc_cap_xfer_t 定义在 kernel_types.h (M3-Step2b:
+ * syscall_cont_t 的 ch_send payload 内联到 TCB,避免循环 include)。 */
 
 #define IPC_CAP_COPY 0x00
 #define IPC_CAP_MOVE 0x01
-
-typedef struct {
-    cap_id_t src_cap;
-    uint8_t  rights;
-    uint8_t  flags;
-} ipc_cap_xfer_t;
 
 typedef struct {
     uint16_t len;

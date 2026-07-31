@@ -66,11 +66,8 @@ static uint8_t ch_shm_pool[KERN_MAX_CHANNELS][256]
     __attribute__((aligned(8)));
 
 #if SYSCALL_ENABLE
-static uint8_t ch_syscall_send_msg[KERNEL_MAX_TASKS][KERN_CH_MSG_SIZE]
-    __attribute__((aligned(4)));
-static ipc_cap_xfer_t ch_syscall_send_caps[KERNEL_MAX_TASKS][IPC_CAPS_MAX];
-static uint8_t ch_syscall_send_cap_count[KERNEL_MAX_TASKS];
-/* M3-Task3: recv continuation 移到 TCB->cont (msg_buf + ch union) */
+/* M3-Step2b: send continuation 移到 TCB->cont.u.ch_send
+ * (body/caps/cap_count 内联到 syscall_cont_t union)。 */
 #endif
 
 /*============================================================================
@@ -109,11 +106,11 @@ static void channel_wake_all(wait_queue_t *queue, kern_err_t result) {
         tcb->wait_prev = NULL;
 #if SYSCALL_ENABLE
         if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
-            memset(ch_syscall_send_msg[tcb->id], 0,
-                   sizeof(ch_syscall_send_msg[tcb->id]));
-            memset(ch_syscall_send_caps[tcb->id], 0,
-                   sizeof(ch_syscall_send_caps[tcb->id]));
-            ch_syscall_send_cap_count[tcb->id] = 0;
+            memset(tcb->cont.u.ch_send.body, 0,
+                   sizeof(tcb->cont.u.ch_send.body));
+            memset(tcb->cont.u.ch_send.caps, 0,
+                   sizeof(tcb->cont.u.ch_send.caps));
+            tcb->cont.u.ch_send.cap_count = 0;
             tcb->cont.msg_buf = NULL;
             tcb->cont.u.ch.out_caps = NULL;
             tcb->cont.u.ch.out_cap_count = NULL;
@@ -247,18 +244,18 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
 #if SYSCALL_ENABLE
     if (waiter->cont.active &&
         waiter->id >= 0 && waiter->id < KERNEL_MAX_TASKS) {
-        uint8_t cap_count = ch_syscall_send_cap_count[waiter->id];
+        uint8_t cap_count = waiter->cont.u.ch_send.cap_count;
         if (cap_count > 0) {
             tcb_t *receiver = task_get_tcb(receiver_id);
             kern_err_t xfer_err = ipc_transfer_caps(waiter, receiver,
-                                                    ch_syscall_send_caps[waiter->id],
+                                                    waiter->cont.u.ch_send.caps,
                                                     cap_count, cap_dst);
             if (xfer_err != KERN_OK) {
-                memset(ch_syscall_send_msg[waiter->id], 0,
-                       sizeof(ch_syscall_send_msg[waiter->id]));
-                memset(ch_syscall_send_caps[waiter->id], 0,
-                       sizeof(ch_syscall_send_caps[waiter->id]));
-                ch_syscall_send_cap_count[waiter->id] = 0;
+                memset(waiter->cont.u.ch_send.body, 0,
+                       sizeof(waiter->cont.u.ch_send.body));
+                memset(waiter->cont.u.ch_send.caps, 0,
+                       sizeof(waiter->cont.u.ch_send.caps));
+                waiter->cont.u.ch_send.cap_count = 0;
                 wait_queue_remove(send_wq, waiter);
                 waiter->cont.result = xfer_err;
                 sched_wakeup(waiter, xfer_err);
@@ -268,12 +265,12 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
             memset(cap_dst, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
         }
 
-        memcpy(buf, ch_syscall_send_msg[waiter->id], KERN_CH_MSG_SIZE);
-        memset(ch_syscall_send_msg[waiter->id], 0,
-               sizeof(ch_syscall_send_msg[waiter->id]));
-        memset(ch_syscall_send_caps[waiter->id], 0,
-               sizeof(ch_syscall_send_caps[waiter->id]));
-        ch_syscall_send_cap_count[waiter->id] = 0;
+        memcpy(buf, waiter->cont.u.ch_send.body, KERN_CH_MSG_SIZE);
+        memset(waiter->cont.u.ch_send.body, 0,
+               sizeof(waiter->cont.u.ch_send.body));
+        memset(waiter->cont.u.ch_send.caps, 0,
+               sizeof(waiter->cont.u.ch_send.caps));
+        waiter->cont.u.ch_send.cap_count = 0;
         *cap_count_dst = cap_count;
         *ready_flag = 1;
         wait_queue_remove(send_wq, waiter);
@@ -300,10 +297,8 @@ void channel_init(void) {
     memset(ch_cap_id_buffers, 0, sizeof(ch_cap_id_buffers));
     memset(ch_cap_count_buffers, 0, sizeof(ch_cap_count_buffers));
 #if SYSCALL_ENABLE
-    memset(ch_syscall_send_msg, 0, sizeof(ch_syscall_send_msg));
-    memset(ch_syscall_send_caps, 0, sizeof(ch_syscall_send_caps));
-    memset(ch_syscall_send_cap_count, 0, sizeof(ch_syscall_send_cap_count));
-    /* M3-Task3: recv side table 已移到 TCB->cont */
+    /* M3-Step2b: send side table 已移到 TCB->cont.u.ch_send
+     * (TCB 创建时 memset 清零) */
 #endif
     ch_used_bitmap = 0;
 }
@@ -428,11 +423,11 @@ void channel_cleanup_task(void *channel_obj, tcb_t *tcb) {
 
 #if SYSCALL_ENABLE
     if (tcb->id >= 0 && tcb->id < KERNEL_MAX_TASKS) {
-        memset(ch_syscall_send_msg[tcb->id], 0,
-               sizeof(ch_syscall_send_msg[tcb->id]));
-        memset(ch_syscall_send_caps[tcb->id], 0,
-               sizeof(ch_syscall_send_caps[tcb->id]));
-        ch_syscall_send_cap_count[tcb->id] = 0;
+        memset(tcb->cont.u.ch_send.body, 0,
+               sizeof(tcb->cont.u.ch_send.body));
+        memset(tcb->cont.u.ch_send.caps, 0,
+               sizeof(tcb->cont.u.ch_send.caps));
+        tcb->cont.u.ch_send.cap_count = 0;
         tcb->cont.msg_buf = NULL;
         tcb->cont.u.ch.out_caps = NULL;
         tcb->cont.u.ch.out_cap_count = NULL;
@@ -671,7 +666,7 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
             return KERN_ERR_TIMEOUT;
         }
 
-        memcpy(ch_syscall_send_msg[current->id], msg, ch->msg_size);
+        memcpy(current->cont.u.ch_send.body, msg, ch->msg_size);
         syscall_cont_prepare_locked(BLOCK_REASON_CH_SEND, ch);
         wait_queue_add(send_wq, current);
         sched_remove_ready(current);
@@ -759,12 +754,12 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
             return KERN_ERR_TIMEOUT;
         }
 
-        memcpy(ch_syscall_send_msg[current->id], msg, ch->msg_size);
+        memcpy(current->cont.u.ch_send.body, msg, ch->msg_size);
         if (cap_count > 0) {
-            memcpy(ch_syscall_send_caps[current->id], caps,
+            memcpy(current->cont.u.ch_send.caps, caps,
                    sizeof(ipc_cap_xfer_t) * cap_count);
         }
-        ch_syscall_send_cap_count[current->id] = cap_count;
+        current->cont.u.ch_send.cap_count = cap_count;
         syscall_cont_prepare_locked(BLOCK_REASON_CH_SEND, ch);
         wait_queue_add(send_wq, current);
         sched_remove_ready(current);
