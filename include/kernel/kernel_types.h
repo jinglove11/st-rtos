@@ -173,7 +173,8 @@ typedef struct {
     /* --- 状态机字段 (替代散在 TCB 的 5 个标量) --- */
     uint8_t     active;         /* 1 = 阻塞中 (替代 syscall_blocked) */
     uint8_t     op;             /* block_reason_t (替代 block_reason) */
-    uint16_t    flags;          /* 预留 */
+    _Atomic uint8_t phase;      /* CONT_PHASE_*: 独立原子字段,
+                                 * 所有阶段转换用 CAS (M3-Step1 闭环) */
     void       *object;         /* 等待的内核对象指针 (替代 block_obj) */
     uint32_t    deadline;       /* 超时 tick, 0=永久 (替代 wake_tick) */
     kern_err_t  result;         /* 唤醒结果 (替代 block_result) */

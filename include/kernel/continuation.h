@@ -37,16 +37,25 @@ int  syscall_cont_commit(uint32_t timeout);
 void syscall_cont_complete(tcb_t *tcb, kern_err_t result);
 void syscall_cont_cancel(tcb_t *tcb, kern_err_t result);
 
-/* M3-Task3: continuation 阶段 (存在 cont.flags 低字节)。
- * 复杂子系统 (endpoint/channel) 的同步 deliver 路径用这些宏手动
- * 管理阶段,不走 commit。 */
+/* M3-Step1 闭环: phase 是独立原子字段 (cont.phase),
+ * 所有阶段转换用原子操作完成:
+ * - GET/SET: 原子 load/store (release/acquire)
+ * - CAS: __atomic_compare_exchange (ACQ_REL),用于 ARMING/BLOCKED
+ *   转换点的竞争 (commit vs complete/cancel, 多 waker 互斥)。
+ * 复杂子系统 (endpoint/channel) 的同步 deliver 路径暂用 SET 手动
+ * 管理阶段 (节点 B 统一到 prepare/commit 后移除)。 */
 #define CONT_PHASE_IDLE        0
 #define CONT_PHASE_ARMING      1
 #define CONT_PHASE_BLOCKED     2
 #define CONT_PHASE_COMPLETING  3
 
-#define CONT_PHASE_SET(c, p)  do { (c)->flags = ((c)->flags & 0xFF00) | (p); } while (0)
-#define CONT_PHASE_GET(c)     ((c)->flags & 0xFF)
+#define CONT_PHASE_GET(c) \
+    __atomic_load_n(&(c)->phase, __ATOMIC_ACQUIRE)
+#define CONT_PHASE_SET(c, p) \
+    __atomic_store_n(&(c)->phase, (p), __ATOMIC_RELEASE)
+#define CONT_PHASE_CAS(c, exp, val) \
+    __atomic_compare_exchange_n(&(c)->phase, (exp), (val), 0, \
+                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
 
 #ifdef __cplusplus
 }
