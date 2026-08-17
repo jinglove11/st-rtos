@@ -103,7 +103,7 @@ static void mqueue_wake_recv_waiter(mqueue_t *mq) {
         wait_queue_remove(&mq->recv_queue, tcb);
         tcb->cont.result = KERN_OK;
         tcb->cont.object = NULL;
-        sched_wakeup(tcb, KERN_OK);
+        syscall_cont_wake(tcb, KERN_OK);
         return;
     }
 #endif
@@ -111,7 +111,7 @@ static void mqueue_wake_recv_waiter(mqueue_t *mq) {
     wait_queue_remove(&mq->recv_queue, tcb);
     tcb->cont.result = KERN_OK;
     tcb->cont.object = NULL;
-    sched_wakeup(tcb, KERN_OK);
+    syscall_cont_wake(tcb, KERN_OK);
 }
 
 static void mqueue_wake_send_waiter(mqueue_t *mq) {
@@ -131,7 +131,7 @@ static void mqueue_wake_send_waiter(mqueue_t *mq) {
         wait_queue_remove(&mq->send_queue, tcb);
         tcb->cont.result = KERN_OK;
         tcb->cont.object = NULL;
-        sched_wakeup(tcb, KERN_OK);
+        syscall_cont_wake(tcb, KERN_OK);
         mqueue_wake_recv_waiter(mq);
         return;
     }
@@ -140,7 +140,7 @@ static void mqueue_wake_send_waiter(mqueue_t *mq) {
     wait_queue_remove(&mq->send_queue, tcb);
     tcb->cont.result = KERN_OK;
     tcb->cont.object = NULL;
-    sched_wakeup(tcb, KERN_OK);
+    syscall_cont_wake(tcb, KERN_OK);
 }
 
 /*============================================================================
@@ -220,7 +220,7 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
 #endif
         tcb->cont.result = KERN_ERR_NOEXIST;
         tcb->cont.object = NULL;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -237,7 +237,7 @@ kern_err_t mqueue_delete(queue_id_t queue_id) {
 #endif
         tcb->cont.result = KERN_ERR_NOEXIST;
         tcb->cont.object = NULL;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 

@@ -4,6 +4,7 @@
  */
 
 #include "task.h"
+#include "continuation.h"
 #include "scheduler.h"
 #include "kernel_config.h"
 #include "kernel_types.h"
@@ -157,6 +158,18 @@ static void idle_task_func(void *arg) {
     (void)arg;  // 显式标记未使用的参数，避免编译器警告
 
     while (1) {  // 无限循环，确保任务持续运行
+#if SMP
+        /* DBG: core1 idle 心跳 (纯 RAM 写,零时序扰动) */
+        {
+            extern volatile uint32_t core1_hb;
+            extern void smp_debug_mark1(uint32_t v);
+            if (hal_get_cpu_id() == 1U) {
+                core1_hb++;
+                smp_debug_mark1(5);
+            }
+        }
+#endif
+
 #if KERN_IDLE_SLEEP
         hal_enter_lowpower();  // 如果启用了空闲睡眠功能，则进入低功耗模式
 #endif
@@ -293,7 +306,7 @@ static void task_wake_joiner_list(tcb_t *j, kern_err_t result) {
     while (j) {
         tcb_t *next = j->join_next;
         j->join_next = NULL;
-        sched_wakeup(j, result);
+        syscall_cont_wake(j, result);
         j = next;
     }
 }
@@ -305,6 +318,39 @@ static void task_record_exit(tcb_t *tcb, void *retval, kern_err_t result) {
 
     tcb->exit_value = retval;
     task_exit_record_store(tcb, retval, result);
+}
+
+/* DBG/防御: 槽位擦除 (memset) 前检查是否仍被就绪链引用。单节点形态
+ * (head==tail==tcb) 下 next/prev 均为 NULL,必须查链表指针本身。
+ * 命中说明上游有"终止/挂起/阻塞却不出队"的泄漏 — 打印身份并断链。 */
+static void task_debug_assert_unlinked(tcb_t *tcb, task_id_t id) {
+    int linked = (tcb->next != NULL || tcb->prev != NULL);
+#if KERN_DEBUG_ENABLE
+    if (!linked) {
+        extern int sched_debug_is_linked(const tcb_t *t);
+        linked = sched_debug_is_linked(tcb);
+    }
+#endif
+    if (linked) {
+        char b[6];
+        b[0] = '0' + (char)(id / 10U);
+        b[1] = '0' + (char)(id % 10U);
+        b[2] = '\r';
+        b[3] = '\n';
+        b[4] = 0;
+        hal_debug_puts("[ERASE-LINKED] id=");
+        hal_debug_puts(b);
+        hal_debug_puts(" name=");
+        hal_debug_puts(tcb->name[0] ? tcb->name : "(empty)");
+        hal_debug_puts(" state=");
+        b[0] = '0' + (char)tcb->state;
+        b[1] = '\r';
+        b[2] = '\n';
+        b[3] = 0;
+        hal_debug_puts(b);
+        tcb->next = NULL;
+        tcb->prev = NULL;
+    }
 }
 
 static void task_finish_termination(tcb_t *tcb, kern_err_t result) {
@@ -900,6 +946,7 @@ kern_err_t task_delete(task_id_t task_id) {
         if (expected_generation != 0U) {
             task_join_expected[caller->id][task_id] = 0U;
         }
+        task_debug_assert_unlinked(tcb, task_id);
         free_task_id(task_id);
         uint32_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
         memset(tcb, 0, sizeof(tcb_t));
@@ -974,6 +1021,7 @@ kern_err_t task_delete(task_id_t task_id) {
     }
 
     // 先撤销可见性，再清零 TCB，避免扫描路径看到半清理槽位
+    task_debug_assert_unlinked(tcb, task_id);
     free_task_id(task_id);
     /* 跨 memset bump generation:task_create 复用此 slot 时 saved_gen
      * 非 0 → 用新 generation → 旧 task cap cross-check 失效 (M2 验收 A1)。 */
@@ -1266,15 +1314,20 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
 
     /* Publish the waiter and its BLOCKED state under one cross-core lock.
      * Otherwise target exit can observe the list while sched_wakeup still sees
-     * this task RUNNING, losing the only wakeup. */
+     * this task RUNNING, losing the only wakeup.
+     * 顺序 deadline → 出队 → state=BLOCKED,全程在临界区内:
+     * state=BLOCKED 而仍在就绪队列的窗口,任何一次 ready-list add
+     * 校验 (队列内必须全为 READY) 都会 panic。 */
     current->join_value = NULL;
     current->join_next = tcb->joiners;
     tcb->joiners = current;
-    current->state = TASK_STATE_BLOCKED;
     current->cont.op = BLOCK_REASON_JOIN;
     current->cont.object = tcb;
     current->cont.result = KERN_OK;
     current->cont.deadline = sched_timeout_deadline(timeout);
+    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
+    sched_remove_ready(current);
+    current->state = TASK_STATE_BLOCKED;
     irq_spin_unlock(&task_lock, crit);
 
     sched_yield();
@@ -1447,6 +1500,39 @@ void task_reclaim_expired(void) {
         if (now < tcb->reclaim_at) continue;
         if (tcb->joiners) continue;
 
+        /* 防御: 槽位若仍挂着就绪链链接,说明某条终止路径漏了出队。
+         * memset 会把链表指针一起抹掉,复用槽位后被陈旧 tail 写穿。
+         * 常开 next/prev 检查 + 防御断链;重型的全链遍历仅 debug 构建。 */
+        {
+            int linked = (tcb->next != NULL || tcb->prev != NULL);
+#if KERN_DEBUG_ENABLE
+            if (!linked) {
+                extern int sched_debug_is_linked(const tcb_t *t);
+                linked = sched_debug_is_linked(tcb);
+            }
+#endif
+            if (linked) {
+                char b[6];
+                b[0] = '0' + (char)(id / 10U);
+                b[1] = '0' + (char)(id % 10U);
+                b[2] = '\r';
+                b[3] = '\n';
+                b[4] = 0;
+                hal_debug_puts("[RECLAIM-LINKED] id=");
+                hal_debug_puts(b);
+                hal_debug_puts(" name=");
+                hal_debug_puts(tcb->name[0] ? tcb->name : "(empty)");
+                hal_debug_puts(" state=");
+                b[0] = '0' + (char)tcb->state;
+                b[1] = '\r';
+                b[2] = '\n';
+                b[3] = 0;
+                hal_debug_puts(b);
+                tcb->next = NULL;
+                tcb->prev = NULL;
+            }
+        }
+
         free_task_id(id);
         uint32_t next_gen = kobj_header_prepare_reuse(&tcb->hdr);
         memset(tcb, 0, sizeof(tcb_t));
@@ -1482,6 +1568,21 @@ kern_err_t task_terminate_with_result(tcb_t *tcb, kern_err_t result) {
      * TERMINATED and wake joiners; otherwise PendSV can discard the cleanup
      * continuation exactly like the normal task_exit() path. */
     if (tcb != sched_get_current()) {
+        /* 外部终止必须先按状态脱离调度结构,否则 TERMINATED 任务残留
+         * 就绪链: task_delete 僵尸 fast-path 的 memset 会把链表指针一起
+         * 抹掉 → 槽位复用后被陈旧 tail 写穿 → ready-list 损坏
+         * (UP: invariant panic;SMP: 脏节点被派发引发连锁崩溃)。 */
+#if SMP
+        if (tcb->cpu_owner < SMP_MAX_CPUS &&
+            tcb->cpu_owner != hal_get_cpu_id() &&
+            (tcb->state == TASK_STATE_READY ||
+             tcb->state == TASK_STATE_RUNNING)) {
+            (void)sched_quiesce_task(tcb);
+        } else
+#endif
+        if (tcb->state == TASK_STATE_READY) {
+            sched_remove_ready(tcb);
+        }
         tcb->state = TASK_STATE_TERMINATED;
     }
     tcb->reclaim_at = TASK_RECLAIM_CLEANING;

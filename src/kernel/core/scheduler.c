@@ -281,8 +281,55 @@ static void ready_list_check_prio(const runqueue_t *rq, uint8_t prio,
         hal_debug_puts("\r\n[SCHED] ready queue invariant failed at ");
         hal_debug_puts(where);
         hal_debug_puts("\r\n");
+        /* DBG: 打印脏链内容,定位"非 READY/优先级错位仍挂链"的节点 */
+        {
+            const ready_list_t *list = &rq->ready_list[prio];
+            char b[12];
+            tcb_t *curr = list->head;
+            uint16_t n = 0;
+            while (curr != NULL && n < KERNEL_MAX_TASKS + 2) {
+                hal_debug_puts("[QDUMP] name=");
+                hal_debug_puts(curr->name[0] ? curr->name : "(empty)");
+                hal_debug_puts(" state=");
+                b[0] = '0' + (char)curr->state;
+                b[1] = ' ';
+                b[2] = 'p';
+                b[3] = '=';
+                b[4] = '0' + (char)(curr->priority / 10U);
+                b[5] = '0' + (char)(curr->priority % 10U);
+                b[6] = '\r';
+                b[7] = '\n';
+                b[8] = 0;
+                hal_debug_puts(b);
+                curr = curr->next;
+                n++;
+            }
+        }
         kern_panic("ready queue invariant");
     }
+}
+
+/* DBG: 检查 tcb 是否仍被任何 CPU 的就绪链引用 (含 head/tail 单节点形态,
+ * 此时 next/prev 均为 NULL,链表指针检查不可见)。 */
+int sched_debug_is_linked(const tcb_t *tcb) {
+    if (tcb == NULL) {
+        return 0;
+    }
+    for (uint32_t cpu = 0; cpu < SMP_MAX_CPUS; cpu++) {
+        const runqueue_t *rq = runq_for(cpu);
+        for (uint8_t prio = 0; prio < KERNEL_MAX_PRIORITIES; prio++) {
+            const ready_list_t *list = &rq->ready_list[prio];
+            if (list->head == tcb || list->tail == tcb) {
+                return 1;
+            }
+            for (const tcb_t *it = list->head; it != NULL; it = it->next) {
+                if (it == tcb) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
 #else
 #define ready_list_check_prio(rq, prio, where) \
@@ -747,7 +794,7 @@ static void sched_process_timeouts(void) {
         } else if (tcb->cont.active) {
             (void)task_cancel_blocked_wait(tcb);
         }
-        sched_wakeup(tcb, wake_result);
+        syscall_cont_wake(tcb, wake_result);
     }
 
     task_reclaim_expired();
@@ -1128,7 +1175,14 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
      * 当任务被唤醒后，会从这里继续执行
      * block_result 已经由 sched_wakeup() 设置
      */
-    return current->cont.result;
+    kern_err_t block_result = current->cont.result;
+
+    /* 线程式阻塞轮次结束,phase 归位 IDLE。唤醒可能走裸 sched_wakeup
+     * (不清 phase),残留 BLOCKED 会让下一次 syscall_cont_wake 把
+     * RUNNING 中的本任务误路由进 complete。 */
+    CONT_PHASE_SET(&current->cont, CONT_PHASE_IDLE);
+
+    return block_result;
 }
 
 /**
@@ -1256,6 +1310,16 @@ uint32_t sched_timeout_deadline(uint32_t timeout) {
  * @note 在中断上下文中调用
  */
 void sched_tick_handler(void) {
+#if SMP
+    {
+        extern void smp_debug_mark1(uint32_t v);
+        extern volatile uint32_t core1_hb_tick;
+        if (hal_get_cpu_id() == 1U) {
+            core1_hb_tick++;
+            smp_debug_mark1(10);
+        }
+    }
+#endif
     /* Core 0 is the sole wall-clock timekeeper.  Each CPU has its own SysTick,
      * so incrementing here on both cores makes timeouts and timers run at
      * roughly twice real time.  Core 1 still performs its local time-slice

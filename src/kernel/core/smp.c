@@ -26,6 +26,19 @@ static volatile uint32_t ipi_pending[SMP_MAX_CPUS];
 static volatile uint32_t flash_lockout_requested;
 static volatile uint32_t flash_lockout_ack[SMP_MAX_CPUS];
 
+/* DBG: core1 生命周期探针 (纯 RAM 写,零时序扰动;openocd AHB-AP 免挂起读)。
+ * stage 单调递增 (max-write),idle 的 5 不会覆盖 IRQ 路径的 6-10。 */
+volatile uint32_t core1_stage;
+volatile uint32_t core1_hb;
+volatile uint32_t core1_hb_irq;
+volatile uint32_t core1_hb_tick;
+
+void smp_debug_mark1(uint32_t v) {
+    if (v > core1_stage) {
+        core1_stage = v;
+    }
+}
+
 #define SMP_FIFO_KICK 0x4D315049UL /* "M1PI" */
 
 /* This loop must remain executable while QSPI XIP is disabled by a flash
@@ -35,6 +48,9 @@ static void __attribute__((noinline))
 __not_in_flash_func(smp_flash_lockout_park)(uint32_t cpu) {
     uint32_t primask;
     __asm volatile("mrs %0, primask" : "=r"(primask));
+    if (cpu == 1U) {
+        smp_debug_mark1(8);
+    }
     __asm volatile("cpsid i" ::: "memory");
 
     __atomic_store_n(&flash_lockout_ack[cpu], 1U, __ATOMIC_RELEASE);
@@ -68,8 +84,17 @@ static inline void smp_fifo_clear_irq(void) {
     sio_hw->fifo_st = 0xFFU;
 }
 
-static void smp_fifo_irq_handler(void) {
+/* 必须驻留 SRAM: flash 擦写窗口内 (XIP 不可用) 到达的 FIFO 中断若从
+ * flash 取指,会执行 QMI 死区模式 (0xbbbbbbbb) → 寄存器/PSP 被垃圾
+ * 污染 → 后续异常压栈 MemManage → lockup → core1 整核复位。 */
+static void __attribute__((noinline))
+__not_in_flash_func(smp_fifo_irq_handler)(void) {
     uint32_t cpu = hal_get_cpu_id();
+
+    if (cpu == 1U) {
+        core1_hb_irq++;
+        smp_debug_mark1(core1_hb_irq >= 2U ? 15U : 6U);
+    }
 
     /* Drain every token before clearing sticky FIFO error/IRQ state. */
     while (smp_fifo_rvalid()) {
@@ -82,7 +107,13 @@ static void smp_fifo_irq_handler(void) {
     uint32_t reasons = __atomic_exchange_n(&ipi_pending[cpu], 0U,
                                             __ATOMIC_ACQ_REL);
     if ((reasons & SMP_IPI_FLASH_LOCKOUT) != 0U) {
+        if (cpu == 1U) {
+            smp_debug_mark1(7);
+        }
         smp_flash_lockout_park(cpu);
+        if (cpu == 1U) {
+            smp_debug_mark1(9);
+        }
         reasons &= ~SMP_IPI_FLASH_LOCKOUT;
     }
     if (reasons != 0U) {
@@ -185,6 +216,31 @@ static void core1_entry(void) {
     /* Core1 must not accept SysTick/FIFO work until all banked architectural
      * state and the scheduler ownership handshake are ready. */
     hal_irq_disable();
+    core1_stage = 1;
+
+    /* RP2350 每核独立 XIP cache: 调试器刷写 (openocd program) 后
+     * core1 的 cache 仍残留旧镜像的行,取指命中即执行陈旧代码 —
+     * 寄存器/PSP 被旧镜像数据污染 (观测到 0xbbbbbbbb) → 首次异常
+     * 压栈 MemManage → fault 入口二次故障 → LOCKUP → 整核复位
+     * (core1 静默死亡)。hal_cpu_init 的失效只覆盖 core0。
+     * 必须在任何远离入口的代码执行前自行失效。 */
+    {
+        extern void xip_cache_invalidate_all(void);
+        xip_cache_invalidate_all();
+    }
+
+    /* trampoline 遗留的 PSP/CONTROL 未定义: 观测到 SPSEL=1 且 PSP 为
+     * 无映射垃圾。首次异常的硬件压栈打到当前 SP → MemManage MSTKERR。
+     * 统一切回 MSP (bootrom launch 栈) 并给 PSP 合法值。 */
+    __asm volatile(
+        "mrs  r0, control      \n"
+        "bics r0, r0, #2       \n"  /* SPSEL := 0, 线程态用 MSP */
+        "msr  control, r0      \n"
+        "isb                   \n"
+        "mrs  r0, msp          \n"
+        "msr  psp, r0          \n"  /* PSP := 合法栈,防任何遗留 SPSEL 场景 */
+        "isb                   \n"
+        ::: "r0", "memory", "cc");
 
     /* Set up core1's exception priorities (per-core SCB SHPR).
      * Same config as core0: SVC=0, PendSV=15, SysTick=15. */
@@ -199,6 +255,7 @@ static void core1_entry(void) {
     /* The launch handshake also uses the FIFO.  Install its steady-state IRQ
      * handler only after the SDK trampoline has consumed that protocol. */
     smp_ipi_init_cpu();
+    core1_stage = 2;
     while (ipi_ready[0] == 0U) {
         __asm volatile("wfe");
     }
@@ -210,6 +267,7 @@ static void core1_entry(void) {
     _next_task[1] = NULL;
     sched_set_cpu_online(1U, 1);
     core1_ready = 1;
+    core1_stage = 3;
     __asm volatile("dmb" ::: "memory");
 
     /* Runtime initializers execute before this function and may use VFP even
@@ -223,6 +281,7 @@ static void core1_entry(void) {
 
     /* Enable interrupts only after the bootstrap FP context is gone. */
     hal_irq_enable();
+    core1_stage = 4;
 
     /* Trigger the first context switch on core1. PendSV will select a task
      * from the local runqueue. If no task is available, the idle task
@@ -241,26 +300,60 @@ kern_err_t smp_init_core1(void) {
      * 2. Sends VTOR + SP + entry over the SIO FIFO
      * 3. Core1 bootrom applies them and jumps to core1_entry
     */
-    core1_ready = 0;
-    memset((void *)ipi_ready, 0, sizeof(ipi_ready));
-    memset((void *)ipi_pending, 0, sizeof(ipi_pending));
-    memset((void *)flash_lockout_ack, 0, sizeof(flash_lockout_ack));
-    flash_lockout_requested = 0U;
-    __asm volatile("dmb" ::: "memory");
     extern void multicore_launch_core1(void (*entry)(void));
-    multicore_launch_core1(core1_entry);
+    extern void multicore_reset_core1(void);
 
-    /* multicore_launch_core1() returns after the boot FIFO handshake. */
-    smp_ipi_init_cpu();
-
-    for (uint32_t spin = 0; spin < 1000000U; spin++) {
+    for (uint32_t attempt = 0U; attempt < 3U; attempt++) {
+        core1_ready = 0;
+        memset((void *)ipi_ready, 0, sizeof(ipi_ready));
+        memset((void *)ipi_pending, 0, sizeof(ipi_pending));
+        memset((void *)flash_lockout_ack, 0, sizeof(flash_lockout_ack));
+        flash_lockout_requested = 0U;
         __asm volatile("dmb" ::: "memory");
-        if (core1_ready && _current_task[1] != NULL) {
-            return KERN_OK;
+        multicore_launch_core1(core1_entry);
+
+        /* multicore_launch_core1() returns after the boot FIFO handshake.
+         * The handshake完成 ≠ core1 已进入 core1_entry: 复位路径残留
+         * (SIO FIFO 陈旧数据/bootrom 状态) 会让 core1 困在 bootrom,
+         * 间歇性发生 (flash 后首次启动、看门狗重启后)。 */
+        smp_ipi_init_cpu();
+
+        for (uint32_t spin = 0; spin < 20000000U; spin++) {
+            __asm volatile("dmb" ::: "memory");
+            if (core1_ready && _current_task[1] != NULL) {
+#if KERN_DEBUG_ENABLE
+                if (attempt != 0U) {
+                    extern void hal_debug_puts(const char *s);
+                    hal_debug_puts("[C0] core1 running (retry)\r\n");
+                }
+#endif
+                return KERN_OK;
+            }
+            __asm volatile("nop");
         }
-        __asm volatile("nop");
+
+        /* core1 困死 (bootrom 握手后未达就绪,或短暂上线后被整核复位
+         * 回 bootrom — flash-复位工作流下可复现)。core1_entry 到就绪
+         * 之间的路径 (向量写/MPU 寄存器/RAM 变量) 不持有任何内核自旋
+         * 锁,PSM 硬复位安全: 复位后 bootrom 排空 FIFO 并回报,下一轮
+         * attempt 从干净状态重新 launch。 */
+#if KERN_DEBUG_ENABLE
+        {
+            extern void hal_debug_puts(const char *s);
+            hal_debug_puts("[C0] core1 relaunch (PSM reset)\r\n");
+        }
+#endif
+        if (attempt + 1U < 3U) {
+            multicore_reset_core1();
+        }
     }
 
+#if KERN_DEBUG_ENABLE
+    {
+        extern void hal_debug_puts(const char *s);
+        hal_debug_puts("[C0] core1 LAUNCH TIMEOUT\r\n");
+    }
+#endif
     return KERN_ERR_TIMEOUT;
 }
 

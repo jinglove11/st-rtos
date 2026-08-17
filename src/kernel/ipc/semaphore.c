@@ -118,7 +118,7 @@ kern_err_t sem_delete(sem_id_t sem_id) {
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
         tcb->cont.result = KERN_ERR_NOEXIST;  // 对象已删除
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -316,7 +316,7 @@ kern_err_t sem_post(sem_id_t sem_id) {
         if (tcb) {
             wait_queue_remove(&sem->wait_queue, tcb);
             tcb->cont.result = KERN_OK;
-            sched_wakeup(tcb, KERN_OK);
+            syscall_cont_wake(tcb, KERN_OK);
         }
     } else {
         // 没有等待任务, 增加计数

@@ -6,6 +6,7 @@
 #include "syscall.h"
 #include "task.h"
 #include "scheduler.h"
+#include "continuation.h"
 #include "semaphore.h"
 #include "mutex.h"
 #include "mqueue.h"
@@ -77,17 +78,14 @@ static kern_err_t syscall_block_sleep(uint32_t ticks) {
         return KERN_OK;
     }
 
-    uint32_t crit = hal_enter_critical();
-    sched_remove_ready(cur);
-    cur->cont.active = 1;
-    cur->state = TASK_STATE_BLOCKED;
-    cur->cont.op = BLOCK_REASON_SLEEP;
-    cur->cont.object = NULL;
-    cur->cont.result = KERN_OK;
-    cur->cont.deadline = sched_get_tick_count() + ticks;
-    hal_exit_critical(crit);
-
-    return KERN_SYSCALL_BLOCKED;
+    /* M3-Step1闭环-C: sleep 接入两阶段协议 (active + phase 由
+     * prepare/commit 管理)。timeout 服务唤醒走 syscall_cont_wake →
+     * complete 时 phase 必须为 ARMING/BLOCKED,否则唤醒丢失。
+     * prepare 无对象锁是安全的: SLEEP 无等待队列,ARMING 期间没有任何
+     * waker 能命中该任务 (超时扫描以 state==BLOCKED 为前置,而 state
+     * 只在 commit 里设置)。 */
+    syscall_cont_prepare_locked(BLOCK_REASON_SLEEP, NULL);
+    return syscall_cont_commit(ticks);
 }
 
 /*============================================================================

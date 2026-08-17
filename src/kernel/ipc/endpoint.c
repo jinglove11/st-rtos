@@ -412,7 +412,7 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
         tcb->cont.result = KERN_ERR_NOEXIST;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -423,7 +423,7 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
         tcb->cont.result = KERN_ERR_NOEXIST;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -439,7 +439,7 @@ kern_err_t endpoint_delete(ep_id_t ep_id) {
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
         tcb->cont.result = KERN_ERR_NOEXIST;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -578,7 +578,7 @@ static int endpoint_deliver_to_syscall_recv(ep_id_t ep_id,
 #endif
 
     wait_queue_remove_safe(&ep->recv_waiters, server);
-    sched_wakeup(server, KERN_OK);
+    syscall_cont_wake(server, KERN_OK);
     return 1;
 }
 
@@ -749,7 +749,7 @@ static kern_err_t endpoint_send_common(ep_id_t ep_id,
         if (server) {
             wait_queue_remove(&ep->recv_waiters, server);
             server->cont.result = KERN_OK;
-            sched_wakeup(server, KERN_OK);
+            syscall_cont_wake(server, KERN_OK);
         }
     }
 
@@ -829,7 +829,7 @@ kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
             endpoint_invalidate_reply_cap(ep_id, server->id);
 #endif
             wait_queue_remove_safe(&ep->recv_waiters, server);
-            sched_wakeup(server, KERN_OK);
+            syscall_cont_wake(server, KERN_OK);
             irq_spin_unlock(&ep_lock, crit);
             return KERN_OK;
         }
@@ -856,7 +856,7 @@ kern_err_t endpoint_notify(ep_id_t ep_id, const void *msg) {
         if (server != NULL) {
             wait_queue_remove(&ep->recv_waiters, server);
             server->cont.result = KERN_OK;
-            sched_wakeup(server, KERN_OK);
+            syscall_cont_wake(server, KERN_OK);
         }
     }
 
@@ -909,18 +909,11 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
     current->cont.syscall_reply_buf = user_reply_msg;
     current->cont.request_gen = request_gen;
 
-    /* M3-Task3: 用 prepare_locked 统一设 cont 字段 */
+    /* M3-Task3: 用 prepare_locked 统一设 cont 字段。
+     * M3-Step1闭环-B: 删除手工 BLOCKED 旁路,阻塞状态由
+     * syscall_cont_commit (锁外 CAS ARMING→BLOCKED) 统一设置。 */
     syscall_cont_prepare_locked(BLOCK_REASON_EP_SEND, ep);
     wait_queue_add(&ep->reply_waiters, current);
-    sched_remove_ready(current);
-    current->state = TASK_STATE_BLOCKED;
-    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-
-    if (timeout != KERN_WAIT_FOREVER) {
-        current->cont.deadline = sched_get_tick_count() + timeout;
-    } else {
-        current->cont.deadline = 0;
-    }
 
     if (ep->recv_waiters.count > 0) {
         tcb_t *server = wait_queue_get_highest(&ep->recv_waiters);
@@ -938,6 +931,7 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
                 current->cont.object = NULL;
                 current->cont.deadline = 0;
                 current->cont.result = KERN_OK;
+                CONT_PHASE_SET(&current->cont, CONT_PHASE_IDLE);
                 irq_spin_unlock(&ep_lock, crit);
                 return err;
             }
@@ -959,7 +953,7 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
             if (server) {
                 wait_queue_remove(&ep->recv_waiters, server);
                 server->cont.result = KERN_OK;
-                sched_wakeup(server, KERN_OK);
+                syscall_cont_wake(server, KERN_OK);
             }
         }
     } else {
@@ -983,13 +977,13 @@ static kern_err_t endpoint_send_syscall_common(ep_id_t ep_id,
             if (server) {
                 wait_queue_remove(&ep->recv_waiters, server);
                 server->cont.result = KERN_OK;
-                sched_wakeup(server, KERN_OK);
+                syscall_cont_wake(server, KERN_OK);
             }
         }
     }
 
     irq_spin_unlock(&ep_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_cont_commit(timeout);
 }
 
 kern_err_t endpoint_send_syscall(ep_id_t ep_id,
@@ -1102,7 +1096,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             if (sender != NULL) {
                 wait_queue_remove_safe(&ep->reply_waiters, sender);
                 sender->cont.result = KERN_ERR_RESOURCE;
-                sched_wakeup(sender, KERN_ERR_RESOURCE);
+                syscall_cont_wake(sender, KERN_ERR_RESOURCE);
             }
             ep_cap_count_buffers[ep_id][slot] = 0;
             ep->sender_buf[slot] = NULL;
@@ -1122,7 +1116,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
             if (sender != NULL) {
                 wait_queue_remove_safe(&ep->reply_waiters, sender);
                 sender->cont.result = xfer_err;
-                sched_wakeup(sender, xfer_err);
+                syscall_cont_wake(sender, xfer_err);
             }
             ep_cap_count_buffers[ep_id][slot] = 0;
             ep->sender_buf[slot] = NULL;
@@ -1158,7 +1152,7 @@ static kern_err_t endpoint_recv_common(ep_id_t ep_id,
         if (waiter) {
             wait_queue_remove(&ep->send_waiters, waiter);
             waiter->cont.result = KERN_OK;
-            sched_wakeup(waiter, KERN_OK);
+            syscall_cont_wake(waiter, KERN_OK);
         }
     }
 
@@ -1197,7 +1191,7 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
             if (sender != NULL) {
                 wait_queue_remove_safe(&ep->reply_waiters, sender);
                 sender->cont.result = KERN_ERR_RESOURCE;
-                sched_wakeup(sender, KERN_ERR_RESOURCE);
+                syscall_cont_wake(sender, KERN_ERR_RESOURCE);
             }
             ep_cap_count_buffers[ep_id][slot] = 0;
             ep_request_gen_buffers[ep_id][slot] = 0;
@@ -1234,7 +1228,7 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
         if (waiter) {
             wait_queue_remove(&ep->send_waiters, waiter);
             waiter->cont.result = KERN_OK;
-            sched_wakeup(waiter, KERN_OK);
+            syscall_cont_wake(waiter, KERN_OK);
         }
 
         irq_spin_unlock(&ep_lock, crit);
@@ -1250,18 +1244,8 @@ kern_err_t endpoint_recv_syscall(ep_id_t ep_id, void *user_msg, uint32_t timeout
     syscall_cont_prepare_locked(BLOCK_REASON_EP_RECV, ep);
     wait_queue_add(&ep->recv_waiters, current);
 
-    sched_remove_ready(current);
-    current->state = TASK_STATE_BLOCKED;
-    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-    current->cont.result = KERN_OK;
-    if (timeout != KERN_WAIT_FOREVER) {
-        current->cont.deadline = sched_get_tick_count() + timeout;
-    } else {
-        current->cont.deadline = 0;
-    }
-
     irq_spin_unlock(&ep_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_cont_commit(timeout);
 }
 
 kern_err_t endpoint_recv_caps(ep_id_t ep_id,
@@ -1312,18 +1296,8 @@ kern_err_t endpoint_recv_caps_syscall(ep_id_t ep_id,
     syscall_cont_prepare_locked(BLOCK_REASON_EP_RECV, ep);
     wait_queue_add(&ep->recv_waiters, current);
 
-    sched_remove_ready(current);
-    current->state = TASK_STATE_BLOCKED;
-    CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-    current->cont.result = KERN_OK;
-    if (timeout != KERN_WAIT_FOREVER) {
-        current->cont.deadline = sched_get_tick_count() + timeout;
-    } else {
-        current->cont.deadline = 0;
-    }
-
     irq_spin_unlock(&ep_lock, crit);
-    return KERN_SYSCALL_BLOCKED;
+    return syscall_cont_commit(timeout);
 }
 
 static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
@@ -1394,7 +1368,7 @@ static kern_err_t endpoint_reply_bound(ep_id_t ep_id, tcb_t *server,
     /* 从 reply_waiters 移除并唤醒客户端 */
     wait_queue_remove_safe(&ep->reply_waiters, sender);
     sender->cont.result = KERN_OK;
-    sched_wakeup(sender, KERN_OK);
+    syscall_cont_wake(sender, KERN_OK);
 
     irq_spin_unlock(&ep_lock, crit);
     return KERN_OK;

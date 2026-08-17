@@ -9,18 +9,24 @@
  *    子系统紧接着 wait_queue_add (仍持锁)。
  *    如果 waker 在此阶段看到 task (ARMING),只记录 pending result,
  *    不唤醒 (task 还在 running)。
+ *    (sleep 无对象/锁: 无 waker 能命中未入队的 RUNNING 任务,
+ *    超时扫描以 state==BLOCKED 为前置,可不持锁调用。)
  *
  * 2. 释放对象锁后调 syscall_cont_commit():
- *    ARMING → BLOCKED。设 deadline/state=BLOCKED/sched_remove_ready。
- *    如果 ARMING 期间已被 waker 记录 pending result,直接返回它。
- *    否则返回 KERN_SYSCALL_BLOCKED。
+ *    ARMING → BLOCKED。顺序 deadline → sched_remove_ready →
+ *    state=BLOCKED (临界区内),避免 "BLOCKED 但仍在就绪队列" 的
+ *    可窃取窗口。如果 ARMING 期间已被 waker 记录 pending result,
+ *    清残留后直接返回它;否则返回 KERN_SYSCALL_BLOCKED。
  *
- * 3. waker 调 syscall_cont_complete():
- *    BLOCKED → COMPLETING → IDLE。CAS 保证只唤醒一次。
+ * 3. waker 调 syscall_cont_wake()/syscall_cont_complete():
+ *    按原子 phase 分派 (不用非原子 active)。BLOCKED → COMPLETING →
+ *    写 R0 → IDLE → sched_wakeup。IDLE 必须先于 wakeup 归位,
+ *    否则被唤醒任务在新核上再次阻塞后,滞后 SET 会覆盖新 phase。
  *
  * 4. timeout/delete/fault 调 syscall_cont_cancel():
  *    复用 task_cancel_blocked_wait() 从子系统 wait queue 移除,
- *    然后 complete。
+ *    然后 complete。线程式 sched_block 阻塞同样置 phase=BLOCKED,
+ *    由 complete 的 active 守卫跳过 R0 写入。
  */
 
 #ifndef CONTINUATION_H
@@ -36,14 +42,15 @@ void syscall_cont_prepare_locked(uint8_t op, void *object);
 int  syscall_cont_commit(uint32_t timeout);
 void syscall_cont_complete(tcb_t *tcb, kern_err_t result);
 void syscall_cont_cancel(tcb_t *tcb, kern_err_t result);
+void syscall_cont_wake(tcb_t *tcb, kern_err_t result);
 
 /* M3-Step1 闭环: phase 是独立原子字段 (cont.phase),
  * 所有阶段转换用原子操作完成:
  * - GET/SET: 原子 load/store (release/acquire)
  * - CAS: __atomic_compare_exchange (ACQ_REL),用于 ARMING/BLOCKED
  *   转换点的竞争 (commit vs complete/cancel, 多 waker 互斥)。
- * 复杂子系统 (endpoint/channel) 的同步 deliver 路径暂用 SET 手动
- * 管理阶段 (节点 B 统一到 prepare/commit 后移除)。 */
+ * 阻塞侧已全部统一到 prepare/commit;kernel 内仅存的直接 SET 是
+ * endpoint early-return 清理和 sched_block 线程式阻塞置 BLOCKED。 */
 #define CONT_PHASE_IDLE        0
 #define CONT_PHASE_ARMING      1
 #define CONT_PHASE_BLOCKED     2

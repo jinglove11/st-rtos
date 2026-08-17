@@ -122,7 +122,7 @@ kern_err_t event_delete(event_id_t event_id) {
         tcb->wait_prev = NULL;
         memset(&tcb->cont.u.event, 0, sizeof(tcb->cont.u.event));
         tcb->cont.result = KERN_ERR_NOEXIST;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -357,7 +357,7 @@ kern_err_t event_set(event_id_t event_id, uint32_t flags) {
             memset(&tcb->cont.u.event, 0, sizeof(tcb->cont.u.event));
             wait_queue_remove(&evt->wait_queue, tcb);
             tcb->cont.result = KERN_OK;
-            sched_wakeup(tcb, KERN_OK);
+            syscall_cont_wake(tcb, KERN_OK);
         }
 
         tcb = next;

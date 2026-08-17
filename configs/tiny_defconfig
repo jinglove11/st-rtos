@@ -88,7 +88,7 @@ TIMER_NAME_LEN=8
 # ---- Microkernel ----
 MPU_ENABLE=y
 SYSCALL_ENABLE=y
-SYSCALL_TABLE_SIZE=73
+SYSCALL_TABLE_SIZE=96
 MPU_REGION_COUNT=4
 
 # ---- Interrupt (basic) ----

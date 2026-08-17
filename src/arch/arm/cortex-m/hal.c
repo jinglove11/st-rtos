@@ -104,6 +104,15 @@ void _default_handler(void) {
  */
 void hal_cpu_init(void) {
 #if TARGET_BOARD == BOARD_RP2350_PICO2
+    /* 调试器刷写 (openocd "program ... reset") 不会清 XIP cache: 复位后
+     * cache 可能残留旧镜像的行,取指命中即执行陈旧/垃圾代码 — 在 SMP 上
+     * 观测到 core1 启动后野写 PSM 导致自身被 PROC1 复位、困死 bootrom。
+     * 开机最早点整体失效 XIP cache,保证此后的取指来自 flash 真值。 */
+    {
+        extern void xip_cache_invalidate_all(void);
+        xip_cache_invalidate_all();
+    }
+
 #if !SMP
     /*
      * A debugger reset (and some flash workflows) can reset core0 without

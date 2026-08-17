@@ -117,7 +117,7 @@ static void channel_wake_all(wait_queue_t *queue, kern_err_t result) {
         }
 #endif
         tcb->cont.result = result;
-        sched_wakeup(tcb, result);
+        syscall_cont_wake(tcb, result);
         tcb = next;
     }
 
@@ -196,7 +196,7 @@ static void channel_wake_recv_waiter(wait_queue_t *recv_wq,
                 waiter->cont.msg_buf = NULL;
                 wait_queue_remove(recv_wq, waiter);
                 waiter->cont.result = KERN_ERR_RESOURCE;
-                sched_wakeup(waiter, KERN_ERR_RESOURCE);
+                syscall_cont_wake(waiter, KERN_ERR_RESOURCE);
                 return;
             }
             memcpy(waiter->cont.u.ch.out_caps, cap_src,
@@ -215,14 +215,14 @@ static void channel_wake_recv_waiter(wait_queue_t *recv_wq,
         memset(cap_src, 0, sizeof(cap_id_t) * IPC_CAPS_MAX);
         wait_queue_remove(recv_wq, waiter);
         waiter->cont.result = KERN_OK;
-        sched_wakeup(waiter, KERN_OK);
+        syscall_cont_wake(waiter, KERN_OK);
         return;
     }
 #endif
 
     wait_queue_remove(recv_wq, waiter);
     waiter->cont.result = KERN_OK;
-    sched_wakeup(waiter, KERN_OK);
+    syscall_cont_wake(waiter, KERN_OK);
 }
 
 static void channel_wake_send_waiter(wait_queue_t *send_wq,
@@ -258,7 +258,7 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
                 waiter->cont.u.ch_send.cap_count = 0;
                 wait_queue_remove(send_wq, waiter);
                 waiter->cont.result = xfer_err;
-                sched_wakeup(waiter, xfer_err);
+                syscall_cont_wake(waiter, xfer_err);
                 return;
             }
         } else {
@@ -275,7 +275,7 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
         *ready_flag = 1;
         wait_queue_remove(send_wq, waiter);
         waiter->cont.result = KERN_OK;
-        sched_wakeup(waiter, KERN_OK);
+        syscall_cont_wake(waiter, KERN_OK);
         channel_wake_recv_waiter(recv_wq, buf, ready_flag, cap_dst,
                                  cap_count_dst);
         return;
@@ -284,7 +284,7 @@ static void channel_wake_send_waiter(wait_queue_t *send_wq,
 
     wait_queue_remove(send_wq, waiter);
     waiter->cont.result = KERN_OK;
-    sched_wakeup(waiter, KERN_OK);
+    syscall_cont_wake(waiter, KERN_OK);
 }
 
 /*============================================================================
@@ -669,13 +669,8 @@ kern_err_t channel_send_syscall(ch_id_t ch_id, const void *msg,
         memcpy(current->cont.u.ch_send.body, msg, ch->msg_size);
         syscall_cont_prepare_locked(BLOCK_REASON_CH_SEND, ch);
         wait_queue_add(send_wq, current);
-        sched_remove_ready(current);
-        current->state = TASK_STATE_BLOCKED;
-        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-        current->cont.deadline = sched_timeout_deadline(timeout);
-
         irq_spin_unlock(&ch_lock, crit);
-        return KERN_SYSCALL_BLOCKED;
+        return syscall_cont_commit(timeout);
     }
 
     memcpy(dst_buf, msg, ch->msg_size);
@@ -762,13 +757,8 @@ kern_err_t channel_send_caps_syscall(ch_id_t ch_id,
         current->cont.u.ch_send.cap_count = cap_count;
         syscall_cont_prepare_locked(BLOCK_REASON_CH_SEND, ch);
         wait_queue_add(send_wq, current);
-        sched_remove_ready(current);
-        current->state = TASK_STATE_BLOCKED;
-        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-        current->cont.deadline = sched_timeout_deadline(timeout);
-
         irq_spin_unlock(&ch_lock, crit);
-        return KERN_SYSCALL_BLOCKED;
+        return syscall_cont_commit(timeout);
     }
 
     if (cap_count > 0) {
@@ -1023,13 +1013,8 @@ kern_err_t channel_recv_syscall(ch_id_t ch_id, void *user_msg,
         current->cont.msg_buf = user_msg;
         syscall_cont_prepare_locked(BLOCK_REASON_CH_RECV, ch);
         wait_queue_add(recv_wq, current);
-        sched_remove_ready(current);
-        current->state = TASK_STATE_BLOCKED;
-        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-        current->cont.deadline = sched_timeout_deadline(timeout);
-
         irq_spin_unlock(&ch_lock, crit);
-        return KERN_SYSCALL_BLOCKED;
+        return syscall_cont_commit(timeout);
     }
 
     if (*cap_count_src > 0) {
@@ -1120,13 +1105,8 @@ kern_err_t channel_recv_caps_syscall(ch_id_t ch_id,
         current->cont.u.ch.out_cap_count = out_cap_count;
         syscall_cont_prepare_locked(BLOCK_REASON_CH_RECV, ch);
         wait_queue_add(recv_wq, current);
-        sched_remove_ready(current);
-        current->state = TASK_STATE_BLOCKED;
-        CONT_PHASE_SET(&current->cont, CONT_PHASE_BLOCKED);
-        current->cont.deadline = sched_timeout_deadline(timeout);
-
         irq_spin_unlock(&ch_lock, crit);
-        return KERN_SYSCALL_BLOCKED;
+        return syscall_cont_commit(timeout);
     }
 
     if (*cap_count_src > 0) {

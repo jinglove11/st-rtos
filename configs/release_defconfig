@@ -80,14 +80,14 @@ TIMER_TASK_STACK_SIZE=384
 TIMER_NAME_LEN=12
 
 # ---- VFS (on — most apps need it; can disable per-product) ----
-VFS_ENABLE=y
+# VFS_ENABLE is not set
 VFS_MAX_INODES=16
 VFS_MAX_FDS=4
 
 # ---- Microkernel ----
 MPU_ENABLE=y
 SYSCALL_ENABLE=y
-SYSCALL_TABLE_SIZE=73
+SYSCALL_TABLE_SIZE=96
 MPU_REGION_COUNT=8
 
 # ---- Interrupt (full) ----

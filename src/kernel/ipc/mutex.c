@@ -226,7 +226,7 @@ kern_err_t mutex_delete(mutex_id_t mutex_id) {
         tcb->wait_next = NULL;
         tcb->wait_prev = NULL;
         tcb->cont.result = KERN_ERR_NOEXIST;
-        sched_wakeup(tcb, KERN_ERR_NOEXIST);
+        syscall_cont_wake(tcb, KERN_ERR_NOEXIST);
         tcb = next;
     }
 
@@ -496,7 +496,7 @@ kern_err_t mutex_unlock(mutex_id_t mutex_id) {
             mutex->owner_original_prio = tcb->priority;
 
             tcb->cont.result = KERN_OK;
-            sched_wakeup(tcb, KERN_OK);
+            syscall_cont_wake(tcb, KERN_OK);
         }
     } else {
         // 没有等待任务, 释放互斥锁
