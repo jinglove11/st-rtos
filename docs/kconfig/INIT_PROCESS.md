@@ -23,4 +23,4 @@ bootstrap 后第一个用户任务,负责启动 supervisor/driver servers/shell�
 
 - Back to [INDEX](INDEX.md)
 - Top-level [Kconfig](../../Kconfig)
-- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../planning/MICROKERNEL_OS_ROADMAP.md)
+- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../../MICROKERNEL_OS_ROADMAP.md)

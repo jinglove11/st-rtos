@@ -1,6 +1,6 @@
-# `TEST_MODULE_CAP`
+# `TEST_MODULE_RT_SCHED`
 
-**Capability system tests**
+**RT scheduling policy tests**
 
 | Property | Value |
 |---|---|
@@ -10,13 +10,12 @@
 
 ## Dependencies
 
-- `[TEST_ENABLE](TEST_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
+- `[TEST_ENABLE](TEST_ENABLE.md) && [RT_SCHED](RT_SCHED.md)`
 
 ## Help
 
 ```
-启用能力系统测试模块。
-(能力生命周期、权限校验、transfer/derive)
+核心补齐 #4:SCHED_FIFO/RR/NORMAL 策略 + 时间片效果验证。
 ```
 
 ---

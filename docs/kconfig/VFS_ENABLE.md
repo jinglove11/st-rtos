@@ -5,7 +5,7 @@
 | Property | Value |
 |---|---|
 | Type | `bool` |
-| Default | `y` |
+| Default | `n` |
 | Menu path | `VFS Configuration` |
 
 _No dependencies._
@@ -13,13 +13,12 @@ _No dependencies._
 ## Help
 
 ```
-启用 VFS 虚拟文件系统。
-提供 inode、文件描述符、路径解析，
-以及 devfs (设备文件系统) 和 ramfs (内存文件系统)。
+内核 VFS 实现已删除 (Phase F3,设备走 capability + endpoint RPC)。
+保留开关仅为兼容旧配置: 置 y 会编译失败 (devfs API 已不存在)。
 ```
 
 ---
 
 - Back to [INDEX](INDEX.md)
 - Top-level [Kconfig](../../Kconfig)
-- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../planning/MICROKERNEL_OS_ROADMAP.md)
+- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../../MICROKERNEL_OS_ROADMAP.md)

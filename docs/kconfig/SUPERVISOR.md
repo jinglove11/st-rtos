@@ -24,4 +24,4 @@ Rate limit: 每服务每 5s 最多 1 次重启,3 次后永久 kill。
 
 - Back to [INDEX](INDEX.md)
 - Top-level [Kconfig](../../Kconfig)
-- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../planning/MICROKERNEL_OS_ROADMAP.md)
+- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../../MICROKERNEL_OS_ROADMAP.md)

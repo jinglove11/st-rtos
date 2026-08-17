@@ -10,7 +10,7 @@
 
 ## Dependencies
 
-- `[USER_LIBC](USER_LIBC.md) && [FS_PERSISTENT](FS_PERSISTENT.md)`
+- `[MPU_ENABLE](MPU_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
 
 ## Help
 
@@ -25,4 +25,4 @@ RP2350 NS 约束:同物理地址空间,MPU 隔代码/数据区。
 
 - Back to [INDEX](INDEX.md)
 - Top-level [Kconfig](../../Kconfig)
-- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../planning/MICROKERNEL_OS_ROADMAP.md)
+- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../../MICROKERNEL_OS_ROADMAP.md)

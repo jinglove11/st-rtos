@@ -1,6 +1,6 @@
-# `TEST_MODULE_CAP`
+# `TEST_MODULE_GPIO_DRIVER`
 
-**Capability system tests**
+**GPIO driver (user-mode MMIO) tests**
 
 | Property | Value |
 |---|---|
@@ -10,13 +10,13 @@
 
 ## Dependencies
 
-- `[TEST_ENABLE](TEST_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
+- `[TEST_ENABLE](TEST_ENABLE.md) && [MPU_ENABLE](MPU_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
 
 ## Help
 
 ```
-启用能力系统测试模块。
-(能力生命周期、权限校验、transfer/derive)
+核心补齐 #3:USER 任务通过 sys_mmio_request/map 读真实 GPIO 寄存器,
+验证用户态驱动端到端(不 fault)。
 ```
 
 ---

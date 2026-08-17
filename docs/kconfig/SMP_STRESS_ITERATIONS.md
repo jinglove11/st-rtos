@@ -1,22 +1,23 @@
-# `SMP_MAX_CPUS`
+# `SMP_STRESS_ITERATIONS`
 
-**Maximum CPU count**
+**SMP ping-pong iterations**
 
 | Property | Value |
 |---|---|
 | Type | `int` |
-| Default | `2` |
-| Range | `2 2` |
+| Default | `10000` |
+| Range | `100 1000000` |
 | Menu path | `Phase 6 — SMP (Cortex-M33 Core 1)` |
 
 ## Dependencies
 
-- `[SMP](SMP.md)`
+- `[TEST_MODULE_SMP](TEST_MODULE_SMP.md)`
 
 ## Help
 
 ```
-RP2350 只有 2 个 Cortex-M33,固定为 2。
+SMP smoke profile uses 10000.  The dedicated RP2350 SMP acceptance
+profile sets 1000000 for the M1 cross-core semaphore and endpoint gates.
 ```
 
 ---

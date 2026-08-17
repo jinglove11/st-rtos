@@ -5,8 +5,8 @@
 | Property | Value |
 |---|---|
 | Type | `int` |
-| Default | `71` |
-| Range | `16 96` |
+| Default | `96` |
+| Range | `16 128` |
 | Menu path | `Microkernel Configuration` |
 
 ## Dependencies
@@ -16,11 +16,12 @@
 ## Help
 
 ```
-系统调用分发表大小。
+系统调用分发表大小。必须 ≥ 最高 syscall 编号 + 1
+(当前 SYSCALL_ABI_VERSION=86，所以 default=96)。
 ```
 
 ---
 
 - Back to [INDEX](INDEX.md)
 - Top-level [Kconfig](../../Kconfig)
-- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../planning/MICROKERNEL_OS_ROADMAP.md)
+- Project roadmap: [MICROKERNEL_OS_ROADMAP.md](../../MICROKERNEL_OS_ROADMAP.md)

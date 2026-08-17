@@ -1,6 +1,6 @@
-# `TEST_MODULE_CAP`
+# `TEST_MODULE_NOTIFICATION`
 
-**Capability system tests**
+**Notification (event) object tests**
 
 | Property | Value |
 |---|---|
@@ -10,13 +10,13 @@
 
 ## Dependencies
 
-- `[TEST_ENABLE](TEST_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
+- `[TEST_ENABLE](TEST_ENABLE.md) && [IPC_EVENT](IPC_EVENT.md)`
 
 ## Help
 
 ```
-启用能力系统测试模块。
-(能力生命周期、权限校验、transfer/derive)
+Notification 测试:event NOWAIT poll 语义、event_set ISR 安全性、
+irq_bind_event 绑定生命周期。
 ```
 
 ---

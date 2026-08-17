@@ -2,7 +2,7 @@
 
 Auto-generated from [`Kconfig`](../../Kconfig) by [`scripts/gen_kconfig_docs.py`](../../scripts/gen_kconfig_docs.py).
 
-**123 options** across **23** menu groups.
+**131 options** across **23** menu groups.
 
 To refresh this page after editing Kconfig:
 
@@ -16,7 +16,7 @@ python3 scripts/gen_kconfig_docs.py
 |---|---|---|---|
 | [`CAP_ENABLE`](CAP_ENABLE.md) | `bool` | `y` | Enable capability system |
 | [`CAP_MAX_COUNT`](CAP_MAX_COUNT.md) | `int` | `32` | Maximum capability entries |
-| [`KERN_TASK_CAP_SLOTS`](KERN_TASK_CAP_SLOTS.md) | `int` | `32` | Capability slots per task |
+| [`KERN_TASK_CAP_SLOTS`](KERN_TASK_CAP_SLOTS.md) | `int` | `64` | Capability slots per task |
 
 ## Debug Configuration
 
@@ -120,7 +120,7 @@ python3 scripts/gen_kconfig_docs.py
 | [`MPU_ENABLE`](MPU_ENABLE.md) | `bool` | `y` | Enable MPU memory protection |
 | [`MPU_REGION_COUNT`](MPU_REGION_COUNT.md) | `int` | `5` | MPU regions per task |
 | [`SYSCALL_ENABLE`](SYSCALL_ENABLE.md) | `bool` | `y` | Enable syscall interface |
-| [`SYSCALL_TABLE_SIZE`](SYSCALL_TABLE_SIZE.md) | `int` | `71` | Syscall table size |
+| [`SYSCALL_TABLE_SIZE`](SYSCALL_TABLE_SIZE.md) | `int` | `96` | Syscall table size |
 
 ## Phase 2 — Fault-Tolerant Infrastructure
 
@@ -162,6 +162,7 @@ python3 scripts/gen_kconfig_docs.py
 | [`CAP_RCU`](CAP_RCU.md) | `bool` | `n` | Capability table RCU reader |
 | [`SMP`](SMP.md) | `bool` | `n` | Symmetric multiprocessing (Core 0 + Core 1) |
 | [`SMP_MAX_CPUS`](SMP_MAX_CPUS.md) | `int` | `2` | Maximum CPU count |
+| [`SMP_STRESS_ITERATIONS`](SMP_STRESS_ITERATIONS.md) | `int` | `10000` | SMP ping-pong iterations |
 | [`SMP_WORK_STEALING`](SMP_WORK_STEALING.md) | `bool` | `y` | Idle CPU steals work from busy CPU |
 
 ## Phase 7 — Networking
@@ -179,7 +180,7 @@ python3 scripts/gen_kconfig_docs.py
 | Option | Type | Default | Description |
 |---|---|---|---|
 | [`OTA`](OTA.md) | `bool` | `n` | Over-the-air update (A/B partition) |
-| [`PANIC_LOG`](PANIC_LOG.md) | `bool` | `n` | Panic dump to /flash/panic.log |
+| [`PANIC_LOG`](PANIC_LOG.md) | `bool` | `n` | Panic dump to flash (crash_dump persistence) |
 | [`PROFILER`](PROFILER.md) | `bool` | `n` | PC sampler + flamegraph export |
 | [`SECURE_BOOT`](SECURE_BOOT.md) | `bool` | `n` | Signed boot image (Ed25519) |
 
@@ -215,14 +216,21 @@ python3 scripts/gen_kconfig_docs.py
 | Option | Type | Default | Description |
 |---|---|---|---|
 | [`TEST_ENABLE`](TEST_ENABLE.md) | `bool` | `y` | Enable test framework |
+| [`TEST_MODULE_BLOCK`](TEST_MODULE_BLOCK.md) | `bool` | `y` | Block device (flash) tests |
 | [`TEST_MODULE_CAP`](TEST_MODULE_CAP.md) | `bool` | `y` | Capability system tests |
 | [`TEST_MODULE_DEADLOCK`](TEST_MODULE_DEADLOCK.md) | `bool` | `y` | Deadlock detection tests |
+| [`TEST_MODULE_ELF`](TEST_MODULE_ELF.md) | `bool` | `y` | ELF loader tests |
 | [`TEST_MODULE_EXAMPLE`](TEST_MODULE_EXAMPLE.md) | `bool` | `n` | Example tests |
 | [`TEST_MODULE_FAULT`](TEST_MODULE_FAULT.md) | `bool` | `y` | Fault handler tests |
+| [`TEST_MODULE_GPIO_DRIVER`](TEST_MODULE_GPIO_DRIVER.md) | `bool` | `y` | GPIO driver (user-mode MMIO) tests |
 | [`TEST_MODULE_IPC_UPGRADE`](TEST_MODULE_IPC_UPGRADE.md) | `bool` | `y` | IPC upgrade tests |
 | [`TEST_MODULE_IRQ`](TEST_MODULE_IRQ.md) | `bool` | `y` | Interrupt management tests |
+| [`TEST_MODULE_MMIO`](TEST_MODULE_MMIO.md) | `bool` | `y` | MMIO mapping tests |
 | [`TEST_MODULE_MPU`](TEST_MODULE_MPU.md) | `bool` | `y` | MPU protection tests |
+| [`TEST_MODULE_NOTIFICATION`](TEST_MODULE_NOTIFICATION.md) | `bool` | `y` | Notification (event) object tests |
+| [`TEST_MODULE_RT_SCHED`](TEST_MODULE_RT_SCHED.md) | `bool` | `y` | RT scheduling policy tests |
 | [`TEST_MODULE_SCHEDULER`](TEST_MODULE_SCHEDULER.md) | `bool` | `y` | Scheduler tests |
+| [`TEST_MODULE_SMP`](TEST_MODULE_SMP.md) | `bool` | `y` | SMP dual-core tests |
 | [`TEST_MODULE_STATS`](TEST_MODULE_STATS.md) | `bool` | `y` | CPU statistics tests |
 | [`TEST_MODULE_SYSCALL`](TEST_MODULE_SYSCALL.md) | `bool` | `y` | Syscall interface tests |
 | [`TEST_MODULE_TIMER`](TEST_MODULE_TIMER.md) | `bool` | `y` | Timer tests |
@@ -244,7 +252,7 @@ python3 scripts/gen_kconfig_docs.py
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| [`VFS_ENABLE`](VFS_ENABLE.md) | `bool` | `y` | Enable Virtual File System |
+| [`VFS_ENABLE`](VFS_ENABLE.md) | `bool` | `n` | Enable Virtual File System |
 | [`VFS_MAX_FDS`](VFS_MAX_FDS.md) | `int` | `8` | Maximum file descriptors per task |
 | [`VFS_MAX_INODES`](VFS_MAX_INODES.md) | `int` | `32` | Maximum inodes |
 

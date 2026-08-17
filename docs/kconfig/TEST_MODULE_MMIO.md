@@ -1,6 +1,6 @@
-# `TEST_MODULE_CAP`
+# `TEST_MODULE_MMIO`
 
-**Capability system tests**
+**MMIO mapping tests**
 
 | Property | Value |
 |---|---|
@@ -10,13 +10,13 @@
 
 ## Dependencies
 
-- `[TEST_ENABLE](TEST_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
+- `[TEST_ENABLE](TEST_ENABLE.md) && [MPU_ENABLE](MPU_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
 
 ## Help
 
 ```
-启用能力系统测试模块。
-(能力生命周期、权限校验、transfer/derive)
+核心补齐 #2:MMIO cap→MPU 映射测试(region 编程、unmap 清除、
+权限/坏 cap 拒绝)。
 ```
 
 ---

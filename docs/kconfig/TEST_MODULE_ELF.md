@@ -1,6 +1,6 @@
-# `TEST_MODULE_CAP`
+# `TEST_MODULE_ELF`
 
-**Capability system tests**
+**ELF loader tests**
 
 | Property | Value |
 |---|---|
@@ -10,13 +10,13 @@
 
 ## Dependencies
 
-- `[TEST_ENABLE](TEST_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
+- `[TEST_ENABLE](TEST_ENABLE.md) && [ELF_LOADER](ELF_LOADER.md)`
 
 ## Help
 
 ```
-启用能力系统测试模块。
-(能力生命周期、权限校验、transfer/derive)
+核心补齐 #6:ELF 进程加载 + 执行 + join 验证。
+嵌入一个 freestanding 测试 ELF,elf_load 解析 + 创建 user 任务执行。
 ```
 
 ---

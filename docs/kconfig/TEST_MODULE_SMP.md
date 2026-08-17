@@ -1,6 +1,6 @@
-# `TEST_MODULE_CAP`
+# `TEST_MODULE_SMP`
 
-**Capability system tests**
+**SMP dual-core tests**
 
 | Property | Value |
 |---|---|
@@ -10,13 +10,12 @@
 
 ## Dependencies
 
-- `[TEST_ENABLE](TEST_ENABLE.md) && [CAP_ENABLE](CAP_ENABLE.md)`
+- `[TEST_ENABLE](TEST_ENABLE.md) && [SMP](SMP.md)`
 
 ## Help
 
 ```
-启用能力系统测试模块。
-(能力生命周期、权限校验、transfer/derive)
+核心补齐 #7:双核并行执行验证。core1 启动 + 两核各跑任务。
 ```
 
 ---
