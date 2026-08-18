@@ -24,7 +24,8 @@
  * counts or concurrency: they only turn a lost wakeup/deadlock into a
  * deterministic failure that lets the remaining diagnostics run. */
 #define SMP_OPERATION_TIMEOUT_TICKS  5000U
-#define SMP_JOIN_TIMEOUT_TICKS      60000U
+/* 1M 次 ping-pong 往返实测 ~11.6k/s (约 86s),join 上限需覆盖全程 */
+#define SMP_JOIN_TIMEOUT_TICKS      180000U
 #define SMP_TASK_CHURN_MAX_ATTEMPTS \
     (SMP_POOL_STRESS_ITERATIONS + KERNEL_MAX_TASKS)
 

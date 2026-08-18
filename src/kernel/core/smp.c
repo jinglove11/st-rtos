@@ -212,18 +212,17 @@ void smp_flash_lockout_end(void) {
  * It needs to: set up its own exception priorities (per-core SCB), enable
  * its own SysTick, and enter the scheduler through its private runqueue.
  */
-static void core1_entry(void) {
-    /* Core1 must not accept SysTick/FIFO work until all banked architectural
-     * state and the scheduler ownership handshake are ready. */
-    hal_irq_disable();
+/* core1 启动栈 (raw launch 实验预留;当前 trampoline launch 未用) */
+
+
+/* 本函数驻留 SRAM: core1 失效自身 XIP cache (RP2350 每核独立) 前,
+ * 从 SRAM 执行失效调用,避免命中刷写后残留的脏缓存行。 */
+static void __attribute__((noinline))
+__not_in_flash_func(core1_entry)(void) {
+    /* 不用 flash 驻留的 hal_irq_disable — 直接内联关中断 */
+    __asm volatile("cpsid i" ::: "memory");
     core1_stage = 1;
 
-    /* RP2350 每核独立 XIP cache: 调试器刷写 (openocd program) 后
-     * core1 的 cache 仍残留旧镜像的行,取指命中即执行陈旧代码 —
-     * 寄存器/PSP 被旧镜像数据污染 (观测到 0xbbbbbbbb) → 首次异常
-     * 压栈 MemManage → fault 入口二次故障 → LOCKUP → 整核复位
-     * (core1 静默死亡)。hal_cpu_init 的失效只覆盖 core0。
-     * 必须在任何远离入口的代码执行前自行失效。 */
     {
         extern void xip_cache_invalidate_all(void);
         xip_cache_invalidate_all();

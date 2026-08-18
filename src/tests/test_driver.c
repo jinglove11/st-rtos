@@ -45,7 +45,10 @@ static void uart_server_error_task(void *arg) {
 }
 
 static void driver_nameserver_task(void *arg) {
-    int err = nameserver_service_run((int)(uintptr_t)arg, 2);
+    /* 轮数必须覆盖 REGISTER + LOOKUP + 客户端会话收尾: NS 用尽轮数
+     * 退出时,退出清理会级联吊销注册 cap 树 (含客户端 service cap)。
+     * 第 3 轮 recv 超时后以 TIMEOUT 退出 (会话已结束)。 */
+    int err = nameserver_service_run((int)(uintptr_t)arg, 3);
     sys_task_exit((void *)(intptr_t)err);
 }
 
@@ -55,7 +58,12 @@ static void driver_nameserver_release_task(void *arg) {
 }
 
 static void uart_server_ping_task(void *arg) {
-    int err = uart_server_run((int)(uintptr_t)arg, 7);
+    /* lookup 客户端一轮会话发 7 次 RPC (ping/open/poll/ioctl/read/write/
+     * close);server 轮数必须更大:server 退出会触发 root_bootstrap
+     * 清理删除服务端点,级联吊销所有指向它的 cap (含客户端 driver_cap),
+     * 令会话尾部的 nameserver_lookup_ack/sys_cap_revoke 失败。
+     * 第 8 轮 recv 超时后 server 以 TIMEOUT 退出 (会话已结束)。 */
+    int err = uart_server_run((int)(uintptr_t)arg, 8);
     sys_task_exit((void *)(intptr_t)err);
 }
 
@@ -309,15 +317,22 @@ static void driver_register_client_task(void *arg) {
     (void)arg;
     int ns_ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
     cap_id_t service_ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 1);
-    int err;
+    cap_id_t sync_ep_cap = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 2);
+    int result;
 
-    if (ns_ep_cap <= 0 || service_ep_cap <= 0) {
+    if (ns_ep_cap <= 0 || service_ep_cap <= 0 || sync_ep_cap <= 0) {
         sys_task_exit((void *)(intptr_t)KERN_ERR_PARAM);
     }
 
-    err = nameserver_register(ns_ep_cap, "dev.uart0", service_ep_cap,
-                              0x55415254U, 1000);
-    sys_task_exit((void *)(intptr_t)err);
+    result = nameserver_register(ns_ep_cap, "dev.uart0", service_ep_cap,
+                                  0x55415254U, 1000);
+
+    /* 注册用的是 IPC_CAP_COPY: NS 里的注册项是本任务 cap 的派生
+     * 子代,任务退出会被级联吊销 (capability 语义)。把注册结果送回
+     * 测试任务,然后停在 RPC 等回复 — 测试期间保持本任务存活,
+     * 注册项随 UART 服务 (而非本临时注册者) 的需要而存在。 */
+    (void)sys_ep_send(sync_ep_cap, &result, KERN_WAIT_FOREVER);
+    sys_task_exit((void *)(intptr_t)result);
 }
 
 static void driver_lookup_ping_client_task(void *arg) {
@@ -1771,10 +1786,15 @@ static void test_uart_driver_nameserver_lookup(void) {
                    "driver UART service task started");
 
     ep_id_t inbox_ep = KERN_INVALID_ID;
+    ep_id_t reg_sync_ep = KERN_INVALID_ID;
     if (err == KERN_OK) {
         inbox_ep = endpoint_create("drv_lookup_inbox", KERN_EP_MSG_SIZE, 2);
     }
     TEST_ASSERT(inbox_ep >= 0, "driver lookup inbox endpoint created");
+    if (inbox_ep >= 0) {
+        reg_sync_ep = endpoint_create("drv_reg_sync", sizeof(int), 1);
+    }
+    TEST_ASSERT(reg_sync_ep >= 0, "driver register sync endpoint created");
 
     task_id_t reg_client = KERN_INVALID_ID;
     task_id_t lookup_client = KERN_INVALID_ID;
@@ -1797,6 +1817,10 @@ static void test_uart_driver_nameserver_lookup(void) {
                                     CAP_READ | CAP_WRITE);
         reg_uart_cap = cap_create_for(reg_tcb, endpoint_obj_for_cap(uart_ep), CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER);
+        if (reg_sync_ep >= 0) {
+            (void)cap_create_for(reg_tcb, endpoint_obj_for_cap(reg_sync_ep),
+                                 CAP_OBJ_ENDPOINT, CAP_READ | CAP_WRITE);
+        }
     }
 
     cap_id_t lookup_ns_cap = KERN_INVALID_ID;
@@ -1821,13 +1845,16 @@ static void test_uart_driver_nameserver_lookup(void) {
                        "driver register client started");
     }
 
+    int reg_result = (int)KERN_ERR_STATE;
     void *retval = NULL;
     if (reg_client >= 0) {
-        err = task_join(reg_client, &retval, 1000);
+        err = endpoint_recv(reg_sync_ep, &reg_result, 2000);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
-                       "driver register client joined");
-        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
+                       "driver register client result received");
+        TEST_ASSERT_EQ((int)KERN_OK, (int)reg_result,
                        "driver register client retval OK");
+        /* 注册任务停在 sync RPC 等回复,注册项随其存活;
+         * 清理段统一 task_delete。 */
     }
 
     if (lookup_client >= 0 && lookup_ns_cap >= 0 && lookup_inbox_cap >= 0) {
@@ -1847,20 +1874,23 @@ static void test_uart_driver_nameserver_lookup(void) {
 
     retval = NULL;
     if (uart_id >= 0) {
-        err = task_join(uart_id, &retval, 1000);
+        err = task_join(uart_id, &retval, 2500);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver UART service joined");
-        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
-                       "driver UART service retval OK");
+        /* 尾轮 recv 超时退出 = 正常收尾 */
+        int rv = (int)(intptr_t)retval;
+        TEST_ASSERT(rv == (int)KERN_OK || rv == (int)KERN_ERR_TIMEOUT,
+                    "driver UART service retval OK/drain");
     }
 
     retval = NULL;
     if (ns_id >= 0) {
-        err = task_join(ns_id, &retval, 1000);
+        err = task_join(ns_id, &retval, 2500);
         TEST_ASSERT_EQ((int)KERN_OK, (int)err,
                        "driver name server joined");
-        TEST_ASSERT_EQ((int)KERN_OK, (int)(intptr_t)retval,
-                       "driver name server retval OK");
+        int nrv = (int)(intptr_t)retval;
+        TEST_ASSERT(nrv == (int)KERN_OK || nrv == (int)KERN_ERR_TIMEOUT,
+                    "driver name server retval OK/drain");
     }
 
     if (reg_client >= 0 &&
@@ -1879,6 +1909,9 @@ static void test_uart_driver_nameserver_lookup(void) {
     }
     if (inbox_ep >= 0) {
         (void)endpoint_delete(inbox_ep);
+    }
+    if (reg_sync_ep >= 0) {
+        (void)endpoint_delete(reg_sync_ep);
     }
     if (root_id >= 0) {
         TEST_ASSERT_EQ((int)KERN_OK, (int)task_delete(root_id),
