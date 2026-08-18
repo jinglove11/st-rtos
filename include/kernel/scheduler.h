@@ -361,6 +361,10 @@ void sched_handle_ipi(uint32_t reasons);
 
 /** Publish/unpublish a CPU to the scheduler load balancer. */
 void sched_set_cpu_online(uint32_t cpu, int online);
+#if SMP
+/* core1 死亡回收: 队列搬回 core0 + 孤儿任务重入队 (健康窗口重试用) */
+void sched_reclaim_cpu1(void);
+#endif
 #endif
 
 /*============================================================================

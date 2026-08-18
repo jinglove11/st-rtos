@@ -722,6 +722,49 @@ void sched_handle_ipi(uint32_t reasons) {
     }
 }
 
+#if SMP
+/* core1 死亡回收 (M3 健康窗口重试用): 把 core1 就绪队列整体搬回
+ * core0;死亡瞬间正在 core1 上运行的任务 (孤儿 RUNNING) 重新入队。
+ * 仅在 core1 已死、不持锁的窗口调用 (见 smp_init_core1)。 */
+void sched_reclaim_cpu1(void) {
+    runqueue_t *src = runq_for(1);
+    runqueue_t *dst = runq_for(0);
+    uint32_t crit = hal_irq_save();
+
+    for (uint8_t prio = 0; prio < KERNEL_MAX_PRIORITIES; prio++) {
+        while (src->ready_list[prio].head != NULL) {
+            tcb_t *t = src->ready_list[prio].head;
+            ready_list_remove_internal(src, t);
+            ready_list_add_internal(dst, 0, t);
+        }
+    }
+
+    tcb_t *cur = _current_task[1];
+    if (cur != NULL && cur->id >= 0 && cur->state == TASK_STATE_RUNNING) {
+        cur->state = TASK_STATE_READY;
+        cur->cpu_owner = 0;
+        cur->migration_state = TASK_MIGRATION_STABLE;
+        ready_list_add_internal(dst, 0, cur);
+    }
+
+    /* _next_task[1]: 已被 PendSV 选中出队、尚未完成切换的任务 —
+     * 不回收会直接丢失 (无任何队列引用)。 */
+    tcb_t *next = _next_task[1];
+    if (next != NULL && next->id >= 0 && next != cur &&
+        (next->state == TASK_STATE_RUNNING ||
+         next->state == TASK_STATE_READY)) {
+        next->state = TASK_STATE_READY;
+        next->cpu_owner = 0;
+        next->migration_state = TASK_MIGRATION_STABLE;
+        ready_list_add_internal(dst, 0, next);
+    }
+
+    _current_task[1] = NULL;
+    _next_task[1] = NULL;
+    hal_irq_restore(crit);
+}
+#endif
+
 void sched_set_cpu_online(uint32_t cpu, int online) {
     if (cpu >= SMP_MAX_CPUS) {
         return;

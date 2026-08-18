@@ -294,6 +294,35 @@ __not_in_flash_func(core1_entry)(void) {
     }
 }
 
+/* 危险窗口核验 (M3): core1 间歇性整核复位集中在 launch 后 ~20ms 内的
+ * 首异常窗口 (调试刷写工作流触发,根因未定 — 见提交历史取证链)。
+ * launch 成功后用 IPI 心跳探测 ~100ms 覆盖该窗口: 活着的 core1 每次
+ * IPI 都会进 FIFO IRQ 使 core1_hb_irq 递增;连续 2 次无响应判定死亡。
+ * 死亡后由调用方回收队列 + PSM 复位 + 重 launch (手册 §5.3 明文
+ * 支持 "explicitly resetting just processor core 1" 后重新 launch)。 */
+static int smp_core1_health_window(void) {
+    uint32_t last = core1_hb_irq;
+    uint32_t misses = 0;
+
+    for (uint32_t probe = 0; probe < 40U; probe++) {
+        smp_send_ipi(1U, SMP_IPI_RESCHEDULE);
+        /* ~2.7ms @150MHz (nop 单周期) */
+        for (uint32_t spin = 0; spin < 400000U; spin++) {
+            __asm volatile("nop");
+        }
+        uint32_t now = core1_hb_irq;
+        if (now == last) {
+            if (++misses >= 2U) {
+                return 0;  /* core1 无响应 */
+            }
+        } else {
+            misses = 0;
+        }
+        last = now;
+    }
+    return 1;  /* 全窗口存活 */
+}
+
 kern_err_t smp_init_core1(void) {
     /* Launch core1 via the SDK multicore API. This:
      * 1. Resets core1 (PSM force-off)
@@ -318,9 +347,19 @@ kern_err_t smp_init_core1(void) {
          * 间歇性发生 (flash 后首次启动、看门狗重启后)。 */
         smp_ipi_init_cpu();
 
+        uint32_t running = 0;
         for (uint32_t spin = 0; spin < 20000000U; spin++) {
             __asm volatile("dmb" ::: "memory");
             if (core1_ready && _current_task[1] != NULL) {
+                running = 1;
+                break;
+            }
+            __asm volatile("nop");
+        }
+
+        if (running) {
+            /* 危险窗口核验:熬过 ~20ms 复位窗口并确认存活 */
+            if (smp_core1_health_window()) {
 #if KERN_DEBUG_ENABLE
                 if (attempt != 0U) {
                     extern void hal_debug_puts(const char *s);
@@ -329,7 +368,16 @@ kern_err_t smp_init_core1(void) {
 #endif
                 return KERN_OK;
             }
-            __asm volatile("nop");
+#if KERN_DEBUG_ENABLE
+            {
+                extern void hal_debug_puts(const char *s);
+                hal_debug_puts("[C0] core1 died in health window\r\n");
+            }
+#endif
+            /* 回收 core1 调度状态 (队列搬回 core0、孤儿任务重新入队),
+             * 再走 PSM 复位重试。死亡窗口内 core1 只在 idle/入口/首个
+             * FIFO IRQ 中,不持任何内核锁,回收安全。 */
+            sched_reclaim_cpu1();
         }
 
         /* core1 困死 (bootrom 握手后未达就绪,或短暂上线后被整核复位
