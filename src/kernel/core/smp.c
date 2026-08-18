@@ -215,8 +215,9 @@ void smp_flash_lockout_end(void) {
 /* core1 启动栈 (raw launch 实验预留;当前 trampoline launch 未用) */
 
 
-/* 本函数驻留 SRAM: core1 失效自身 XIP cache (RP2350 每核独立) 前,
- * 从 SRAM 执行失效调用,避免命中刷写后残留的脏缓存行。 */
+/* 本函数驻留 SRAM: XIP cache 失效调用本身从 SRAM 执行 (RP2350 XIP
+ * cache 为全芯片共享的单一 16KB cache — 手册 §4.4.1,此处失效同时
+ * 覆盖两核),避免失效调用执行期间命中刷写后残留的脏缓存行。 */
 static void __attribute__((noinline))
 __not_in_flash_func(core1_entry)(void) {
     /* 不用 flash 驻留的 hal_irq_disable — 直接内联关中断 */

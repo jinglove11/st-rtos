@@ -104,13 +104,29 @@ void _default_handler(void) {
  */
 void hal_cpu_init(void) {
 #if TARGET_BOARD == BOARD_RP2350_PICO2
-    /* 调试器刷写 (openocd "program ... reset") 不会清 XIP cache: 复位后
-     * cache 可能残留旧镜像的行,取指命中即执行陈旧/垃圾代码 — 在 SMP 上
-     * 观测到 core1 启动后野写 PSM 导致自身被 PROC1 复位、困死 bootrom。
-     * 开机最早点整体失效 XIP cache,保证此后的取指来自 flash 真值。 */
+    /* 调试器刷写 (openocd "program ... reset") 可能绕过 bootrom 进镜像
+     * 时的 cache 冲刷 (手册 §5.9.3.2.1),残留脏缓存行 — 取指命中即执行
+     * 陈旧代码,在 SMP 上观测到 core1 首异常 MemManage → 整核复位。
+     * XIP cache 为全芯片共享 (§4.4.1),此处一次失效覆盖两核。
+     * 开机最早点整体失效,保证此后的取指来自 flash 真值。 */
     {
         extern void xip_cache_invalidate_all(void);
         xip_cache_invalidate_all();
+#if KERN_DEBUG_ENABLE
+        /* DBG: 复位默认 0x83 (EN_SECURE|EN_NONSECURE|NO_UNTRANSLATED_NONSEC)。
+         * SEGGER 论坛报告 J-Link flash loader 结束后残留 0x00 (cache 被禁)。
+         * 记录 openocd 工作流在本板上的实际残留值。 */
+        {
+            volatile uint32_t *xip_ctrl = (volatile uint32_t *)0x400C8000UL;
+            char h[22] = "[XIPCTRL=0x........]\r\n";
+            uint32_t v = *xip_ctrl;
+            for (int k = 0; k < 8; k++) {
+                h[11 + k] = "0123456789abcdef"[(v >> (4 * (7 - k))) & 0xFU];
+            }
+            h[19] = 0;
+            hal_debug_puts(h);
+        }
+#endif
     }
 
 #if !SMP
