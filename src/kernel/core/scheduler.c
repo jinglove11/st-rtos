@@ -1272,10 +1272,20 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
  * 单存储,不扰动时序;失败现场可读出"唤醒丢失瞬间的真实 state"。 */
 volatile uint32_t sched_wake_cas_fail[8];
 
+/* DBG: 定位"joiner 被以 PARAM 唤醒"的投递者 */
+volatile uint32_t sched_wake_param_join_hits;
+void *sched_wake_param_join_ra;
+
 void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     if (tcb == NULL) {
         return;
     }
+#if KERN_DEBUG_ENABLE
+    if (result == KERN_ERR_PARAM && tcb->cont.op == BLOCK_REASON_JOIN) {
+        sched_wake_param_join_hits++;
+        sched_wake_param_join_ra = __builtin_return_address(0);
+    }
+#endif
 
     /* Local IRQ masking is not a cross-core exclusion mechanism.  Timeout,
      * delete and IPC delivery may race on different CPUs; exactly one of

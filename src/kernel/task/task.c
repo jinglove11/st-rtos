@@ -246,9 +246,27 @@ static void task_exit_record_store(tcb_t *tcb, void *value,
                                    kern_err_t result) {
     int slot = task_exit_record_find(tcb->id, tcb->hdr.generation);
     if (slot < 0) {
-        slot = (int)task_exit_next;
-        task_exit_next = (uint16_t)((task_exit_next + 1U) %
-                                    TASK_EXIT_RECORD_MAX);
+        /* 优先复用已消费 (invalid) 的槽: 盲用 next++ 会在环回时覆盖
+         * 仍存活的长龄记录 — 压测下实测 (test 6): worker b 先退出,
+         * 对核 worker a 继续产生 >TASK_EXIT_RECORD_MAX 次子任务退出,
+         * b 的记录被冲掉 → 后续 join(b) 返回 NOEXIST。正常负载任意
+         * 时刻存活记录远小于环长,几乎总能找到空槽;找不到才退化为
+         * 环回覆盖。 */
+        for (uint32_t k = 0; k < TASK_EXIT_RECORD_MAX; k++) {
+            uint32_t idx = (uint32_t)((task_exit_next + k) %
+                                      TASK_EXIT_RECORD_MAX);
+            if (!task_exit_records[idx].valid) {
+                slot = (int)idx;
+                task_exit_next = (uint16_t)((idx + 1U) %
+                                            TASK_EXIT_RECORD_MAX);
+                break;
+            }
+        }
+        if (slot < 0) {
+            slot = (int)task_exit_next;
+            task_exit_next = (uint16_t)((task_exit_next + 1U) %
+                                        TASK_EXIT_RECORD_MAX);
+        }
     }
     task_exit_record_t *record = &task_exit_records[slot];
     record->task_id = tcb->id;
@@ -1243,9 +1261,15 @@ kern_err_t task_delay_until(uint32_t tick) {
     return task_delay(tick - now);
 }
 
+/* DBG: join 返回路径面包屑 1=param 2=expected-mismatch-record 3=expected-mismatch-noexist
+ * 4=unused-record 5=unused-noexist 6=terminated-record 7=join-self 8=wake-result */
+volatile uint8_t task_join_path;
+
 kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
-    if (task_id < 0 || task_id >= KERNEL_MAX_TASKS)
+    if (task_id < 0 || task_id >= KERNEL_MAX_TASKS) {
+        task_join_path = 1;
         return KERN_ERR_PARAM;
+    }
 
     tcb_t *current = sched_get_current();
     if (current == NULL) {
@@ -1267,10 +1291,12 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
         if (task_exit_record_take(task_id, expected_generation, 0,
                                   retval, &result)) {
             irq_spin_unlock(&task_lock, crit);
+            task_join_path = 2;
             return result;
         }
         task_join_expected[current->id][task_id] = 0U;
         irq_spin_unlock(&task_lock, crit);
+        task_join_path = 3;
         return KERN_ERR_NOEXIST;
     }
 
@@ -1278,9 +1304,11 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
         kern_err_t result = KERN_OK;
         if (task_exit_record_take(task_id, 0U, 1, retval, &result)) {
             irq_spin_unlock(&task_lock, crit);
+            task_join_path = 4;
             return result;
         }
         irq_spin_unlock(&task_lock, crit);
+        task_join_path = 5;
         return KERN_ERR_NOEXIST;
     }
 
@@ -1289,6 +1317,7 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
     /* 不能 join 自己 */
     if (tcb == current) {
         irq_spin_unlock(&task_lock, crit);
+        task_join_path = 7;
         return KERN_ERR_PARAM;
     }
 
@@ -1309,6 +1338,7 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
             *retval = tcb->exit_value;
         }
         irq_spin_unlock(&task_lock, crit);
+        task_join_path = 6;
         return result;
     }
 
@@ -1332,6 +1362,7 @@ kern_err_t task_join(task_id_t task_id, void **retval, uint32_t timeout) {
 
     sched_yield();
     kern_err_t err = current->cont.result;
+    task_join_path = 8;
 
     if (err == KERN_OK) {
         if (retval) {

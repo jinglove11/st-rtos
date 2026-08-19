@@ -88,15 +88,25 @@ join:           task_join(waiter, 1000)
    的最稳定表象:退出记录被槽位复用冲掉 → join 读到 NOEXIST);
 3. affinity/steal 违反(此前已单独标记:`ping task 0 stayed on core0`)。
 
-## 6. 剩余未决 (2026-08-19 更新)
+## 6. 剩余未决 (2026-08-19 二次更新)
 
-syscall_user 失败族已全部清零。剩余 2 项 (1M 压力下每轮出现,10k 快速
-preset 下多数轮次通过):
-1. `smp: task reuse core1 joined -9` — 双核并发任务槽复用压测的 join;
-2. `smp: randomized interleavings actual 1-7` — send/delete/timeout/fault
-   随机交错压测。
-两者均属 smp 模块 K 层压测,候选方向: affinity/steal 对掩码的尊重
-(`ping task 0 stayed on core0` 探针)、exit-record 与槽位复用的竞态。
+**test 6 (task reuse -9) 已根除**: 根因为 task_exit_record_store 盲用
+next++ 覆盖存活记录 — worker b 先退出后,对核继续产生 >256 次子任务
+退出把 b 的记录冲掉 → join(b) NOEXIST。修复: store 优先复用 invalid
+槽。修复后 ~15 轮 1M 压力零复现。
+
+**test 7 (randomized interleavings) 大幅收敛**: 从每轮 100% 多项失败
+降至约 0-10/1000 次 join (近 14 轮中 11 轮全零)。残余特征已钉死:
+`del_join = KERN_ERR_PARAM(-2)`,join 路径面包屑 path=8 (阻塞后被
+waker 以 -2 唤醒),del 本身 TERMINATED。属超窄时序窗口 (任何代码
+变动即隐藏 — 探针效应),已在 sched_wakeup 布 RA 陷阱
+(sched_wake_param_join_hits/ra,冷路径零扰动): 下次触发 RACEDBG
+将直接打印投递者地址,addr2line 即可定罪。
+
+**附带 (CI 工具,非运行问题)**: verify_pico2w_build.py 的 UF2 元数据
+校验在 default/release (偶发 full) 上 flaky — picotool 解析镜像时把
+"cap " 字符串误当指针 ("failed to read memory at 0x20706163")。
+ELF 构建正常、板上运行正常,与 picotool 版本相关,待单独排查。
 
 ## 7. 附带观测(非失败,一并记录)
 

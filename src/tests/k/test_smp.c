@@ -139,7 +139,10 @@ static void test_parallel_execution(void) {
 #define SMP_STRESS_ITERATIONS 10000U
 #endif
 
+/* DBG: 排障期 ping-pong 用 10k (pool/race 仍按 1M 派生);排障完删 */
 #define SMP_PING_PONG_ITERATIONS ((uint32_t)SMP_STRESS_ITERATIONS)
+
+
 
 static sem_id_t smp_ping_sem[2];
 static volatile uint32_t smp_ping_count[2];
@@ -302,8 +305,8 @@ static void test_cross_core_endpoint_ping_pong(void) {
  *============================================================================*/
 
 #define SMP_POOL_STRESS_ITERATIONS \
-    ((SMP_PING_PONG_ITERATIONS / 100U) < 100U ? 100U : \
-     (SMP_PING_PONG_ITERATIONS / 100U))
+    ((SMP_STRESS_ITERATIONS / 100U) < 100U ? 100U : \
+     (SMP_STRESS_ITERATIONS / 100U))
 
 #if CAP_ENABLE
 static uint32_t smp_cap_object[2];
@@ -470,14 +473,20 @@ static void test_cross_core_task_reuse(void) {
  *============================================================================*/
 
 #define SMP_RACE_ITERATIONS \
-    ((SMP_PING_PONG_ITERATIONS / 1000U) < 10U ? 10U : \
-     (SMP_PING_PONG_ITERATIONS / 1000U))
+    ((SMP_STRESS_ITERATIONS / 1000U) < 10U ? 10U : \
+     (SMP_STRESS_ITERATIONS / 1000U))
 
 static volatile ep_id_t smp_race_ep;
 static volatile uint32_t smp_race_seed;
 static volatile kern_err_t smp_race_send_result;
 static volatile kern_err_t smp_race_recv_result;
 static volatile kern_err_t smp_race_delete_result;
+/* DBG: 失败条件分桶 [rj,sj,dj,fj,recv,send,del] */
+static volatile uint32_t smp_race_fail_reason[7];
+static volatile uint32_t smp_race_del_join_err;
+static volatile uint32_t smp_race_del_state;
+static volatile int32_t smp_race_j[4];
+static volatile int32_t smp_race_st[4];
 
 static int smp_race_ipc_result_ok(kern_err_t err) {
     return err == KERN_OK || err == KERN_ERR_TIMEOUT ||
@@ -519,6 +528,7 @@ static void smp_race_fault_task(void *arg) {
 static void test_cross_core_event_interleavings(void) {
     test_section("Test 7: send/delete/timeout/fault interleavings");
     uint32_t failures = 0U;
+    for (int k = 0; k < 7; k++) smp_race_fail_reason[k] = 0U;
     uint32_t seed = 0x13579BDFU;
 
     for (uint32_t i = 0; i < SMP_RACE_ITERATIONS; i++) {
@@ -567,11 +577,33 @@ static void test_cross_core_event_interleavings(void) {
         kern_err_t del_join = smp_join_bounded(
             del, NULL, SMP_OPERATION_TIMEOUT_TICKS);
         if (recv_join != KERN_OK || send_join != KERN_OK ||
+            del_join != KERN_OK || fault_join != KERN_ERR_FAULT) {
+            /* DBG: 全量捕获四 join 码与任务状态 */
+            smp_race_j[0]=(int32_t)recv_join; smp_race_j[1]=(int32_t)send_join;
+            smp_race_j[2]=(int32_t)del_join;  smp_race_j[3]=(int32_t)fault_join;
+            smp_race_st[0]=(int32_t)task_get_state(recv);
+            smp_race_st[1]=(int32_t)task_get_state(send);
+            smp_race_st[2]=(int32_t)task_get_state(del);
+            smp_race_st[3]=(int32_t)task_get_state(fault);
+        }
+        if (recv_join != KERN_OK || send_join != KERN_OK ||
             del_join != KERN_OK || fault_join != KERN_ERR_FAULT ||
             !smp_race_ipc_result_ok(smp_race_recv_result) ||
             !smp_race_ipc_result_ok(smp_race_send_result) ||
             smp_race_delete_result != KERN_OK) {
             failures++;
+            /* DBG: 分桶定位失败条件 */
+            if (recv_join != KERN_OK) smp_race_fail_reason[0]++;
+            if (send_join != KERN_OK) smp_race_fail_reason[1]++;
+            if (del_join != KERN_OK) {
+                smp_race_fail_reason[2]++;
+                smp_race_del_join_err = (uint32_t)del_join;
+                smp_race_del_state = (uint32_t)task_get_state(del);
+            }
+            if (fault_join != KERN_ERR_FAULT) smp_race_fail_reason[3]++;
+            if (!smp_race_ipc_result_ok(smp_race_recv_result)) smp_race_fail_reason[4]++;
+            if (!smp_race_ipc_result_ok(smp_race_send_result)) smp_race_fail_reason[5]++;
+            if (smp_race_delete_result != KERN_OK) smp_race_fail_reason[6]++;
         }
 
         (void)task_delete(recv);
@@ -581,6 +613,40 @@ static void test_cross_core_event_interleavings(void) {
         if (endpoint_exists(smp_race_ep)) (void)endpoint_delete(smp_race_ep);
     }
 
+    if (failures > 0U) {
+        char b[10];
+        test_print("[RACEDBG] rj=");
+        for (int k = 0; k < 7; k++) {
+            uint32_t v = smp_race_fail_reason[k];
+            b[0]='0'+(char)((v/100)%10); b[1]='0'+(char)((v/10)%10); b[2]='0'+(char)(v%10); b[3]=0;
+            test_print(b);
+            if (k<6) test_print(",");
+        }
+        test_print("\r\n");
+    }
+    if (failures > 0U) {
+        test_print_num("[RACEDBG] j(r,s,d,f)=", smp_race_j[0]);
+        test_print_num(",", smp_race_j[1]);
+        test_print_num(",", smp_race_j[2]);
+        test_print_num(",", smp_race_j[3]);
+        { extern volatile uint8_t task_join_path;
+          test_print_num(" path=", (int32_t)task_join_path); }
+        {
+          extern volatile uint32_t sched_wake_param_join_hits;
+          extern void *sched_wake_param_join_ra;
+          test_print_num(" pjhits=", (int32_t)sched_wake_param_join_hits);
+          if (sched_wake_param_join_ra) {
+              char h[11]; uint32_t v=(uint32_t)(uintptr_t)sched_wake_param_join_ra;
+              test_print(" ra=0x");
+              for(int k=7;k>=0;k--){h[k]="0123456789abcdef"[(v>>(4*(7-k)))&0xFU];}
+              h[8]=0; test_print(h);
+          }
+        }
+        test_print_num(" st=", smp_race_st[0]);
+        test_print_num(",", smp_race_st[1]);
+        test_print_num(",", smp_race_st[2]);
+        test_print_num(",", smp_race_st[3]);
+    }
     TEST_ASSERT_EQ(0, failures, "all randomized interleavings completed safely");
 }
 
