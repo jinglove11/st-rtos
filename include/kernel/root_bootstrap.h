@@ -56,6 +56,14 @@ kern_err_t root_bootstrap_prepare(tcb_t *root_task);
 kern_err_t root_bootstrap_get_info(root_bootstrap_info_t *out);
 void root_bootstrap_cleanup_task(tcb_t *task);
 
+#if FAULT_ENDPOINT && SUPERVISOR
+/* H1 修复:supervisor 由 root bootstrap 直接创建,并铸入 kern_fault_ep 的
+ * READ|WRITE cap(取代 sys_fault_subscribe 的用户态路径 —— 该 syscall
+ * 拒绝用户任务,supervisor 只能用这里的初始授权拿到 fault ep)。
+ * supervisor 用 sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0) 发现该 cap。 */
+kern_err_t root_bootstrap_spawn_supervisor(void);
+#endif
+
 #endif /* CAP_ENABLE */
 
 #endif /* ROOT_BOOTSTRAP_H */

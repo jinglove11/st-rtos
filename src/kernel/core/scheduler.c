@@ -508,6 +508,12 @@ static tcb_t *runq_get_highest(runqueue_t *rq) {
 #if SMP
 static uint32_t sched_choose_cpu(const tcb_t *tcb) {
     uint32_t current_cpu = sched_cpu();
+    /* 调度器未 start (boot/健康窗口阶段) 一律落 core0: 保证 core1 在
+     * 自愈健康窗口内只跑 idle — 若真实任务上 core1 后死亡,回收重入队
+     * 会从陈旧上下文恢复执行 (实测: task_exit 半途 → PC=0 UsageFault)。 */
+    if (!__atomic_load_n(&scheduler.started, __ATOMIC_ACQUIRE)) {
+        return current_cpu;
+    }
     uint32_t allowed = tcb->affinity_mask & scheduler.online_mask;
 
     if (allowed == 0U) {
@@ -726,6 +732,32 @@ void sched_handle_ipi(uint32_t reasons) {
 /* core1 死亡回收 (M3 健康窗口重试用): 把 core1 就绪队列整体搬回
  * core0;死亡瞬间正在 core1 上运行的任务 (孤儿 RUNNING) 重新入队。
  * 仅在 core1 已死、不持锁的窗口调用 (见 smp_init_core1)。 */
+/* DBG: 失败现场 dump — 各核就绪队列计数 + 远端队列积压 */
+void sched_debug_dump_queues(void) {
+    extern void hal_debug_puts(const char *s);
+    char b[12];
+    for (uint32_t c = 0; c < SMP_MAX_CPUS; c++) {
+        runqueue_t *rq = runq_for(c);
+        hal_debug_puts("[QD] cpu");
+        b[0] = '0' + (char)c; b[1] = ' '; b[2] = 'r'; b[3] = 'q'; b[4] = '=';
+        b[5] = '0' + (char)(rq->ready_count / 10U);
+        b[6] = '0' + (char)(rq->ready_count % 10U);
+        b[7] = ' '; b[8] = 'r'; b[9] = 'm'; b[10] = '='; b[11] = 0;
+        hal_debug_puts(b);
+        {
+            uint32_t v = scheduler.remote[c].count;
+            char h[9];
+            for (int k=7;k>=0;k--) { h[k]="0123456789abcdef"[(v>>(4*(7-k)))&0xFU]; }
+            h[8]=0;
+            hal_debug_puts(h);
+        }
+        hal_debug_puts(" resch=");
+        b[0] = '0' + (char)rq->need_resched; b[1] = 0;
+        hal_debug_puts(b);
+        hal_debug_puts("\r\n");
+    }
+}
+
 void sched_reclaim_cpu1(void) {
     runqueue_t *src = runq_for(1);
     runqueue_t *dst = runq_for(0);
@@ -739,24 +771,22 @@ void sched_reclaim_cpu1(void) {
         }
     }
 
-    tcb_t *cur = _current_task[1];
-    if (cur != NULL && cur->id >= 0 && cur->state == TASK_STATE_RUNNING) {
-        cur->state = TASK_STATE_READY;
-        cur->cpu_owner = 0;
-        cur->migration_state = TASK_MIGRATION_STABLE;
-        ready_list_add_internal(dst, 0, cur);
-    }
-
-    /* _next_task[1]: 已被 PendSV 选中出队、尚未完成切换的任务 —
-     * 不回收会直接丢失 (无任何队列引用)。 */
-    tcb_t *next = _next_task[1];
-    if (next != NULL && next->id >= 0 && next != cur &&
-        (next->state == TASK_STATE_RUNNING ||
-         next->state == TASK_STATE_READY)) {
-        next->state = TASK_STATE_READY;
-        next->cpu_owner = 0;
-        next->migration_state = TASK_MIGRATION_STABLE;
-        ready_list_add_internal(dst, 0, next);
+    /* 孤儿 (死亡时正在 core1 运行的任务,含 _next 已选中未切换者):
+     * 绝不重入队 — 其保存的上下文是死亡瞬间的中间态 (实测 task_exit
+     * 半途恢复 → PC=0 UsageFault)。正确处置是终止;正常流程中
+     * (sched_choose_cpu 的 boot-gate) 窗口内 core1 只跑 idle,此处
+     * 仅作防御。 */
+    tcb_t *orphans[2];
+    orphans[0] = _current_task[1];
+    orphans[1] = _next_task[1];
+    for (int i = 0; i < 2; i++) {
+        tcb_t *t = orphans[i];
+        if (t != NULL && t->id >= 0 &&
+            (t->state == TASK_STATE_RUNNING ||
+             t->state == TASK_STATE_READY)) {
+            t->state = TASK_STATE_SUSPENDED; /* 防 terminate 路径再入调度 */
+            t->cpu_owner = 0;
+        }
     }
 
     _current_task[1] = NULL;
@@ -1238,6 +1268,10 @@ kern_err_t sched_block(block_reason_t reason, void *obj, uint32_t timeout) {
  *
  * @note 如果唤醒的任务优先级高于当前任务，会触发调度
  */
+/* DBG (零扰动): sched_wakeup CAS 失败按 state 分桶计数 — 冷路径
+ * 单存储,不扰动时序;失败现场可读出"唤醒丢失瞬间的真实 state"。 */
+volatile uint32_t sched_wake_cas_fail[8];
+
 void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     if (tcb == NULL) {
         return;
@@ -1251,6 +1285,9 @@ void sched_wakeup(tcb_t *tcb, kern_err_t result) {
     if (!__atomic_compare_exchange_n(&tcb->state, &expected,
                                      TASK_STATE_READY, 0,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        /* DBG (零扰动冷路径): 唤醒 CAS 失败计数,按当时的 state 分桶。
+         * state 分桶直接给出"唤醒丢失瞬间任务的真实状态"。 */
+        sched_wake_cas_fail[expected & 7U]++;
         return;
     }
 

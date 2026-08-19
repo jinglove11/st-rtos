@@ -414,4 +414,42 @@ void root_bootstrap_cleanup_task(tcb_t *task) {
     }
 }
 
+#if FAULT_ENDPOINT && SUPERVISOR
+kern_err_t root_bootstrap_spawn_supervisor(void) {
+    if (!root_bootstrap.active) {
+        return KERN_ERR_STATE;
+    }
+    extern void supervisor_monitor_loop(void *arg);
+    extern ep_id_t kern_fault_ep;
+
+    task_id_t sup_tid = KERN_INVALID_ID;
+    cap_id_t sup_cap = KERN_INVALID_ID;
+    kern_err_t err = root_bootstrap_create_service(
+        "supervisor", supervisor_monitor_loop, NULL,
+        6 /* priority */, 2048 /* stack */, &sup_tid, &sup_cap);
+    if (err != KERN_OK) {
+        return err;
+    }
+
+    tcb_t *sup = task_get_tcb(sup_tid);
+    void *fault_obj = (kern_fault_ep >= 0)
+        ? endpoint_obj_for_cap(kern_fault_ep) : NULL;
+    if (sup == NULL || fault_obj == NULL) {
+        return KERN_ERR_STATE;
+    }
+
+    /* 铸入 fault ep 的 READ|WRITE cap(无 MANAGE:supervisor 不能删内核
+     * fault endpoint)。supervisor 以 self_slot(EP,0) 发现它 —— 它是
+     * 该任务 cspace 里唯一的 endpoint cap。 */
+    cap_id_t fe = cap_create_for(sup, fault_obj, CAP_OBJ_ENDPOINT,
+                                 CAP_READ | CAP_WRITE);
+    if (fe < 0) {
+        (void)task_delete(sup_tid);
+        return (kern_err_t)fe;
+    }
+
+    return root_bootstrap_start_service(sup_cap);
+}
+#endif /* FAULT_ENDPOINT && SUPERVISOR */
+
 #endif /* CAP_ENABLE */

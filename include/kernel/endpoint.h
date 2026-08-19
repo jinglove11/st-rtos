@@ -61,6 +61,11 @@ void       endpoint_cleanup_task(void *endpoint_obj, tcb_t *tcb);
 /* 返回当前任务在指定 endpoint 上最近 recv 的 sender task id */
 task_id_t  endpoint_last_sender(ep_id_t ep_id);
 
+/* 查询 task 是否阻塞在 endpoint 的 recv 等待队列上。
+ * SYS 启动健康检查用:supervisor 订阅 fault ep 后应阻塞在其 recv 队列。
+ * 返回 1 在队列 / 0 不在(或 ep 无效)。 */
+int endpoint_recv_has_waiter(ep_id_t ep_id, task_id_t task_id);
+
 /*============================================================================
  * M2-Step3b: cap 路径 id ↔ 对象指针 转换
  *============================================================================*/

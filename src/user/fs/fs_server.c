@@ -325,7 +325,11 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
                            int dev_ep_cap, const char *dev_name) {
     fs_msg_t msg;
     int err = KERN_OK;
+#if FAULT_ENDPOINT
     int fault_ep_cap = -1;   /* kern.fault endpoint cap (客户端死亡清理) */
+#else
+#define fault_ep_cap (-1)
+#endif
 
     if (ep_cap <= 0) {
         return KERN_ERR_PARAM;
@@ -363,7 +367,9 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
 
     /* 订阅 kern.fault:客户端崩溃时按 task_id 清理它的 fd。 */
     if (ctx != NULL) {
+#if FAULT_ENDPOINT
         fault_ep_cap = sys_fault_subscribe();
+#endif
     }
 
     for (uint32_t round = 0;
@@ -374,6 +380,7 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
         if (err == KERN_ERR_TIMEOUT && max_requests == 0U) {
             err = KERN_OK;
             /* 超时间隙 poll kern.fault */
+#if FAULT_ENDPOINT
             if (ctx != NULL && fault_ep_cap > 0) {
                 uint8_t fbuf[KERN_EP_MSG_SIZE];
                 int ferr = sys_ep_recv(fault_ep_cap, fbuf, 0);
@@ -382,6 +389,7 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
                     (void)fs_store_close_client_fds(ctx, (int)fevt->task_id);
                 }
             }
+#endif
             continue;
         }
         if (err != KERN_OK) {

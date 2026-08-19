@@ -460,9 +460,12 @@ void supervisor_monitor_loop(void *arg) {
     supervisor_runtime_t runtime;
     supervisor_runtime_init(&runtime);
 
-    int ep = sys_fault_subscribe();
-    if (ep < 0) {
-        /* No fault endpoint — nothing to monitor. Sleep forever. */
+    /* H1 修复:fault ep cap 由 root bootstrap 直接铸入本任务 cspace
+     * (sys_fault_subscribe 拒绝用户任务)。本任务唯一的 endpoint cap
+     * 即 fault ep —— self_slot(EP, index 0) 发现它。 */
+    int ep = sys_cap_self_slot(CAP_OBJ_ENDPOINT, 0);
+    if (ep <= 0) {
+        /* 没拿到初始授权 — 无可监控对象,睡死等诊断 */
         while (1) {
             sys_task_delay(1000);
         }

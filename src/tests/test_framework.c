@@ -245,17 +245,32 @@ int test_get_module_count(void) {
     return (int)(size / sizeof(test_module_t));
 }
 
-void test_run_all_modules(void) {
+const char *test_tier_name(uint8_t tier) {
+    switch (tier) {
+        case TEST_TIER_K:   return "K";
+        case TEST_TIER_ABI: return "ABI";
+        case TEST_TIER_SYS: return "SYS";
+        default:            return "?";
+    }
+}
+
+/* 跑指定 tier 的全部模块,返回该层新增 fail 数 */
+int test_run_tier(uint8_t tier) {
     const test_module_t *module;
     int module_count = 0;
+    int fail_before = test_failed;
+    int pass_before = test_passed;
 
-    test_print("\r\nMy-RTOS Test Suite v2.0\r\n");
+    test_print("\r\n===== Tier ");
+    test_print(test_tier_name(tier));
+    test_print(" =====\r\n");
 
     for (module = &__test_modules_start;
          module < &__test_modules_end;
          module++) {
 
         if (module->name == NULL || module->func == NULL) continue;
+        if (module->tier != tier) continue;
 
         module_count++;
         current_module = module->name;
@@ -271,8 +286,75 @@ void test_run_all_modules(void) {
         test_print_module_result(module, &before, &after);
     }
 
-    test_print_num("\r\nModules: ", module_count);
+    test_print("[TIER ");
+    test_print(test_tier_name(tier));
+    test_print("] modules ");
+    uart_putdec(TEST_UART, (uint32_t)module_count);
+    test_print(" pass +");
+    uart_putdec(TEST_UART, (uint32_t)(test_passed - pass_before));
+    test_print(" fail +");
+    uart_putdec(TEST_UART, (uint32_t)(test_failed - fail_before));
+    test_print("\r\n");
+
+    return test_failed - fail_before;
+}
+
+int test_run_module_by_name(const char *name) {
+    const test_module_t *module;
+
+    if (name == NULL) return -1;
+
+    for (module = &__test_modules_start;
+         module < &__test_modules_end;
+         module++) {
+        if (module->name == NULL || module->func == NULL) continue;
+        if (strcmp(module->name, name) == 0) {
+            int fail_before = test_failed;
+            current_module = module->name;
+            test_print("[RUN] ");
+            test_print(module->name);
+            test_print("\r\n");
+            module->func();
+            test_print_num("fail +", test_failed - fail_before);
+            return test_failed - fail_before;
+        }
+    }
+    return -1;
+}
+
+void test_run_all_modules(void) {
+    test_print("\r\nMy-RTOS Test Suite v3.0 (tiered)\r\n");
+
+    (void)test_run_tier(TEST_TIER_K);
+    (void)test_run_tier(TEST_TIER_ABI);
+
     test_summary();
+}
+
+/*============================================================================
+ * ABI 层用户任务用例助手
+ *============================================================================*/
+
+void test_user_case(const char *name, void (*user_entry)(void *),
+                    int expected_retval, uint32_t timeout_ms) {
+    task_id_t tid = task_create_user("t_user_case", user_entry, NULL,
+                                     9, 1024);
+    TEST_ASSERT_NE(KERN_INVALID_ID, tid, "user case spawn");
+    if (tid == KERN_INVALID_ID) {
+        return;
+    }
+    (void)task_start(tid);
+    uintptr_t retval = 0;
+    kern_err_t err = task_join(tid, (void **)&retval, timeout_ms);
+    if (err != KERN_OK) {
+        test_fail(name);
+        test_print("  (join failed, err=");
+        test_print_num("", (int32_t)err);
+        test_print(")\r\n");
+        (void)task_delete(tid);
+        return;
+    }
+    TEST_ASSERT_EQ((int32_t)expected_retval, (int32_t)(intptr_t)retval, name);
 }
 
 /*============================================================================
@@ -302,14 +384,16 @@ static void test_runner_task(void *arg) {
     }
 #endif
 
-    test_run_all_modules();
+    /* K → ABI:内核不变量先行,syscall 契约随后(都在 init 启动前) */
+    test_print("\r\nMy-RTOS Test Suite v3.0 (tiered)\r\n");
+    (void)test_run_tier(TEST_TIER_K);
+    (void)test_run_tier(TEST_TIER_ABI);
 
 #if INIT_PROCESS && CAP_ENABLE
-    /* Phase 2 §2.3: after the suite passes (so init/supervisor never disturb
+    /* Phase 2 §2.3: after K+ABI pass (so init/supervisor never disturb
      * tests), launch the user-mode init process via the root bootstrap path.
-     * init registers restart recipes, spawns the supervisor, and exits. The
-     * shell still starts separately below — it is a privileged kernel task
-     * for now and cannot be a child of a user-mode init. */
+     * The shell still starts separately below — it is a privileged kernel
+     * task for now and cannot be a child of a user-mode init. */
     {
         extern void init_main(void *arg);
         task_id_t init_tid = KERN_INVALID_ID;
@@ -318,8 +402,17 @@ static void test_runner_task(void *arg) {
         if (err == KERN_OK && init_tid >= 0) {
             (void)root_bootstrap_start();
         }
+#if FAULT_ENDPOINT && SUPERVISOR
+        /* H1 修复:supervisor 由 root bootstrap 直接创建 + 铸 fault-ep cap */
+        (void)root_bootstrap_spawn_supervisor();
+#endif
     }
 #endif
+
+    /* SYS:启动健康断言 — init/supervisor 已运行,接线断裂在此暴露 */
+    (void)test_run_tier(TEST_TIER_SYS);
+
+    test_summary();
 
 #if SHELL_ENABLE
     shell_start();

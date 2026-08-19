@@ -65,31 +65,43 @@ int syscall_cont_commit(uint32_t timeout) {
         return (int)KERN_ERR_STATE;
     }
 
-    /* CAS ARMING→BLOCKED: 与 waker (complete/cancel) 竞争。
-     * 输掉 → waker 已记录 pending result (phase 已离开 ARMING),
-     * 直接返回它,不做 sched_remove_ready。 */
+    /* 顺序: 先完整进入不可运行态 (出队 + state=BLOCKED,临界区内),
+     * 最后才翻 phase。不变量: phase==BLOCKED ⟹ state==BLOCKED。
+     *
+     * 旧顺序 (先翻 phase 后写 state) 存在致命窗口: 跨核 waker 在两步
+     * 之间看到 phase==BLOCKED → complete 全套记账 → sched_wakeup 的
+     * state CAS 撞上 RUNNING → 静默失败 (实测 [CASFAIL] RUNNING=1);
+     * 随后任务自己写 state=BLOCKED 并出队 → 带已完成 continuation
+     * 阻塞进虚空,唤醒永久丢失 (mqueue/sem/event/channel 失败族根因)。
+     *
+     * 新顺序下窗口内 (state=BLOCKED, phase 仍 ARMING): waker 走
+     * ARMING-pending 路径 (不碰 state); 超时扫描器因 deadline 尚未
+     * 设置 (旧值恒 0) 而跳过 — 均安全。 */
+    uint32_t crit = hal_irq_save();
+    sched_remove_ready(current);
+    __atomic_store_n(&current->state, TASK_STATE_BLOCKED, __ATOMIC_RELEASE);
+    hal_irq_restore(crit);
+
     uint8_t expected = CONT_PHASE_ARMING;
     if (!CONT_PHASE_CAS(&current->cont, &expected, CONT_PHASE_BLOCKED)) {
-        /* 本轮未真正阻塞,清掉 ARMING 残留: active=1 滞留会让
-         * syscall_cont_wake 把后续线程式阻塞 (mutex/join) 误路由进
-         * complete → 唤醒丢失或往线程栈写 "R0"。 */
+        /* ARMING 窗口被 waker 记了 pending result (phase 已离开):
+         * 撤销阻塞恢复运行,直接返回它。 */
+        crit = hal_irq_save();
+        __atomic_store_n(&current->state, TASK_STATE_RUNNING,
+                         __ATOMIC_RELEASE);
+        hal_irq_restore(crit);
+        sched_add_ready(current);
         current->cont.active = 0;
         current->cont.op = BLOCK_REASON_NONE;
         current->cont.object = NULL;
         return (int)current->cont.result;
     }
 
-    /* 赢得 ARMING→BLOCKED。顺序必须是 deadline → 出队 → 置 BLOCKED:
-     * - state=BLOCKED 而仍在就绪队列的窗口内,任务可被本核 tick 或对核
-     *   steal 选中 (runq_get_highest/steal 不校验 state) → 同任务双跑;
-     * - deadline 先于 state,超时扫描器看到 BLOCKED 时 deadline 已就绪。
-     * 临界区压缩本核窗口;state 用 release 原子写,与扫描器的
-     * 普通读跨核配对。 */
-    uint32_t crit = hal_irq_save();
+    /* phase==BLOCKED 已确立,最后设 deadline (此后的 waker/扫描器
+     * 看到的 BLOCKED 任务必带有效 deadline;complete 会将其清零) */
+    crit = hal_irq_save();
     current->cont.deadline = (timeout > 0U) ? sched_timeout_deadline(timeout)
                                             : 0U;
-    sched_remove_ready(current);
-    __atomic_store_n(&current->state, TASK_STATE_BLOCKED, __ATOMIC_RELEASE);
     hal_irq_restore(crit);
 
     return KERN_SYSCALL_BLOCKED;

@@ -454,6 +454,41 @@ config TEST_MODULE_FAULT
       启用 Fault handler 测试模块。
       (crash_dump 结构、向量表验证)
 
+config TEST_MODULE_SYNC_SERVER
+    bool "Sync server tests"
+    depends on TEST_ENABLE && CAP_ENABLE
+    default y
+    help
+      启用 sync_server 用户态同步服务测试模块。
+
+config TEST_MODULE_INIT_ORCHESTRATE
+    bool "Init orchestration tests"
+    depends on TEST_ENABLE && CAP_ENABLE
+    default y
+    help
+      启用 init 编排测试模块。
+
+config TEST_MODULE_FS_STORE
+    bool "FS store tests"
+    depends on TEST_ENABLE && VFS_ENABLE && CAP_ENABLE
+    default y
+    help
+      启用 fs_store (用户态 FS 服务存储) 测试模块。
+
+config TEST_MODULE_FS_DEVFS
+    bool "FS devfs tests"
+    depends on TEST_ENABLE && VFS_ENABLE && CAP_ENABLE && DRIVER_ENABLE
+    default y
+    help
+      启用 devfs 测试模块。
+
+config TEST_MODULE_FS_FD_CLEANUP
+    bool "FS fd cleanup tests"
+    depends on TEST_ENABLE && VFS_ENABLE && CAP_ENABLE
+    default y
+    help
+      启用 fd 死亡清理 (fs_server kern.fault 订阅) 测试模块。
+
 config TEST_MODULE_VFS
     bool "VFS tests"
     depends on TEST_ENABLE && VFS_ENABLE

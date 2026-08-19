@@ -1496,4 +1496,20 @@ task_id_t endpoint_last_sender(ep_id_t ep_id) {
     return sender->id;
 }
 
+int endpoint_recv_has_waiter(ep_id_t ep_id, task_id_t task_id) {
+    uint32_t crit = irq_spin_lock(&ep_lock);
+    endpoint_t *ep = ep_get(ep_id);
+    int found = 0;
+    if (ep != NULL) {
+        for (tcb_t *t = ep->recv_waiters.head; t != NULL; t = t->wait_next) {
+            if (t->id == task_id) {
+                found = 1;
+                break;
+            }
+        }
+    }
+    irq_spin_unlock(&ep_lock, crit);
+    return found;
+}
+
 #endif /* IPC_ENDPOINT */

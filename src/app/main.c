@@ -38,6 +38,9 @@ int main(void) {
     if (err == KERN_OK && init_tid >= 0) {
         (void)root_bootstrap_start();
     }
+#if FAULT_ENDPOINT && SUPERVISOR
+    (void)root_bootstrap_spawn_supervisor();
+#endif
 #endif
 
     kern_start();

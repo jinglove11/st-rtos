@@ -122,14 +122,8 @@ void init_main(void *arg) {
         }
     }
 
-    /* ---- 3. 拉起 supervisor ---- */
-#if INIT_HAS_SUPERVISOR
-    int sup = sys_task_create("supervisor", supervisor_monitor_loop, NULL,
-                              SUPERVISOR_PRIORITY, SUPERVISOR_STACK);
-    if (sup >= 0) {
-        (void)sys_task_start(sup);
-    }
-#endif
+    /* ---- 3. supervisor 改由 root bootstrap 直接创建并铸 fault-ep cap ----
+     * (H1 修复,见 root_bootstrap_spawn_supervisor;init 不再负责拉起) */
 
     /* ---- init 常驻 ---- */
     while (1) {

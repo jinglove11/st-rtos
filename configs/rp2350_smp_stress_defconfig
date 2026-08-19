@@ -1,0 +1,196 @@
+#
+# My-RTOS Configuration — FULL preset
+#
+# Goal: every subsystem ENABLED that has a Kconfig entry. Used for:
+#   - Compile-testing the entire surface area in one shot
+#   - Demo / "look at everything this OS can do" image
+#   - Catching dead code paths that don't compile when their CONFIG is on
+#
+# Per the "全面优先,裁剪驱动" philosophy (MICROKERNEL_OS_ROADMAP.md §0):
+# every subsystem must EXIST even if downstream projects default-off. This
+# preset is the proof that they all compile.
+#
+# Apply with:
+#   cp configs/full_defconfig .config
+#   python3 scripts/menuconfig.py genconfig
+#   cmake --build build/rp2350-pico-sdk
+#
+# Expected footprint: ~300-800KB flash, ~64-128KB RAM (depending on Phase progress)
+# ============================================================================
+
+PROJECT_NAME="my-rtos"
+PROJECT_VERSION="1.0.0"
+
+# ---- Board ----
+CONFIG_BOARD_RP2350=y
+BOARD_NAME="rp2350"
+BOARD_DISPLAY_NAME="Raspberry Pi Pico 2 W"
+
+# ---- Kernel (generous) ----
+KERNEL_TICK_RATE=1000
+KERN_NAME="My-RTOS"
+KERN_VERSION_MAJOR=1
+KERN_VERSION_MINOR=0
+KERN_VERSION_PATCH=0
+KERN_TASK_NAME_LEN=32
+KERNEL_MAX_TASKS=64
+KERNEL_MAX_PRIORITIES=32
+KERNEL_TASK_STACK_SIZE=2048
+KERNEL_IDLE_STACK_SIZE=512
+KERNEL_IDLE_PRIORITY=31
+KERN_DEFAULT_TIME_SLICE=5
+KERN_TASK_STATS=y
+TRACE_ENABLE=y
+TRACE_BUFFER_SIZE=1024
+# KERNEL_WATCHDOG is not set  # enable when hardware watchdog driver lands
+KERNEL_IDLE_SLEEP=y
+
+# ---- Memory (large heap) ----
+MEM_DYNAMIC=y
+MEM_HEAP_SIZE=16384
+MEM_POOL_COUNT=8
+
+# ---- IPC (full) ----
+IPC_SEMAPHORE=y
+IPC_SEMAPHORE_MAX=16
+IPC_MUTEX=y
+IPC_MUTEX_MAX=16
+MUTEX_DEADLOCK_DETECT=y
+IPC_MQUEUE=y
+IPC_MQUEUE_MAX=8
+IPC_EVENT=y
+IPC_EVENT_MAX=8
+IPC_ENDPOINT=y
+IPC_ENDPOINT_MAX=32
+IPC_EP_MSG_SIZE=128
+IPC_EP_MAX_PENDING=8
+IPC_CHANNEL=y
+IPC_CHANNEL_MAX=8
+IPC_CH_MSG_SIZE=128
+
+# ---- Timer ----
+TIMER_ENABLE=y
+TIMER_MAX=32
+TIMER_CMD_QUEUE_SIZE=16
+TIMER_TASK_PRIORITY=1
+TIMER_TASK_STACK_SIZE=1024
+TIMER_NAME_LEN=32
+
+# ---- VFS ----
+# VFS_ENABLE is not set
+VFS_MAX_INODES=32
+VFS_MAX_FDS=16
+
+# ---- Microkernel ----
+MPU_ENABLE=y
+SYSCALL_ENABLE=y
+SYSCALL_TABLE_SIZE=128
+MPU_REGION_COUNT=8
+
+# ---- Interrupt ----
+IRQ_ENABLE=y
+IRQ_MAX_USER=32
+IRQ_DEFAULT_PRIORITY=8
+IRQ_BH_ENABLE=y
+IRQ_BH_MAX=16
+IRQ_THREADED_ENABLE=y
+IRQ_THREADED_MAX=8
+IRQ_THREADED_STACK_SIZE=768
+
+# ---- Capability (large cap table) ----
+CAP_ENABLE=y
+CAP_MAX_COUNT=128
+KERN_TASK_CAP_SLOTS=64
+
+# ---- Fault ----
+FAULT_ENABLE=y
+FAULT_CRASH_DUMP=y
+
+# ---- Shell ----
+SHELL_ENABLE=y
+SHELL_STACK_SIZE=4096
+SHELL_PRIORITY=5
+
+# ---- Driver ----
+DRIVER_ENABLE=y
+DRIVER_MAX_DEVICES=16
+
+# ---- Debug (verbose) ----
+DEBUG_ENABLE=y
+DEBUG_LEVEL=3
+DEBUG_STACK_CHECK=y
+ASSERT_ENABLE=y
+
+# ---- Test (full suite) ----
+TEST_ENABLE=y
+TEST_MODULE_SCHEDULER=y
+TEST_MODULE_EXAMPLE=n
+TEST_MODULE_FAULT=y
+TEST_MODULE_SYNC_SERVER=y
+TEST_MODULE_INIT_ORCHESTRATE=y
+TEST_MODULE_CAP=y
+# TEST_MODULE_VFS is not set
+TEST_MODULE_IPC_UPGRADE=y
+TEST_MODULE_STATS=y
+TEST_MODULE_BLOCK=y
+TEST_MODULE_NOTIFICATION=y
+TEST_MODULE_MMIO=y
+TEST_MODULE_GPIO_DRIVER=y
+TEST_MODULE_RT_SCHED=y
+ELF_LOADER=y
+TEST_MODULE_ELF=y
+TEST_MODULE_SMP=y
+
+# ============================================================================
+# Phase 2-9 subsystems — opt-in EVERYWHERE dependencies allow
+# These will mostly be no-ops until their phase lands actual code, but
+# enabling them now lets CI catch compile breakage early.
+# ============================================================================
+
+# ---- Phase 2: fault-tolerant supervisor ----
+FAULT_ENDPOINT=y
+SUPERVISOR=y
+INIT_PROCESS=y
+CAP_RESTART_SUBSET=y
+
+# ---- Phase 3: user-mode drivers + block storage ----
+DRIVER_GPIO_SERVER=y
+DRIVER_I2C_SERVER=y
+DRIVER_SPI=y
+BLOCK_DEVICE=y
+DRIVER_RTC=y
+
+# ---- Phase 4: persistent FS ----
+FS_PERSISTENT=y
+FS_LITTLEFS=y
+
+# ---- Phase 5: ELF loader + user-mode libc ----
+USER_LIBC=y
+ELF_LOADER=y
+
+# ---- Phase 6: SMP (will not boot until spinlock layer lands) ----
+SMP=y
+SMP_MAX_CPUS=2
+SMP_WORK_STEALING=y
+SMP_STRESS_ITERATIONS=1000000
+CAP_RCU=y
+
+# ---- Phase 7: networking ----
+DRIVER_CYW43=y
+NET=y
+NET_DHCP=y
+NET_DNS=y
+MBEDTLS=y
+
+# ---- Phase 8: security + observability ----
+SECURE_BOOT=y
+PANIC_LOG=y
+PROFILER=y
+OTA=y
+
+# ---- Phase 9: PM + RT + dynamic linking + formal verification + framebuffer ----
+PM=y
+RT_SCHED=y
+DYNAMIC_LINKING=y
+FV=y
+FB=y

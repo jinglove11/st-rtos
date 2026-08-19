@@ -4,6 +4,9 @@
  */
 
 #include "shell.h"
+#if TEST_ENABLE
+#include "test_framework.h"
+#endif
 
 #if SHELL_ENABLE
 
@@ -4423,6 +4426,48 @@ static void cmd_svc(int argc, char **argv) {
 
 #endif /* DRIVER_ENABLE || CAP_ENABLE */
 
+
+#if TEST_ENABLE
+/*============================================================================
+ * test — 运行时重跑测试层/模块(定位"改内核一片红"的二分利器)
+ *
+ * 用法: test <k|abi|sys|all|模块名>
+ * 注意:重跑发生在系统已运行 init/supervisor 之后;fault 类用例可能触发
+ * supervisor 重启逻辑,属预期交互。
+ *============================================================================*/
+static void cmd_test(int argc, char **argv) {
+    if (argc < 2) {
+        sh_puts("usage: test <k|abi|sys|all|module_name>\r\n");
+        return;
+    }
+
+    int rc;
+    if (strcmp(argv[1], "k") == 0) {
+        rc = test_run_tier(TEST_TIER_K);
+    } else if (strcmp(argv[1], "abi") == 0) {
+        rc = test_run_tier(TEST_TIER_ABI);
+    } else if (strcmp(argv[1], "sys") == 0) {
+        rc = test_run_tier(TEST_TIER_SYS);
+    } else if (strcmp(argv[1], "all") == 0) {
+        rc = test_run_tier(TEST_TIER_K) + test_run_tier(TEST_TIER_ABI) +
+             test_run_tier(TEST_TIER_SYS);
+    } else {
+        rc = test_run_module_by_name(argv[1]);
+        if (rc < 0) {
+            sh_puts("test: module '");
+            sh_puts(argv[1]);
+            sh_puts("' not found\r\n");
+            return;
+        }
+    }
+    sh_puts("test: done, new failures: ");
+    sh_putdec((uint32_t)rc);
+    sh_puts(" (total failed: ");
+    sh_putdec((uint32_t)test_get_failed());
+    sh_puts(")\r\n");
+}
+#endif /* TEST_ENABLE */
+
 /*============================================================================
  * 命令表
  *============================================================================*/
@@ -4459,6 +4504,9 @@ const shell_cmd_t cmd_table[] = {
     { "hexdump",  "<addr> <len> Hex dump",      cmd_hexdump  },
     { "version",  "Kernel version",             cmd_version  },
     { "reset",    "System reset",               cmd_reset    },
+#if TEST_ENABLE
+    { "test",     "<k|abi|sys|all|name> Re-run", cmd_test     },
+#endif
 };
 
 const int cmd_count = (int)(sizeof(cmd_table) / sizeof(cmd_table[0]));

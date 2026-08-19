@@ -2,7 +2,7 @@
 
 Auto-generated from [`Kconfig`](../../Kconfig) by [`scripts/gen_kconfig_docs.py`](../../scripts/gen_kconfig_docs.py).
 
-**131 options** across **23** menu groups.
+**136 options** across **23** menu groups.
 
 To refresh this page after editing Kconfig:
 
@@ -222,7 +222,11 @@ python3 scripts/gen_kconfig_docs.py
 | [`TEST_MODULE_ELF`](TEST_MODULE_ELF.md) | `bool` | `y` | ELF loader tests |
 | [`TEST_MODULE_EXAMPLE`](TEST_MODULE_EXAMPLE.md) | `bool` | `n` | Example tests |
 | [`TEST_MODULE_FAULT`](TEST_MODULE_FAULT.md) | `bool` | `y` | Fault handler tests |
+| [`TEST_MODULE_FS_DEVFS`](TEST_MODULE_FS_DEVFS.md) | `bool` | `y` | FS devfs tests |
+| [`TEST_MODULE_FS_FD_CLEANUP`](TEST_MODULE_FS_FD_CLEANUP.md) | `bool` | `y` | FS fd cleanup tests |
+| [`TEST_MODULE_FS_STORE`](TEST_MODULE_FS_STORE.md) | `bool` | `y` | FS store tests |
 | [`TEST_MODULE_GPIO_DRIVER`](TEST_MODULE_GPIO_DRIVER.md) | `bool` | `y` | GPIO driver (user-mode MMIO) tests |
+| [`TEST_MODULE_INIT_ORCHESTRATE`](TEST_MODULE_INIT_ORCHESTRATE.md) | `bool` | `y` | Init orchestration tests |
 | [`TEST_MODULE_IPC_UPGRADE`](TEST_MODULE_IPC_UPGRADE.md) | `bool` | `y` | IPC upgrade tests |
 | [`TEST_MODULE_IRQ`](TEST_MODULE_IRQ.md) | `bool` | `y` | Interrupt management tests |
 | [`TEST_MODULE_MMIO`](TEST_MODULE_MMIO.md) | `bool` | `y` | MMIO mapping tests |
@@ -232,6 +236,7 @@ python3 scripts/gen_kconfig_docs.py
 | [`TEST_MODULE_SCHEDULER`](TEST_MODULE_SCHEDULER.md) | `bool` | `y` | Scheduler tests |
 | [`TEST_MODULE_SMP`](TEST_MODULE_SMP.md) | `bool` | `y` | SMP dual-core tests |
 | [`TEST_MODULE_STATS`](TEST_MODULE_STATS.md) | `bool` | `y` | CPU statistics tests |
+| [`TEST_MODULE_SYNC_SERVER`](TEST_MODULE_SYNC_SERVER.md) | `bool` | `y` | Sync server tests |
 | [`TEST_MODULE_SYSCALL`](TEST_MODULE_SYSCALL.md) | `bool` | `y` | Syscall interface tests |
 | [`TEST_MODULE_TIMER`](TEST_MODULE_TIMER.md) | `bool` | `y` | Timer tests |
 | [`TEST_MODULE_VFS`](TEST_MODULE_VFS.md) | `bool` | `y` | VFS tests |
