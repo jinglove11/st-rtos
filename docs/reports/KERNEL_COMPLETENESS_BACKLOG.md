@@ -145,7 +145,18 @@
     #:lower16:/:upper16:)+ Test 4 五轮加载-执行-回收。板上修复三处:
     THM 半字索引(uint32_t[1] 误取下一字)、TRANSFER 权、exit R1 转发。
     验证:板上 3387/3387(elf 47/47,5 轮零 fault 零 cap 泄漏)+ CI 全矩阵绿。
-- [ ] P1-7 验收:两个用户"进程"同名全局变量互不可见 + ELF 万次加载无泄漏
+- [x] P1-7 验收:两个用户"进程"同名全局变量互不可见 + ELF 万次加载无泄漏
+  - 实现(2026-08-20):rel app 增隔离自检(iso_counter:双实例并发各 50 轮
+    +2/yield,隔离正确终值恒 1100,共享则趋 1200 → verdict bit64);
+    test_elf Test 5(双实例并发 join,双双 verdict 0)+ Test 6(万次
+    load/start/join/delete,cap 池 128→128 每 2500 轮抽检 + 终检)。
+    **soak 挖出并修复 M3 遗留微窗死锁**:cap_deferred_poll 的
+    "spin_trylock 成功 → owner_cpu 发布"窗口内任务被抢占时,后来者见
+    "锁被占 + owner=NONE" 永久自旋(UP 持有者永不回升,SysTick 饿死);
+    修复 = trylock 与 owner 发布同置关中断窗口(本核再入必为真嵌套,
+    他核持有才忙等)。零扰动 RAM 探针(openocd 不挂起读 tick/TCB/栈)
+    定罪。验证:工作配置 3395/3395 + SMP 3430/3430 + CI 全矩阵 7/7,
+    soak 万次零泄漏。
 
 ## P2 边界收敛批
 

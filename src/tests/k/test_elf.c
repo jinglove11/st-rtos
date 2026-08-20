@@ -228,6 +228,91 @@ static void test_elf_relocations(void) {
 #endif /* TEST_ELF_REL_PATH */
 
 /*============================================================================
+ * Test 5 (P1-7): 双实例同名全局互不可见(进程隔离验收)
+ *============================================================================*/
+
+#ifdef TEST_ELF_REL_PATH
+static void test_elf_process_isolation(void) {
+    test_section("Test 5: two instances, same globals, isolated");
+
+    size_t size = (size_t)(__test_elf_rel_end - __test_elf_rel_start);
+    task_id_t ta = KERN_INVALID_ID, tb = KERN_INVALID_ID;
+
+    TEST_ASSERT_EQ(KERN_OK, (int)elf_load(__test_elf_rel_start, size,
+                                          "iso_a", 8, &ta),
+                   "instance A loaded");
+    TEST_ASSERT_EQ(KERN_OK, (int)elf_load(__test_elf_rel_start, size,
+                                          "iso_b", 8, &tb),
+                   "instance B loaded");
+    if (ta < 0 || tb < 0) goto out;
+
+    (void)task_start(ta);
+    (void)task_start(tb);
+
+    uintptr_t ra = 0, rb = 0;
+    TEST_ASSERT_EQ(KERN_OK,
+                   (int)task_join(ta, (void **)&ra, 30000U),
+                   "A joined");
+    TEST_ASSERT_EQ(KERN_OK,
+                   (int)task_join(tb, (void **)&rb, 30000U),
+                   "B joined");
+    /* verdict 0: 每实例 iso_counter 终值 1100 —— 各自独立数据帧。
+     * 若共享(回归): 终值 1200 → verdict bit64。 */
+    TEST_ASSERT_EQ(0, (int)ra, "instance A isolated (own data frame)");
+    TEST_ASSERT_EQ(0, (int)rb, "instance B isolated (own data frame)");
+
+out:
+    if (ta >= 0) (void)task_delete(ta);
+    if (tb >= 0) (void)task_delete(tb);
+}
+
+/*============================================================================
+ * Test 6 (P1-7): 万次加载无泄漏(backing/帧/cap/任务槽 soak)
+ *============================================================================*/
+
+#ifndef ELF_SOAK_ROUNDS
+#define ELF_SOAK_ROUNDS 10000
+#endif
+
+static void test_elf_load_soak(void) {
+    test_section("Test 6: 10k load/exit rounds, zero leak");
+
+    size_t size = (size_t)(__test_elf_rel_end - __test_elf_rel_start);
+    uint16_t caps0 = cap_free_count();
+
+    for (int round = 0; round < ELF_SOAK_ROUNDS; round++) {
+        task_id_t tid = KERN_INVALID_ID;
+        kern_err_t e = elf_load(__test_elf_rel_start, size,
+                                "soak", 9, &tid);
+        if (e != KERN_OK || tid < 0) {
+            test_print_num("[soak] load failed at round ", round);
+            test_fail("soak load");
+            return;
+        }
+        (void)task_start(tid);
+        uintptr_t rv = 0;
+        e = task_join(tid, (void **)&rv, 20000U);
+        if (e != KERN_OK || (int)rv != 0) {
+            test_print_num("[soak] run failed at round ", round);
+            test_fail("soak run");
+            return;
+        }
+        (void)task_delete(tid);
+
+        if ((round % 2500) == 2499 &&
+            cap_free_count() != caps0) {
+            test_print_num("[soak] cap leak detected at round ", round);
+            test_fail("soak cap pool");
+            return;
+        }
+    }
+    TEST_ASSERT_EQ((int)caps0, (int)cap_free_count(),
+                   "10k rounds: cap pool fully reclaimed");
+    test_pass("10k load/exit soak clean");
+}
+#endif /* TEST_ELF_REL_PATH */
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -237,6 +322,8 @@ static void test_elf_module(void) {
     test_elf_segment_validation();
 #ifdef TEST_ELF_REL_PATH
     test_elf_relocations();
+    test_elf_process_isolation();
+    test_elf_load_soak();
 #endif
 }
 

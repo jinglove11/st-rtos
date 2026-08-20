@@ -14,7 +14,17 @@
  * passed (relocated pointer/movw address/initial data/zero bss).
  */
 
+/* freestanding SVC 封装: SYSCALL_TASK_YIELD = 0 */
+static inline int sys_task_yield(void) {
+    register int r0 __asm("r0") = 0;
+    __asm volatile("svc #1" : "+r"(r0) :: "memory");
+    return r0;
+}
+
 volatile int data_target = 42;
+/* P1-7: 同名全局隔离自检 —— 双实例并发运行,各自 +100(50 轮 +2/yield)。
+ * 隔离正确: 终值恒 1100;若实例共享数据帧(回归),终值趋近 1200。 */
+static volatile int iso_counter = 1000;
 static volatile int bss_check;               /* .bss: loader must zero it */
 static int * volatile abs_ptr = &data_target; /* 对象 volatile:禁止折叠 → R_ARM_ABS32(.rel.data) */
 
@@ -51,7 +61,13 @@ int _start(void *arg) {
     if (*movw_result != 42) {
         verdict |= 32;
     }
-    /* 可写性在此间接证明:abs_ptr 解引用写回(不做,保持只读判定;
-     * RW 映射正确性由 MPU 属性断言在白盒侧覆盖)。 */
+    /* P1-7: 隔离自检 —— 与可能并存的兄弟实例交错推进各自计数器 */
+    for (int i = 0; i < 50; i++) {
+        iso_counter += 2;
+        (void)sys_task_yield();
+    }
+    if (iso_counter != 1100) {
+        verdict |= 64;           /* 数据帧被共享(同名全局互见了) */
+    }
     return verdict;
 }

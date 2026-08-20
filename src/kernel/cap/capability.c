@@ -156,10 +156,20 @@ void cap_deferred_poll(void) {
      * accounting).  Polling is only entered with no ranked lock held, making
      * this cross-core serialization safe. */
     for (;;) {
+        /* 取锁与 owner 发布必须同为不可抢占窗口:若在两步之间被抢占,
+         * 后来者看到"锁被占 + owner=NONE"会判定为他核持有而永久自旋
+         * (UP 上持有者恰是被抢占的低优先级任务,永不回升 → SysTick
+         * 饿死,ELF 万次加载/退出 soak 实测命中此微窗)。
+         * 窗口关闭后:本核再入只能是排空者自身的嵌套(owner==cpu,
+         * 早退),他核持有才走 yield 忙等(持有者在自己核上必然推进)。 */
+        uint32_t acq_crit = hal_irq_save();
         if (spin_trylock(&cap_deferred_flush_lock) == 0) {
             __atomic_store_n(&cap_deferred_owner_cpu, cpu, __ATOMIC_RELEASE);
+            hal_irq_restore(acq_crit);
             break;
         }
+        hal_irq_restore(acq_crit);
+
         if (__atomic_load_n(&cap_deferred_owner_cpu, __ATOMIC_ACQUIRE) == cpu) {
             return;
         }
