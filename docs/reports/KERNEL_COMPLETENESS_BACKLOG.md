@@ -21,7 +21,9 @@
 - [x] P0-3 (C8) sync 四族用户 syscall 取舍评估落文档(结论可以是"保留",但要写清 why)
   - 结论:短期保留(PI/死锁检测价值真实 + sync_server 阻塞锁未完成),中期按 P2-4 分族降级;
     三个降级触发条件见 docs/design/SYNC_SYSCALL_RETENTION.md §4
-- [ ] P0-4 (D1) CMake 弃用 GLOB_RECURSE,改显式 source manifest(对齐 Makefile)
+- [x] P0-4 (D1) CMake 弃用 GLOB_RECURSE,改显式 source manifest(对齐 Makefile)
+  - 实现:三处 GLOB(GLOB_RECURSE ×1 + GLOB ×4)全部替换为显式 set() 清单
+    (kernel 36 / user 13 / tests 44 文件);新文件需手动登记。双板构建绿(2026-08-20)
 - [ ] P0-5 (D2) 补齐 test/dev/release 三 profile(dev = 无测试有 shell 的开发镜像)
 - [ ] P0-6 (C7) 清理 10 个 sys_nosys VFS 死槽(保留 ABI 编号,注释明确 reserved)
 - [ ] P0-7 (D5) kernel_config.h 移出 git 跟踪,改为纯生成物(.gitignore + 构建依赖修正)

@@ -20,31 +20,114 @@ project(my_rtos_pico2w C CXX ASM)
 pico_sdk_init()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-file(GLOB_RECURSE MYRTOS_KERNEL_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/*.c")
-file(GLOB_RECURSE MYRTOS_USER_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/src/user/*.c")
+# P0-4(D1): 显式 source manifest(替换 GLOB_RECURSE;新文件需手动登记)
+set(MYRTOS_KERNEL_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/cap/cap_subset.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/cap/capability.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/cap/factory.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/core/lockdep.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/core/scheduler.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/core/smp.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/dev/device.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/fault/fault.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/fault/fault_endpoint.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/fault/panic_log.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/channel.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/endpoint.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/event.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/ipc_transfer.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/mqueue.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/mutex.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/semaphore.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/ipc/wait_queue.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/irq/bh.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/irq/irq.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/kernel.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/lib/kstring.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/loader/elf_loader.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/loader/test_elf_blob.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/mem/mem.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/mem/mempool.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/mpu/mpu.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/root_bootstrap.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/stats/stats.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/syscall/continuation.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/syscall/syscall.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/system_init.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/task/task.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/timer/timer.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/trace/trace.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/kernel/usercopy/usercopy.c"
+)
+
 # test_elf_app.c is compiled separately as a freestanding ELF (see custom
 # command below), NOT linked into the kernel image.
-list(REMOVE_ITEM MYRTOS_USER_SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.c")
+# 用户态服务与应用源(显式清单)
+set(MYRTOS_USER_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/alloc/allocator_server.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/apps/crashy_app.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/drivers/driver_client.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/drivers/driver_registry.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/drivers/driver_runtime.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/drivers/uart_server.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/fs/fs_runtime.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/fs/fs_server.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/fs/fs_store.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/init/init.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/nameserver/nameserver.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/supervisor/supervisor.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/user/sync/sync_server.c"
+)
+
 # Tests are tiered: k/ (kernel invariants), abi/ (syscall contract),
 # sys/ (boot health). See docs/TEST_FRAMEWORK.md.
-file(GLOB MYRTOS_TEST_FRAMEWORK CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/src/tests/*.c")
-file(GLOB MYRTOS_TEST_K_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/*.c")
-file(GLOB MYRTOS_TEST_ABI_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/*.c")
-file(GLOB MYRTOS_TEST_SYS_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/src/tests/sys/*.c")
-list(REMOVE_ITEM MYRTOS_TEST_FRAMEWORK
-    "${CMAKE_CURRENT_LIST_DIR}/src/tests/test_example.c")
+# 测试源(框架 + 三层,显式清单)
 set(MYRTOS_TEST_SOURCES
-    ${MYRTOS_TEST_FRAMEWORK}
-    ${MYRTOS_TEST_K_SOURCES}
-    ${MYRTOS_TEST_ABI_SOURCES}
-    ${MYRTOS_TEST_SYS_SOURCES})
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/test_framework.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_allocator.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_block.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_capability.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_deadlock.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_diag.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_driver.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_elf.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_factory.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_fault.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_fs_devfs.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_fs_fd_cleanup.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_fs_store.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_gpio_driver.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_init_orchestrate.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_ipc_upgrade.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_irq.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_mem.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_mmio.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_rt_sched.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_scheduler.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_service_model.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_shell.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_smp.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_stats.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_supervisor_monitor.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_svc_runtime.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_sync_server.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_syscall.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_task.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_timer.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_trace.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_vfs.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_watchdog.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_abi.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_factory_user.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_fault_user.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_fuzz.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_irq_user.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_mpu.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_notification.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_syscall_user.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_usercopy.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/sys/test_boot_health.c"
+)
 
 set(MYRTOS_SOURCES
     ${MYRTOS_KERNEL_SOURCES}
