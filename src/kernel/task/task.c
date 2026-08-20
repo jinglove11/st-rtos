@@ -413,6 +413,11 @@ static void task_cleanup_resources(tcb_t *tcb) {
     kshm_unmap_all_for_task(tcb);
     kmmio_unmap_all_for_task(tcb);
 #endif
+#if MPU_ENABLE
+    /* P1-2: 归还 address_space(在 kshm/kmmio unmap 之后 —— 它们仍要
+     * 经 aspace 清区)。幂等:NULL 直接返回。 */
+    mpu_aspace_release_task(tcb);
+#endif
 
 #if CAP_ENABLE
     root_bootstrap_cleanup_task(tcb);
@@ -1467,6 +1472,14 @@ task_id_t task_create_user(const char   *name,
 #endif
 
 #if MPU_ENABLE
+    /* P1-2: mapping policy 移入独立 address_space 对象(池化,1:1)。
+     * 池耗尽走正式 delete 回收刚建的任务槽(含 join ticket),不裸 return。 */
+    tcb->aspace = mpu_aspace_acquire();
+    if (tcb->aspace == NULL) {
+        (void)task_delete(id);
+        return KERN_INVALID_ID;
+    }
+
     /*
      * PSPLIM 装载用户栈下界。PendSV/SVC context-in 时(msr psplim, r2)生效,
      * 用户任务 SP 跌破 stack_base 即触发 MemManage fault — 比 MPU 守卫区
@@ -1477,8 +1490,8 @@ task_id_t task_create_user(const char   *name,
     /* MPU Region 0: Flash 代码段 (用户 RO+Execute) */
     mpu_region_encode(0, BOARD_FLASH_BASE, BOARD_FLASH_SIZE,
                       RASR_ENABLE | AP_PRW_URO | ATTR_NORMAL_WBWA,
-                      &tcb->mpu_regions[0][0],
-                      &tcb->mpu_regions[0][1]);
+                      &tcb->aspace->regions[0][0],
+                      &tcb->aspace->regions[0][1]);
 
     /*
      * Region 1 intentionally remains disabled.
@@ -1488,20 +1501,20 @@ task_id_t task_create_user(const char   *name,
      * globals. P0 tightens the boundary to Flash RO + current task stack RW.
      * Future shared/user data buffers should be added as explicit regions.
      */
-    tcb->mpu_regions[1][0] = 0;
-    tcb->mpu_regions[1][1] = 0;
+    tcb->aspace->regions[1][0] = 0;
+    tcb->aspace->regions[1][1] = 0;
 
     /* MPU Region 2: 用户栈 (RW + XN) — PSPLIM 兜底下界,无需缩 32 字节做守卫 */
     uint32_t stack_base = (uint32_t)(uintptr_t)tcb->stack_base;
     mpu_region_encode(2, stack_base, tcb->stack_size,
                       AP_FULL | ATTR_NORMAL_WBWA | XN_ENABLE,
-                      &tcb->mpu_regions[2][0],
-                      &tcb->mpu_regions[2][1]);
+                      &tcb->aspace->regions[2][0],
+                      &tcb->aspace->regions[2][1]);
 
     /* MPU Region 3-7: 禁用,留给 kshm 等运行时映射 */
     for (int i = 3; i < MPU_REGION_COUNT; i++) {
-        tcb->mpu_regions[i][0] = 0;
-        tcb->mpu_regions[i][1] = 0;
+        tcb->aspace->regions[i][0] = 0;
+        tcb->aspace->regions[i][1] = 0;
     }
 #endif
 

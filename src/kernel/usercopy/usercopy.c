@@ -82,9 +82,12 @@ static int user_range_allowed_by_mpu(const void *ptr, uint32_t len,
         return 0;
     }
 
+    if (cur->aspace == NULL) {
+        return 0;
+    }
     for (uint32_t i = 0; i < USERCOPY_MPU_REGION_MAX; i++) {
-        uint32_t rbar = cur->mpu_regions[i][0];
-        uint32_t rasr = cur->mpu_regions[i][1];
+        uint32_t rbar = cur->aspace->regions[i][0];
+        uint32_t rasr = cur->aspace->regions[i][1];
         if ((rasr & RASR_ENABLE) == 0) {
             continue;
         }

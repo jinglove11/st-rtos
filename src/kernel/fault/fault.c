@@ -153,8 +153,10 @@ void fault_decode_mmfsr(uint32_t cfsr, uint32_t mmfar) {
 #if MPU_ENABLE
     int hit = 0;
     for (uint32_t i = 0; i < MPU_REGION_COUNT; i++) {
-        uint32_t rbar = current->mpu_regions[i][0];
-        uint32_t rlar = current->mpu_regions[i][1];
+        uint32_t rbar = current->aspace != NULL
+                            ? current->aspace->regions[i][0] : 0U;
+        uint32_t rlar = current->aspace != NULL
+                            ? current->aspace->regions[i][1] : 0U;
         uintptr_t base;
         uint32_t  size;
         if (!mpu_region_get_bounds(rbar, rlar, &base, &size)) {

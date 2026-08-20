@@ -263,7 +263,10 @@ typedef struct tcb {
     uint8_t     sched_policy;         // SCHED_NORMAL / SCHED_FIFO / SCHED_RR
     uint8_t     _pad1[2];             // 4 字节对齐
 #if MPU_ENABLE
-    uint32_t    mpu_regions[8][2];   // MPU region [RBAR, RASR/RLAR] x 8
+    /* P1-2: mapping policy 移出 TCB —— 任务指向独立的 address_space 对象
+     * (mpu.h 定义,mpu.c 池化)。内核任务为 NULL(上下文切换清全部区)。
+     * P1-3 动态区分配器与 P1-4 私有 data/heap 域在此对象之上生长。 */
+    struct address_space *aspace;
 #if CAP_ENABLE
     shm_mapping_t shm_maps[TASK_SHM_MAP_MAX];
 #endif

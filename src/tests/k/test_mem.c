@@ -311,9 +311,9 @@ static void test_kshm_map_to_task(void) {
     TEST_ASSERT(mapped_region >= 3 && mapped_region < 8,
                 "shm map uses dynamic MPU region");
     if (mapped_slot >= 0) {
-        uint32_t rasr = tcb->mpu_regions[mapped_region][1];
+        uint32_t rasr = tcb->aspace->regions[mapped_region][1];
         TEST_ASSERT((rasr & RASR_ENABLE) != 0, "shm MPU region enabled");
-        uint32_t rbar = tcb->mpu_regions[mapped_region][0];
+        uint32_t rbar = tcb->aspace->regions[mapped_region][0];
         TEST_ASSERT(mpu_region_allows_read(rbar, rasr),
                     "read-only shm map allows user read access");
         TEST_ASSERT(!mpu_region_allows_write(rbar, rasr),
@@ -328,7 +328,7 @@ static void test_kshm_map_to_task(void) {
     err = kshm_unmap_from_task(tcb, task_cap);
     TEST_ASSERT_EQ(KERN_OK, err, "shm unmap OK");
     if (mapped_slot >= 0) {
-        TEST_ASSERT((tcb->mpu_regions[mapped_region][1] & RASR_ENABLE) == 0,
+        TEST_ASSERT((tcb->aspace->regions[mapped_region][1] & RASR_ENABLE) == 0,
                     "shm MPU region disabled after unmap");
         TEST_ASSERT(tcb->shm_maps[mapped_slot].in_use == 0,
                     "shm mapping metadata cleared");
@@ -348,8 +348,8 @@ static void test_kshm_map_to_task(void) {
     }
     TEST_ASSERT(mapped_slot >= 0, "read-write map metadata recorded");
     if (mapped_slot >= 0) {
-        uint32_t rbar = tcb->mpu_regions[mapped_region][0];
-        uint32_t rasr = tcb->mpu_regions[mapped_region][1];
+        uint32_t rbar = tcb->aspace->regions[mapped_region][0];
+        uint32_t rasr = tcb->aspace->regions[mapped_region][1];
         TEST_ASSERT(mpu_region_allows_write(rbar, rasr),
                     "read-write shm map uses user write access");
     }
@@ -414,7 +414,7 @@ static void test_kshm_revoke_unmaps_task(void) {
             }
         }
         TEST_ASSERT(still_mapped == 0, "revoke clears task shm mapping");
-        TEST_ASSERT((tcb->mpu_regions[mapped_region][1] & RASR_ENABLE) == 0,
+        TEST_ASSERT((tcb->aspace->regions[mapped_region][1] & RASR_ENABLE) == 0,
                     "revoke disables mapped MPU region");
     }
 
@@ -483,7 +483,7 @@ static void test_kframe_revoke_unmaps_task(void) {
         }
         TEST_ASSERT_EQ(0, still_mapped,
                        "Frame revoke clears task mapping");
-        TEST_ASSERT((tcb->mpu_regions[mapped_region][1] & RASR_ENABLE) == 0U,
+        TEST_ASSERT((tcb->aspace->regions[mapped_region][1] & RASR_ENABLE) == 0U,
                     "Frame revoke disables mapped MPU region");
     }
 

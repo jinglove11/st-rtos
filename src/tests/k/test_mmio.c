@@ -42,7 +42,7 @@ static void mmio_scratch_task(void *arg) {
 static int count_enabled_regions(tcb_t *tcb) {
     int n = 0;
     for (int r = 3; r < 8; r++) {
-        if (tcb->mpu_regions[r][1] & RASR_ENABLE) n++;
+        if (tcb->aspace->regions[r][1] & RASR_ENABLE) n++;
     }
     return n;
 }

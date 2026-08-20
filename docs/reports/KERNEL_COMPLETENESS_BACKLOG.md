@@ -83,7 +83,19 @@
     signal 唤醒(用户内存 copyout)、用户→用户跨任务 signal(字=signaler 徽章)。
     验证:双板 + CI 全矩阵 6/6 绿(2026-08-20);板上回归待维护者。irq/timer
     消费者接入归 P2-2/P2-3。
-- [ ] P1-2 (C2) `mpu_domain_t`/`address_space_t` 从 TCB 分离 mapping policy
+- [~] P1-2 (C2) `mpu_domain_t`/`address_space_t` 从 TCB 分离 mapping policy
+  - slice 1(2026-08-20):行为保持重构。新增 `address_space_t`(regions[8][2],
+    mpu.h)+ KERNEL_MAX_TASKS 池(mpu_aspace_acquire/release_task);TCB 的内嵌
+    `mpu_regions[8][2]` 改为 `struct address_space *aspace` 指针(内核任务 NULL,
+    上下文切换清全部区)。48 触点全量迁移:mpu.c(池+加载经指针)、task.c
+    (create_user 获取,池耗尽走正式 delete 回收任务槽;cleanup_resources 在
+    kshm/kmmio unmap 之后归还)、mem.c(map 三路径加 NULL 守卫+扫描/编码/
+    unmap 清零迁指针)、usercopy(MPU 校验 NULL 早退)、fault(区转储 NULL 安全)、
+    elf_loader(region 3)、白盒测试 3 文件;gen_tcb_offsets.c 同步(off_mpu_regions
+    → off_aspace,asm 无直接引用)。验证:双板 + CI 全矩阵 6/6 绿;板上回归
+    待维护者。
+  - 剩余 slice 2:aspace cap 化/共享(多任务同 address_space,M4 进程语义)、
+    与 P1-3 动态区分配器衔接
 - [ ] P1-3 (C3) MPU region 动态分配器(突破每任务 5 映射上限)
 - [ ] P1-4 (C2) 用户任务私有 data/heap 域(code/rodata/data/stack region 布局)
 - [ ] P1-5 (C1) ELF loader:完整段校验 + 溢出检查 + W^X 强制

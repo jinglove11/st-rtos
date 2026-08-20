@@ -68,6 +68,25 @@
 #define ATTR_IDX_NORMAL_NC       3U   /* MAIR[3]=0x40 */
 #define ATTR_IDX_DEVICE_NGNRE    4U   /* MAIR[4]=0x04 */
 
+/*============================================================================
+ * P1-2 (C2): address_space — 从 TCB 分离的 mapping policy 对象
+ *
+ * slice 1(行为保持):每用户任务 1:1 持有一个池化 address_space,
+ * 上下文切换经 TCB 指针加载。后续切片:cap 化/共享(M4 进程)、
+ * 动态区分配器(P1-3)。
+ *============================================================================*/
+#if MPU_ENABLE
+typedef struct address_space {
+    uint32_t regions[MPU_REGION_COUNT][2];  /* [RBAR, RASR/RLAR] */
+    uint8_t  in_use;
+} address_space_t;
+
+/* 用户任务创建时获取;失败返回 NULL(池耗尽) */
+address_space_t *mpu_aspace_acquire(void);
+/* 任务资源清理时归还(幂等,同时清 TCB 指针) */
+void mpu_aspace_release_task(tcb_t *tcb);
+#endif /* MPU_ENABLE */
+
 void mpu_init(void);
 void mpu_region_set(uint32_t region, uint32_t base, uint32_t size, uint32_t attr);
 void mpu_region_disable(uint32_t region);

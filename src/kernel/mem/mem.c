@@ -725,9 +725,14 @@ kern_err_t kmem_map_to_task(tcb_t *task, cap_id_t cap,
         return KERN_ERR_RESOURCE;
     }
 
+    /* P1-2: 区表在 address_space;内核任务无 aspace,不可映射 */
+    if (task->aspace == NULL) {
+        return KERN_ERR_STATE;
+    }
+
     int region = -1;
-    for (uint32_t r = 3; r < 8; r++) {
-        if ((task->mpu_regions[r][1] & RASR_ENABLE) == 0) {
+    for (uint32_t r = 3; r < MPU_REGION_COUNT; r++) {
+        if ((task->aspace->regions[r][1] & RASR_ENABLE) == 0) {
             region = (int)r;
             break;
         }
@@ -740,8 +745,8 @@ kern_err_t kmem_map_to_task(tcb_t *task, cap_id_t cap,
     mpu_region_encode((uint32_t)region, (uint32_t)(uintptr_t)frame->base,
                       (uint32_t)frame->size,
                       RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE,
-                      &task->mpu_regions[region][0],
-                      &task->mpu_regions[region][1]);
+                      &task->aspace->regions[region][0],
+                      &task->aspace->regions[region][1]);
 
     task->shm_maps[map_slot].in_use = 1U;
     task->shm_maps[map_slot].region = (uint8_t)region;
@@ -1014,9 +1019,14 @@ kern_err_t kshm_map_to_task(tcb_t *task, cap_id_t cap,
         return KERN_ERR_RESOURCE;
     }
 
+    /* P1-2: 区表在 address_space;内核任务无 aspace,不可映射 */
+    if (task->aspace == NULL) {
+        return KERN_ERR_STATE;
+    }
+
     int region = -1;
-    for (uint32_t r = 3; r < 8; r++) {
-        if ((task->mpu_regions[r][1] & RASR_ENABLE) == 0) {
+    for (uint32_t r = 3; r < MPU_REGION_COUNT; r++) {
+        if ((task->aspace->regions[r][1] & RASR_ENABLE) == 0) {
             region = (int)r;
             break;
         }
@@ -1029,8 +1039,8 @@ kern_err_t kshm_map_to_task(tcb_t *task, cap_id_t cap,
     mpu_region_encode((uint32_t)region, (uint32_t)(uintptr_t)shm->base,
                       (uint32_t)shm->size,
                       RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE,
-                      &task->mpu_regions[region][0],
-                      &task->mpu_regions[region][1]);
+                      &task->aspace->regions[region][0],
+                      &task->aspace->regions[region][1]);
 
     task->shm_maps[map_slot].in_use = 1U;
     task->shm_maps[map_slot].region = (uint8_t)region;
@@ -1062,8 +1072,10 @@ kern_err_t kshm_unmap_from_task(tcb_t *task, cap_id_t cap) {
 
             uint8_t region = task->shm_maps[i].region;
             if (region < 8) {
-                task->mpu_regions[region][0] = 0;
-                task->mpu_regions[region][1] = 0;
+                if (task->aspace != NULL) {
+                    task->aspace->regions[region][0] = 0;
+                    task->aspace->regions[region][1] = 0;
+                }
             }
             memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
             return result;
@@ -1095,8 +1107,10 @@ void kshm_unmap_cap_from_all_tasks(cap_id_t cap) {
 
             uint8_t region = task->shm_maps[i].region;
             if (region < 8) {
-                task->mpu_regions[region][0] = 0;
-                task->mpu_regions[region][1] = 0;
+                if (task->aspace != NULL) {
+                    task->aspace->regions[region][0] = 0;
+                    task->aspace->regions[region][1] = 0;
+                }
             }
             memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
             if (task == current) {
@@ -1125,8 +1139,10 @@ void kshm_unmap_all_for_task(tcb_t *task) {
         }
         uint8_t region = task->shm_maps[i].region;
         if (region < 8) {
-            task->mpu_regions[region][0] = 0;
-            task->mpu_regions[region][1] = 0;
+            if (task->aspace != NULL) {
+                task->aspace->regions[region][0] = 0;
+                task->aspace->regions[region][1] = 0;
+            }
         }
         memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
     }
@@ -1194,9 +1210,14 @@ kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
         return KERN_ERR_RESOURCE;
     }
 
+    /* P1-2: 区表在 address_space;内核任务无 aspace,不可映射 */
+    if (task->aspace == NULL) {
+        return KERN_ERR_STATE;
+    }
+
     int region = -1;
-    for (uint32_t r = 3; r < 8; r++) {
-        if ((task->mpu_regions[r][1] & RASR_ENABLE) == 0) {
+    for (uint32_t r = 3; r < MPU_REGION_COUNT; r++) {
+        if ((task->aspace->regions[r][1] & RASR_ENABLE) == 0) {
             region = (int)r;
             break;
         }
@@ -1211,8 +1232,8 @@ kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
     mpu_region_encode((uint32_t)region, (uint32_t)mmio->base,
                       (uint32_t)mmio->size,
                       RASR_ENABLE | ap | ATTR_DEVICE | XN_ENABLE,
-                      &task->mpu_regions[region][0],
-                      &task->mpu_regions[region][1]);
+                      &task->aspace->regions[region][0],
+                      &task->aspace->regions[region][1]);
 
     task_mmio_maps[task->id][map_slot].in_use = 1U;
     task_mmio_maps[task->id][map_slot].region = (uint8_t)region;
@@ -1247,8 +1268,10 @@ kern_err_t kmmio_unmap_from_task(tcb_t *task, cap_id_t cap) {
             task_mmio_maps[task->id][i].cap == cap) {
             uint8_t region = task_mmio_maps[task->id][i].region;
             if (region < 8) {
-                task->mpu_regions[region][0] = 0;
-                task->mpu_regions[region][1] = 0;
+                if (task->aspace != NULL) {
+                    task->aspace->regions[region][0] = 0;
+                    task->aspace->regions[region][1] = 0;
+                }
             }
             memset(&task_mmio_maps[task->id][i], 0,
                    sizeof(task_mmio_maps[task->id][i]));
@@ -1271,8 +1294,10 @@ void kmmio_unmap_all_for_task(tcb_t *task) {
         if (task_mmio_maps[task->id][i].in_use) {
             uint8_t region = task_mmio_maps[task->id][i].region;
             if (region < 8) {
-                task->mpu_regions[region][0] = 0;
-                task->mpu_regions[region][1] = 0;
+                if (task->aspace != NULL) {
+                    task->aspace->regions[region][0] = 0;
+                    task->aspace->regions[region][1] = 0;
+                }
             }
             memset(&task_mmio_maps[task->id][i], 0,
                    sizeof(task_mmio_maps[task->id][i]));

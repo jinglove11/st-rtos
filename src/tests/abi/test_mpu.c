@@ -199,9 +199,9 @@ static void test_user_task_attr(void) {
 
     if (tcb) {
         TEST_ASSERT(tcb->attrs & 1, "User task HAS TASK_ATTR_USER bit");
-        TEST_ASSERT((tcb->mpu_regions[1][1] & RASR_ENABLE) == 0,
+        TEST_ASSERT((tcb->aspace->regions[1][1] & RASR_ENABLE) == 0,
                     "Full SRAM user RW region is disabled");
-        TEST_ASSERT((tcb->mpu_regions[2][1] & RASR_ENABLE) != 0,
+        TEST_ASSERT((tcb->aspace->regions[2][1] & RASR_ENABLE) != 0,
                     "User stack region is enabled");
     }
 

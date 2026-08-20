@@ -4,6 +4,7 @@
  */
 
 #include "mpu.h"
+#include <string.h>
 #include "hal.h"
 #include "kernel_config.h"
 #include "board_config.h"
@@ -58,7 +59,43 @@
  * 初始化和使能
  *============================================================================*/
 
+/*============================================================================
+ * P1-2: address_space 池 — mapping policy 载体(每用户任务 1:1)
+ *============================================================================*/
+#if MPU_ENABLE
+static address_space_t aspace_pool[KERNEL_MAX_TASKS];
+
+address_space_t *mpu_aspace_acquire(void) {
+    for (uint32_t i = 0; i < KERNEL_MAX_TASKS; i++) {
+        if (!aspace_pool[i].in_use) {
+            aspace_pool[i].in_use = 1U;
+            memset(&aspace_pool[i].regions, 0,
+                   sizeof(aspace_pool[i].regions));
+            return &aspace_pool[i];
+        }
+    }
+    return NULL;
+}
+
+void mpu_aspace_release_task(tcb_t *tcb) {
+    if (tcb == NULL || tcb->aspace == NULL) {
+        return;
+    }
+    address_space_t *as = tcb->aspace;
+    tcb->aspace = NULL;
+    for (uint32_t i = 0; i < KERNEL_MAX_TASKS; i++) {
+        if (&aspace_pool[i] == as) {
+            aspace_pool[i].in_use = 0U;
+            return;
+        }
+    }
+}
+#endif /* MPU_ENABLE */
+
 void mpu_init(void) {
+#if MPU_ENABLE
+    memset(aspace_pool, 0, sizeof(aspace_pool));
+#endif
     /* 确保 MPU 关闭 */
     MPU_CTRL = 0;
 
@@ -299,20 +336,20 @@ void mpu_load_task_regions(tcb_t *tcb) {
     __asm volatile("isb" ::: "memory");
 #endif
 
-    if (tcb->attrs & TASK_ATTR_USER) {
-        /* 用户任务: 加载 TCB 中的 MPU regions */
-        for (uint32_t i = 0; i < 8; i++) {
+    if ((tcb->attrs & TASK_ATTR_USER) && tcb->aspace != NULL) {
+        /* 用户任务: 加载 address_space 中的 MPU regions (P1-2) */
+        for (uint32_t i = 0; i < MPU_REGION_COUNT; i++) {
             MPU_RNR  = i;
-            MPU_RBAR = tcb->mpu_regions[i][0];
+            MPU_RBAR = tcb->aspace->regions[i][0];
 #if BOARD_MPU_ARMV8
-            MPU_RLAR = tcb->mpu_regions[i][1];
+            MPU_RLAR = tcb->aspace->regions[i][1];
 #else
-            MPU_RASR = tcb->mpu_regions[i][1];
+            MPU_RASR = tcb->aspace->regions[i][1];
 #endif
         }
     } else {
-        /* 内核任务: 禁用所有 user regions，清除残留 */
-        for (uint32_t i = 0; i < 8; i++) {
+        /* 内核任务(或防御:无 aspace 的用户任务): 清除全部区 */
+        for (uint32_t i = 0; i < MPU_REGION_COUNT; i++) {
             MPU_RNR  = i;
             MPU_RBAR = 0;
 #if BOARD_MPU_ARMV8

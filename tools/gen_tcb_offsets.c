@@ -17,4 +17,7 @@ const unsigned int off_state       = (unsigned int)offsetof(tcb_t, state);
 const unsigned int off_attrs       = (unsigned int)offsetof(tcb_t, attrs);
 const unsigned int off_sp_limit    = (unsigned int)offsetof(tcb_t, sp_limit);
 const unsigned int off_stack_base  = (unsigned int)offsetof(tcb_t, stack_base);
-const unsigned int off_mpu_regions = (unsigned int)offsetof(tcb_t, mpu_regions);
+/* P1-2: mpu_regions 移入 address_space 对象;asm 不直接访问区表,
+ * 上下文切换经 mpu_load_task_regions(tcb) C 调用。保留 aspace 偏移
+ * 备诊断器使用。 */
+const unsigned int off_aspace      = (unsigned int)offsetof(tcb_t, aspace);

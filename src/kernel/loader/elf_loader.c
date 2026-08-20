@@ -132,8 +132,8 @@ kern_err_t elf_load(const void *image, const char *name,
             mpu_region_encode(3, (uint32_t)(uintptr_t)data_ram,
                               alloc_size,
                               RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE,
-                              &tcb->mpu_regions[3][0],
-                              &tcb->mpu_regions[3][1]);
+                              &tcb->aspace->regions[3][0],
+                              &tcb->aspace->regions[3][1]);
         }
         /* NOTE: we don't track data_ram for cleanup on task exit. A production
          * loader would stash it in the TCB or a side table. For Phase 6 the
