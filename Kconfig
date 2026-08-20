@@ -300,7 +300,7 @@ config IPC_ENDPOINT_MAX
     int "Maximum endpoints"
     depends on IPC_ENDPOINT
     default 4
-    range 1 16
+    range 1 64
 
 config IPC_EP_MSG_SIZE
     int "Endpoint message size (bytes)"
@@ -832,7 +832,6 @@ menu "Shell Configuration"
 config SHELL_ENABLE
     bool "Enable interactive shell"
     default y
-    depends on VFS_ENABLE
     help
       通过串口终端提供交互式 shell。
       测试完成后自动启动。
@@ -861,7 +860,6 @@ menu "Driver Configuration"
 config DRIVER_ENABLE
     bool "Enable device driver framework"
     default y
-    depends on VFS_ENABLE
     help
       启用设备驱动框架。
       提供 device_t 抽象层, 驱动自动注册到 devfs。
@@ -971,7 +969,7 @@ menu "Phase 4 — Persistent Filesystem"
 config FS_PERSISTENT
     bool "Persistent filesystem (littlefs)"
     default n
-    depends on VFS_ENABLE && BLOCK_DEVICE
+    depends on BLOCK_DEVICE
     help
       引入 littlefs (Apache 2.0),挂载到 /flash。
       Power-cut safe + wear-leveling 内建。

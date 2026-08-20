@@ -8,9 +8,7 @@
 | Default | `y` |
 | Menu path | `Driver Configuration` |
 
-## Dependencies
-
-- `[VFS_ENABLE](VFS_ENABLE.md)`
+_No dependencies._
 
 ## Help
 

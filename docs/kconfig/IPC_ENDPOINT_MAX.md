@@ -6,7 +6,7 @@
 |---|---|
 | Type | `int` |
 | Default | `4` |
-| Range | `1 16` |
+| Range | `1 64` |
 | Menu path | `IPC Configuration` |
 
 ## Dependencies

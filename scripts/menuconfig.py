@@ -235,9 +235,81 @@ class ConfigFile:
         return self.config.get(key, 'n') == 'y'
 
 
+def single_dep_ok(dep: str, config: ConfigFile) -> bool:
+    """单个依赖表达式判定:'SYMBOL'、'!SYMBOL'、'SYMBOL = val'、'!= '"""
+    if ' ' in dep:
+        parts = dep.split()
+        var, op, val = parts[0], parts[1], parts[2]
+        current = config.get(var, '')
+        if op == '=':
+            return current == val
+        return current != val
+    if dep.startswith('!'):
+        return not config.is_enabled(dep[1:])
+    return config.is_enabled(dep)
+
+
+def deps_satisfied(depends: List[str], config: ConfigFile) -> bool:
+    """依赖列表判定(&& 连接;Kconfig 语义中列表各项均需满足)"""
+    for dep in depends:
+        if '&&' in dep:
+            if not all(single_dep_ok(p.strip(), config) for p in dep.split('&&')):
+                return False
+        elif not single_dep_ok(dep.strip(), config):
+            return False
+    return True
+
+
+def collapse_depends(parser: 'KconfigParser', config: ConfigFile) -> int:
+    """P0-8: genconfig 输出前收缩违依赖符号。
+
+    defconfig 携带依赖不满足的符号(如 TEST_ENABLE 关闭却写 TEST_MODULE_x=y)
+    时不再原样写进 kernel_config.h——此前会把测试代码链进 TEST-off 镜像。
+    迭代到不动点以覆盖依赖链(A 丢弃导致 B 的依赖也不满足)。返回丢弃数。"""
+    dropped = 0
+    changed = True
+    while changed:
+        changed = False
+        for name, option in parser.options.items():
+            if config.config.get(name, 'n') == 'n':
+                continue
+            if not deps_satisfied(option.depends, config):
+                print(f"genconfig: drop {name} (unsatisfied depends: "
+                      f"{' && '.join(option.depends) or '-'})", file=sys.stderr)
+                del config.config[name]
+                dropped += 1
+                changed = True
+    return dropped
+
+
+def clamp_ranges(parser: 'KconfigParser', config: ConfigFile) -> int:
+    """P0-8: int 符号越 range 时钳到边界(带告警)。
+
+    Kconfig range 此前仅在交互 UI 提示,genconfig 原样输出 .config 的越界值
+    (tiny preset 的 IPC_EP_MSG_SIZE=32 装不下 ns_name_msg_t 即此类问题)。"""
+    clamped = 0
+    for name, option in parser.options.items():
+        if option.type != 'int' or not option.range_str:
+            continue
+        value = config.config.get(name, '')
+        if not value.isdigit():
+            continue
+        bounds = option.range_str.split()
+        if len(bounds) != 2 or not all(b.lstrip('-').isdigit() for b in bounds):
+            continue
+        lo, hi = int(bounds[0]), int(bounds[1])
+        iv = int(value)
+        if iv < lo or iv > hi:
+            clamped_v = max(lo, min(hi, iv))
+            print(f"genconfig: clamp {name}={value} -> {clamped_v} "
+                  f"(range {lo}..{hi})", file=sys.stderr)
+            config.config[name] = str(clamped_v)
+            clamped += 1
+    return clamped
+
+
 class MenuConfigUI:
     """menuconfig 用户界面"""
-
     def __init__(self, parser: KconfigParser, config: ConfigFile):
         self.parser = parser
         self.config = config
@@ -349,33 +421,8 @@ class MenuConfigUI:
         return items
 
     def _check_depends(self, option: ConfigOption) -> bool:
-        """检查选项依赖是否满足"""
-        for dep in option.depends:
-            # 简单依赖检查
-            if '&&' in dep:
-                parts = dep.split('&&')
-                for part in parts:
-                    if not self._check_single_dep(part.strip()):
-                        return False
-            else:
-                if not self._check_single_dep(dep):
-                    return False
-        return True
-
-    def _check_single_dep(self, dep: str) -> bool:
-        """检查单个依赖"""
-        if ' ' in dep:
-            parts = dep.split()
-            var = parts[0]
-            op = parts[1]
-            val = parts[2]
-            current = self.config.get(var, '')
-            if op == '=':
-                return current == val
-            elif op == '!=':
-                return current != val
-        else:
-            return self.config.is_enabled(dep)
+        """检查选项依赖是否满足(与 genconfig 收缩共用 single_dep_ok)"""
+        return deps_satisfied(option.depends, self.config)
 
     def _handle_key(self, key) -> Optional[str]:
         """处理按键"""
@@ -544,6 +591,9 @@ def main():
     # 检查命令行参数
     if len(sys.argv) > 1:
         if sys.argv[1] == 'genconfig':
+            # P0-8: 输出前收缩违依赖符号 + int range 钳制
+            collapse_depends(parser, config)
+            clamp_ranges(parser, config)
             # 仅生成配置头文件
             generate_config_header(config, header_file)
             print(f"Generated: {header_file}")

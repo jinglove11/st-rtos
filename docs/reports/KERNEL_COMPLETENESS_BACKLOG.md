@@ -52,9 +52,17 @@
     genconfig,DEPENDS .config/Kconfig/menuconfig.py)+ gen_kernel_config target,
     gen_tcb_offsets 顺序依赖之;Makefile 原有 $(CONFIG_HEADER) 规则即可。验证:
     删除头文件后 RP2350(cmake)与 STM32(make)均从零重生成并构建绿(2026-08-20)
-- [ ] P0-8 (D6) genconfig 输出不执行 depends 收缩(Kconfig 依赖仅在交互菜单 UI 生效,
+- [x] P0-8 (D6) genconfig 输出不执行 depends 收缩(Kconfig 依赖仅在交互菜单 UI 生效,
   defconfig 携带违依赖符号会被原样写进 kernel_config.h——P0-5 验证中 dev 镜像链入
   测试代码的根因;顺手评估 range 下限同样不收缩的问题)
+  - 实现:menuconfig.py 新增 deps_satisfied/single_dep_ok(含 !SYMBOL 支持,UI
+    _check_depends 复用)+ collapse_depends(不动点迭代收缩违依赖符号,stderr 告警)
+    + clamp_ranges(int 越界钳到 range 边界,告警),genconfig 输出前执行。配套修 4 处
+    陈旧 Kconfig 依赖(kernel VFS 已删但依赖未摘):SHELL_ENABLE/DRIVER_ENABLE 摘
+    VFS_ENABLE、FS_PERSISTENT 改仅 BLOCK_DEVICE、IPC_ENDPOINT_MAX range 1..16→1..64
+    (.config 实际用 32)。验证:提交 .config 再生头与旧生效头仅差 3 个合法丢弃
+    (CAP_RCU@UP、VFS_MAX_*@VFS-off);违依赖/range 越界负向用例通过;全矩阵绿
+    (rp2350×4 + stm32 + smp preset 抽验 + dev 模块残留 0,2026-08-20)
 
 ## P1 M4 批(结构性,L 级,每次一个可验证切片)
 

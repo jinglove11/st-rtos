@@ -10,7 +10,7 @@
 
 ## Dependencies
 
-- `[VFS_ENABLE](VFS_ENABLE.md) && [BLOCK_DEVICE](BLOCK_DEVICE.md)`
+- `[BLOCK_DEVICE](BLOCK_DEVICE.md)`
 
 ## Help
 
