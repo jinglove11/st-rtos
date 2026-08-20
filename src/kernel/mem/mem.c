@@ -630,6 +630,79 @@ cap_id_t kframe_create_cap(size_t size, uint8_t rights) {
     return kframe_create_cap_for(sched_get_current(), size, rights);
 }
 
+#if USER_DOMAIN
+/*============================================================================
+ * P1-4: 用户任务私有 data/heap 域(静态 region 1,Frame 后端)
+ *============================================================================*/
+
+kern_err_t kuser_domain_attach(tcb_t *task, size_t size, void **out_base) {
+    if (out_base != NULL) {
+        *out_base = NULL;
+    }
+    if (task == NULL || size == 0U) {
+        return KERN_ERR_PARAM;
+    }
+    if (task->aspace == NULL) {
+        return KERN_ERR_STATE;
+    }
+    /* region 1 已占用(重复附加) */
+    if (task->aspace->domain_base != 0U ||
+        (task->aspace->regions[1][1] & RASR_ENABLE) != 0U) {
+        return KERN_ERR_BUSY;
+    }
+
+    cap_id_t cap = kframe_create_cap_for(task, size,
+                                         CAP_READ | CAP_WRITE | CAP_MANAGE);
+    if (cap < 0) {
+        return KERN_ERR_RESOURCE;
+    }
+    kframe_object_t *frame =
+        cap_lookup_for(task, cap, CAP_OBJ_FRAME, CAP_READ);
+    if (frame == NULL) {
+        (void)cap_delete(cap);
+        return KERN_ERR_STATE;
+    }
+    if (!kshm_is_mpu_compliant(frame->size)) {
+        (void)cap_delete(cap);
+        return KERN_ERR_PARAM;
+    }
+
+    mpu_region_encode(1, (uint32_t)(uintptr_t)frame->base,
+                      (uint32_t)frame->size,
+                      RASR_ENABLE | AP_FULL | ATTR_NORMAL_WBWA | XN_ENABLE,
+                      &task->aspace->regions[1][0],
+                      &task->aspace->regions[1][1]);
+    task->aspace->domain_base = (uintptr_t)frame->base;
+    task->aspace->domain_size = (uint32_t)frame->size;
+    task->aspace->domain_cap = cap;
+
+    if (out_base != NULL) {
+        *out_base = frame->base;
+    }
+    return KERN_OK;
+}
+
+kern_err_t kuser_domain_detach(tcb_t *task) {
+    if (task == NULL || task->aspace == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    if (task->aspace->domain_base == 0U) {
+        return KERN_ERR_NOEXIST;
+    }
+
+    task->aspace->regions[1][0] = 0;
+    task->aspace->regions[1][1] = 0;
+    cap_id_t cap = task->aspace->domain_cap;
+    task->aspace->domain_base = 0;
+    task->aspace->domain_size = 0;
+    task->aspace->domain_cap = KERN_INVALID_ID;
+    if (cap >= 0) {
+        (void)cap_delete(cap);  /* 最后一引用 → frame 经吊销钩子回收 */
+    }
+    return KERN_OK;
+}
+#endif /* USER_DOMAIN */
+
 cap_id_t kmem_alloc_cap(size_t size, uint8_t rights) {
     return kframe_create_cap(size, rights);
 }

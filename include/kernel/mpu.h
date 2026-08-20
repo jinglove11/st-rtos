@@ -97,6 +97,11 @@ typedef struct address_space {
     mpu_map_t maps[MPU_MAP_MAX];            /* P1-3: 软映射表 */
     int8_t   slot_owner[MPU_REGION_COUNT];  /* 槽 → 软表项 idx,-1 空 */
     uint32_t lru_tick;
+    /* P1-4: 静态 region 1 的私有 data/heap 域(base==0 = 未附加;
+     * frame cap 由任务持有,生命周期随 cap 吊销) */
+    uintptr_t domain_base;
+    uint32_t  domain_size;
+    cap_id_t  domain_cap;
     uint8_t  in_use;
 } address_space_t;
 

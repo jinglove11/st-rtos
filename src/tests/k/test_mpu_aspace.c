@@ -15,6 +15,7 @@
 #include "kernel.h"
 #include "mpu.h"
 #include "task.h"
+#include "mem.h"
 #include <stdint.h>
 
 #if TEST_ENABLE
@@ -168,9 +169,55 @@ static void test_aspace_remove_and_limits(void) {
     aspace_test_release(tcb);
 }
 
+#if USER_DOMAIN
+/*============================================================================
+ * Test 3: 私有 data/heap 域(region 1)
+ *============================================================================*/
+
+static void test_aspace_private_domain(void) {
+    test_section("Test 3: private data/heap domain on region 1");
+
+    tcb_t *tcb = aspace_test_user("aspace_dom");
+    TEST_ASSERT(tcb != NULL && tcb->aspace != NULL, "user task with aspace");
+    if (tcb == NULL || tcb->aspace == NULL) return;
+
+    void *base = NULL;
+    kern_err_t err = kuser_domain_attach(tcb, 2048U, &base);
+    TEST_ASSERT_EQ(KERN_OK, err, "domain attached");
+    if (err != KERN_OK) goto out;
+    TEST_ASSERT(base != NULL, "domain base returned");
+
+    uint32_t rbar = tcb->aspace->regions[1][0];
+    uint32_t rasr = tcb->aspace->regions[1][1];
+    TEST_ASSERT((rasr & RASR_ENABLE) != 0, "region 1 enabled");
+    TEST_ASSERT(mpu_region_allows_write(rbar, rasr), "domain user-writable");
+    TEST_ASSERT(mpu_region_is_execute_never(rbar, rasr), "domain XN");
+
+    TEST_ASSERT_EQ(KERN_ERR_BUSY, kuser_domain_attach(tcb, 1024U, NULL),
+                   "double attach BUSY");
+
+    TEST_ASSERT_EQ(KERN_OK, kuser_domain_detach(tcb), "detach ok");
+    TEST_ASSERT_EQ(0, tcb->aspace->regions[1][1] & RASR_ENABLE,
+                   "region 1 disabled after detach");
+    TEST_ASSERT_EQ(KERN_ERR_NOEXIST, kuser_domain_detach(tcb),
+                   "double detach NOEXIST");
+
+    /* 重新附加可复用 region 1 */
+    TEST_ASSERT_EQ(KERN_OK, kuser_domain_attach(tcb, 1024U, NULL),
+                   "re-attach after detach ok");
+    (void)kuser_domain_detach(tcb);
+
+out:
+    aspace_test_release(tcb);
+}
+#endif /* USER_DOMAIN */
+
 static void test_mpu_aspace_module(void) {
     test_aspace_lru_demand();
     test_aspace_remove_and_limits();
+#if USER_DOMAIN
+    test_aspace_private_domain();
+#endif
 }
 
 TEST_K_MODULE(mpu_aspace, test_mpu_aspace_module);

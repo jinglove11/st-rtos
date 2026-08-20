@@ -2,7 +2,7 @@
 
 Auto-generated from [`Kconfig`](../../Kconfig) by [`scripts/gen_kconfig_docs.py`](../../scripts/gen_kconfig_docs.py).
 
-**140 options** across **23** menu groups.
+**141 options** across **23** menu groups.
 
 To refresh this page after editing Kconfig:
 
@@ -124,6 +124,7 @@ python3 scripts/gen_kconfig_docs.py
 | [`MPU_REGION_COUNT`](MPU_REGION_COUNT.md) | `int` | `5` | MPU regions per task |
 | [`SYSCALL_ENABLE`](SYSCALL_ENABLE.md) | `bool` | `y` | Enable syscall interface |
 | [`SYSCALL_TABLE_SIZE`](SYSCALL_TABLE_SIZE.md) | `int` | `96` | Syscall table size |
+| [`USER_DOMAIN`](USER_DOMAIN.md) | `bool` | `n` | Per-task private data/heap domain (P1-4, region 1) |
 
 ## Phase 2 — Fault-Tolerant Infrastructure
 

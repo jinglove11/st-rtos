@@ -109,7 +109,17 @@
     超槽/LRU 逐出恰一/驻留重入 0/未覆盖 -1/remove 清槽归属/表满/重复 base/无
     aspace 拒绝。验证:双板 + CI 全矩阵绿;用户任务真实 fault 换入端到端归板上
     回归。
-- [ ] P1-4 (C2) 用户任务私有 data/heap 域(code/rodata/data/stack region 布局)
+- [~] P1-4 (C2) 用户任务私有 data/heap 域(code/rodata/data/stack region 布局)
+  - slice 1(2026-08-20):Kconfig USER_DOMAIN(默认 n,opt-in)+ kuser_domain_attach/
+    detach(mem.c):静态 region 1 显式附加私有域 —— kframe_create_cap_for 分配 MPU
+    合规 frame(cap 归任务,可流转),encode RW+XN 进 region 1 镜像;aspace 记
+    domain_base/size/cap;detach 清区+吊销 cap(frame 经吊销钩子回收);重复附加
+    BUSY/未附加 detach NOEXIST。白盒:test_mpu_aspace Test 3(attach/BUSY/编码
+    RW+XN/detach 清区/复用)。设计取舍:不做 create_user 自动附加(全部用户任务
+    强制吃 frame 会打断现有测试的内存预算),由 P1-5 ELF loader 按段显式调用。
+    验证:双板 + CI 全矩阵绿(工作配置 + full 启用)。
+  - 剩余 slice 2:code/rodata/data 段级私有布局(依赖 P1-5 ELF loader 段校验,
+    加载时按段 attach 多区);P1-7 双进程同名全局隔离在此之上验收
 - [ ] P1-5 (C1) ELF loader:完整段校验 + 溢出检查 + W^X 强制
 - [ ] P1-6 (C1) ELF loader:重定位(R_ARM_ABS32/MOVW)+ backing 跟踪与退出回收
 - [ ] P1-7 验收:两个用户"进程"同名全局变量互不可见 + ELF 万次加载无泄漏

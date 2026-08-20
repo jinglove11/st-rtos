@@ -47,6 +47,15 @@ uint32_t mem_get_fail_count(void);
 
 void     kframe_init(void);
 cap_id_t kframe_create_cap_for(tcb_t *owner, size_t size, uint8_t rights);
+
+#if USER_DOMAIN
+/* P1-4: 用户任务私有 data/heap 域 —— 静态 region 1,Frame 后端。
+ * attach: 分配 MPU 合规 frame(RW+MANAGE, cap 归 task),encode 进
+ * region 1 镜像(SVC/PendSV 返回时装载);重复附加 → BUSY。
+ * detach: 清 region 1 并吊销 frame(内存回收)。 */
+kern_err_t kuser_domain_attach(tcb_t *task, size_t size, void **out_base);
+kern_err_t kuser_domain_detach(tcb_t *task);
+#endif
 cap_id_t kframe_create_cap(size_t size, uint8_t rights);
 cap_id_t kmem_alloc_cap(size_t size, uint8_t rights);
 void    *kmem_resolve_cap(cap_id_t cap, uint8_t required_rights);
