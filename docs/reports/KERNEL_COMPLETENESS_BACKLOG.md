@@ -122,7 +122,16 @@
     验证:双板 + CI 全矩阵绿(工作配置 + full 启用)。
   - 剩余 slice 2:code/rodata/data 段级私有布局(依赖 P1-5 ELF loader 段校验,
     加载时按段 attach 多区);P1-7 双进程同名全局隔离在此之上验收
-- [ ] P1-5 (C1) ELF loader:完整段校验 + 溢出检查 + W^X 强制
+- [x] P1-5 (C1) ELF loader:完整段校验 + 溢出检查 + W^X 强制
+  - 实现(2026-08-20):elf_load 增加 image_size 参数;头校验补 class32/LSB/
+    phentsize==sizeof(Phdr)/ph 表界内(溢出安全减法);段校验 W^X 拒绝、
+    p_memsz>=p_filesz、文件范围不越镜像界;强制恰一 X 段且 e_entry 落其
+    link 范围。可写段改 kframe 分配(cap 归任务,退出自动回收 —— 修旧
+    kmalloc 无跟踪泄漏)+ kframe_info_for 公共访问器 + mpu_map_add 登记
+    (修旧 regions[3] 直写绕过 P1-3 记账、demand-load 会踩掉数据段的隐患)。
+    负向测试 8 组(构造最小 ELF 变体):W^X/越界/memsz<filesz/无 X 段/
+    entry 越界/截断/phentsize/双 X 段。验证:双板 + CI + 板上真机
+    3360/3360(elf 模块 20/20,正向加载执行 exit=0)。
 - [ ] P1-6 (C1) ELF loader:重定位(R_ARM_ABS32/MOVW)+ backing 跟踪与退出回收
 - [ ] P1-7 验收:两个用户"进程"同名全局变量互不可见 + ELF 万次加载无泄漏
 

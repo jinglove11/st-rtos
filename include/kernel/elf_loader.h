@@ -57,6 +57,10 @@ typedef struct {
 } Elf32_Phdr;
 
 #define EI_MAG0       0
+#define EI_CLASS      4
+#define EI_DATA       5
+#define ELFCLASS32    1
+#define ELFDATA2LSB   1
 #define EI_MAG1       1
 #define EI_MAG2       2
 #define EI_MAG3       3
@@ -80,16 +84,28 @@ typedef struct {
 /**
  * elf_load — parse + load an ELF image and create a user task.
  *
- * @param image   pointer to the ELF file in memory (flash XIP or RAM)
- * @param name    task name for the created task
- * @param prio    task priority
- * @param out_tid receives the new task id
+ * @param image      pointer to the ELF file in memory (flash XIP or RAM)
+ * @param image_size exact byte size of the image (P1-5: 段表与每个
+ *                   PT_LOAD 的 [p_offset, p_offset+p_filesz) 必须落在
+ *                   镜像内,溢出安全判定;越界/截断镜像一律 PARAM)
+ * @param name       task name for the created task
+ * @param prio       task priority
+ * @param out_tid    receives the new task id
  * @return KERN_OK on success, KERN_ERR_* on failure.
+ *
+ * Validation contract (P1-5):
+ *   - header: magic/32-bit/LSB/EXEC/ARM, e_phentsize == sizeof(Elf32_Phdr),
+ *     phnum 1..16, ph 表完整落在镜像内
+ *   - segment: W^X 强制(PF_W|PF_X 的 PT_LOAD 拒绝);p_memsz >= p_filesz;
+ *     每个 PT_LOAD 的文件范围不越过镜像边界
+ *   - 必须存在 PF_X PT_LOAD,且 e_entry 落在其 link 地址范围内
+ *   - 可写段(.data/.bss)由 Frame 池分配(cap 归任务,退出自动回收)并经
+ *     mpu_map_add 映射 RW+XN(参与 P1-3 软映射表/LRU 记账)
  *
  * The ELF's .text must be linked to a flash XIP address (0x10000000+).
  * .data/.bss are copied to a kmalloc'd RAM block and MPU-mapped.
  */
-kern_err_t elf_load(const void *image, const char *name,
+kern_err_t elf_load(const void *image, size_t image_size, const char *name,
                     uint8_t prio, task_id_t *out_tid);
 
 #endif /* ELF_LOADER */

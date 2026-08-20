@@ -630,6 +630,31 @@ cap_id_t kframe_create_cap(size_t size, uint8_t rights) {
     return kframe_create_cap_for(sched_get_current(), size, rights);
 }
 
+kern_err_t kframe_info_for(tcb_t *owner, cap_id_t cap,
+                           void **out_base, size_t *out_size) {
+    if (out_base != NULL) {
+        *out_base = NULL;
+    }
+    if (out_size != NULL) {
+        *out_size = 0;
+    }
+    if (owner == NULL || cap < 0) {
+        return KERN_ERR_PARAM;
+    }
+    kframe_object_t *frame =
+        cap_lookup_for(owner, cap, CAP_OBJ_FRAME, CAP_READ);
+    if (frame == NULL) {
+        return KERN_ERR_CAP;
+    }
+    if (out_base != NULL) {
+        *out_base = frame->base;
+    }
+    if (out_size != NULL) {
+        *out_size = frame->size;
+    }
+    return KERN_OK;
+}
+
 #if USER_DOMAIN
 /*============================================================================
  * P1-4: 用户任务私有 data/heap 域(静态 region 1,Frame 后端)

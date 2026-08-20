@@ -47,6 +47,10 @@ uint32_t mem_get_fail_count(void);
 
 void     kframe_init(void);
 cap_id_t kframe_create_cap_for(tcb_t *owner, size_t size, uint8_t rights);
+/* P1-5: 按 owner 的 cap 取 frame 基址/尺寸(elf_loader 等内核内部用户;
+ * kframe_object_t 对外不可见)。 */
+kern_err_t kframe_info_for(tcb_t *owner, cap_id_t cap,
+                           void **out_base, size_t *out_size);
 
 #if USER_DOMAIN
 /* P1-4: 用户任务私有 data/heap 域 —— 静态 region 1,Frame 后端。
