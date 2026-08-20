@@ -125,6 +125,7 @@ set(MYRTOS_TEST_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_irq_user.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_mpu.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_notification.c"
+    "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_ntfn_user.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/k/test_notification.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_syscall_user.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/tests/abi/test_usercopy.c"

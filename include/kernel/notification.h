@@ -65,6 +65,19 @@ kern_err_t notification_signal_obj(void *obj, uint32_t badge);
 kern_err_t notification_poll(notification_id_t id, uint32_t *out_word);
 
 /**
+ * @brief 阻塞等待(内核任务线程式,手动阻塞协议;SVC 上下文勿用)
+ *
+ * fast path: word 非零 → 取清整字,*out_word 返回。否则锁内手动
+ * 出队+置 BLOCKED(消除解锁窗口竞态),唤醒后从 cont.u.ntfn.word
+ * 取移交字。内核服务任务(timer/irq/BH)与 K 白盒测试用。
+ *
+ * @param timeout ticks, 0 = 不等待(空字即 TIMEOUT)
+ * @return KERN_OK(取到字) / KERN_ERR_TIMEOUT / KERN_ERR_NOEXIST(删除)
+ */
+kern_err_t notification_wait(notification_id_t id, uint32_t timeout,
+                             uint32_t *out_word);
+
+/**
  * @brief 阻塞等待(两阶段 continuation 协议,SVC 上下文专用)
  *
  * fast path: word 非零 → 取清整字,经 copy_to_user 写 *user_word_out,

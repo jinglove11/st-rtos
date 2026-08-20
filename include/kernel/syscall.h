@@ -138,6 +138,7 @@
 #define SYSCALL_NTFN_SIGNAL      88            /* P1-1: signal via badged cap */
 #define SYSCALL_NTFN_WAIT        89            /* P1-1: block until word!=0, consume it */
 #define SYSCALL_NTFN_POLL        90            /* P1-1: consume word without blocking */
+#define SYSCALL_NTFN_DELETE      91            /* P1-1: delete object (CAP_MANAGE) */
 
 /*============================================================================
  * Syscall 分发

@@ -65,8 +65,8 @@ static void ntfn_waiter_task(void *arg) {
     uint32_t w = 0;
     waiter_word = 0;
     waiter_done = 0;
-    /* 内核任务直呼 wait(fast path 由 signal 前置触发阻塞路径) */
-    waiter_err = notification_wait_syscall(wait_ntfn, 100000U, &w);
+    /* 内核任务走线程式阻塞协议(SVC 路径的契约由 abi/test_ntfn_user.c 固化) */
+    waiter_err = notification_wait(wait_ntfn, 100000U, &w);
     waiter_word = w;
     waiter_done = 1;
 }
@@ -113,7 +113,7 @@ static volatile uint8_t mw_done[2];
 static void mw_waiter(void *arg) {
     uintptr_t idx = (uintptr_t)arg;
     uint32_t w = 0;
-    mw_errs[idx] = notification_wait_syscall(wait_ntfn, 50000U, &w);
+    mw_errs[idx] = notification_wait(wait_ntfn, 50000U, &w);
     mw_words[idx] = w;
     mw_done[idx] = 1;
 }
@@ -176,7 +176,7 @@ static volatile kern_err_t to_err;
 static void to_waiter(void *arg) {
     (void)arg;
     uint32_t w = 0;
-    to_err = notification_wait_syscall(wait_ntfn, 5U, &w);
+    to_err = notification_wait(wait_ntfn, 5U, &w);
 }
 
 static void test_ntfn_wait_timeout(void) {
@@ -217,7 +217,7 @@ static void del_waiter(void *arg) {
     (void)arg;
     uint32_t w = 0;
     del_err = KERN_OK;
-    del_err = notification_wait_syscall(wait_ntfn, 100000U, &w);
+    del_err = notification_wait(wait_ntfn, 100000U, &w);
 }
 
 static void test_ntfn_delete_wakes_waiter(void) {
@@ -280,7 +280,7 @@ static void badge_waiter(void *arg) {
     (void)arg;
     uint32_t w = 0;
     badge_err = KERN_OK;
-    badge_err = notification_wait_syscall(wait_ntfn, 100000U, &w);
+    badge_err = notification_wait(wait_ntfn, 100000U, &w);
     badge_word = w;
 }
 

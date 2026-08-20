@@ -509,6 +509,10 @@ static inline int sys_ntfn_poll(int ntfn_cap, uint32_t *out_word) {
                      (int)(uintptr_t)out_word);
 }
 
+static inline int sys_ntfn_delete(int ntfn_cap) {
+    return sys_call1(SYSCALL_NTFN_DELETE, ntfn_cap);
+}
+
 /*============================================================================
  * VFS 文件操作 — 用户态内联封装(reserved ABI,恒 NOSYS)
  * 内核 VFS 已删(P0-6):这些编号 reserved 永不复用,内核槽位无条件

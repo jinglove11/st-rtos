@@ -495,6 +495,20 @@ static int sys_ntfn_wait(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif
 }
 
+static int sys_ntfn_delete(uint32_t a1, uint32_t a2, uint32_t a3,
+                           uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a2);U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_NOTIFICATION, CAP_MANAGE);
+    if (!obj) return KERN_ERR_CAP;
+    kern_err_t ret = notification_delete(notification_id_from_obj(obj));
+    cap_delete((cap_id_t)a1);
+    return (int)ret;
+#else
+    return notification_delete((notification_id_t)a1);
+#endif
+}
+
 static int sys_ntfn_poll(uint32_t a1, uint32_t a2, uint32_t a3,
                          uint32_t a4, uint32_t a5, uint32_t a6) {
     uint32_t word = 0;
@@ -1926,6 +1940,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_NTFN_SIGNAL,     sys_ntfn_signal,   1),
     SYSDEF(SYSCALL_NTFN_WAIT,       sys_ntfn_wait,     3),
     SYSDEF(SYSCALL_NTFN_POLL,       sys_ntfn_poll,     2),
+    SYSDEF(SYSCALL_NTFN_DELETE,     sys_ntfn_delete,   1),
 #endif
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),

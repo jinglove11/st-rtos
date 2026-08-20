@@ -66,18 +66,23 @@
 
 ## P1 M4 批(结构性,L 级,每次一个可验证切片)
 
-- [~] P1-1 (A4) 独立 notification 对象(CAP_OBJ_NOTIFICATION,单字 badge,聚合 word)— M4 前置
-  - slice 1/2 done(2026-08-20):内核对象 + cap 类型 + syscall 家族 + K 白盒 8 组。
+- [x] P1-1 (A4) 独立 notification 对象(CAP_OBJ_NOTIFICATION,单字 badge,聚合 word)— M4 前置
+  - slice 1(2c53252):内核对象 + cap 类型 + syscall 家族 + K 白盒 8 组。
     notification.c(seL4 语义:signal 只 `word|=badge`(badge 来自 mint 的 signal cap,
     CAP_WRITE),wait/poll 整字消费,word 非零唤醒至多一个等待者并锁内移交 +
     copy_to_user,ISR 安全 signal);CAP_OBJ_NOTIFICATION=19;BLOCK_REASON_NOTIFICATION=13
     (timeout/fault 摘除接入 task_unlink_blocked);syscall 87-90
     (NTFN_CREATE/SIGNAL/WAIT/POLL,user_api 内联);factory 两分派接入;Kconfig
-    IPC_NOTIFICATION(默认 n,opt-in)+ IPC_NOTIFICATION_MAX;ABI 1.2。测试 k/test_notification.c
-    模块 ntfn:聚合/消费、阻塞唤醒整字移交、双等待者单移交、超时、删除 NOEXIST、
-    临界区 signal、badge cap signal、池耗尽/参数。验证:RP2350(工作配置+full)+ STM32
-    (未启用空编译)绿,CI 全矩阵绿;板上回归待维护者。
-  - 剩余 slice 2:abi 层用户任务契约用例 + irq/timer 侧消费者接入(并入 P2-2/P2-3 前先固化用户契约)
+    IPC_NOTIFICATION(默认 n,opt-in)+ IPC_NOTIFICATION_MAX;ABI 1.2。
+  - slice 2:补内核线程式阻塞变体 notification_wait(手动出队+置 BLOCKED,消除
+    sched_block 解锁窗口竞态;移交字经 cont.u.ntfn.word——修正 slice 1 中 K 白盒
+    waiter 直呼 SVC 路径的运行时隐患,-128 哨兵只对 SVC 汇编入口有意义);
+    补 SYSCALL_NTFN_DELETE=91(CAP_MANAGE);abi/test_ntfn_user.c(模块 ntfn_user)
+    5 组用户契约:单任务全链(无徽章 signal=no-op/徽章字位/消费/delete 后 cap 吊销)、
+    rights(WRITE 才能 signal,READ 才能 wait/poll)、SVC 超时、SVC 阻塞被内核
+    signal 唤醒(用户内存 copyout)、用户→用户跨任务 signal(字=signaler 徽章)。
+    验证:双板 + CI 全矩阵 6/6 绿(2026-08-20);板上回归待维护者。irq/timer
+    消费者接入归 P2-2/P2-3。
 - [ ] P1-2 (C2) `mpu_domain_t`/`address_space_t` 从 TCB 分离 mapping policy
 - [ ] P1-3 (C3) MPU region 动态分配器(突破每任务 5 映射上限)
 - [ ] P1-4 (C2) 用户任务私有 data/heap 域(code/rodata/data/stack region 布局)

@@ -55,7 +55,7 @@ extern "C" {
 /* ABI 版本单一来源(原注释称 kernel_config.h,实际从未在那里定义)。
  * 1.1 (P0-2): SYSCALL_MEM_ALLOC 增加 rights 参数(显式衰减,不再默认
  * 全权)。调用方全部在树内同步更新,无外部消费者,按兼容扩展处理。
- * 1.2 (P1-1): 新增 notification 家族 syscall 87-90(IPC_NOTIFICATION
+ * 1.2 (P1-1): 新增 notification 家族 syscall 87-91(IPC_NOTIFICATION
  * 默认关闭,未启用时槽位返回 NOSYS 之外的既有行为不变)。 */
 #ifndef KERN_ABI_MAJOR
 #define KERN_ABI_MAJOR  1

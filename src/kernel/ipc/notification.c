@@ -174,11 +174,15 @@ static kern_err_t ntfn_signal_locked(notification_t *ntfn, uint32_t badge,
             ntfn->word = 0;
 
             wait_queue_remove(&ntfn->wait_queue, waiter);
+            /* 移交字总是镜像到 cont.u.ntfn.word:内核路径(notification_wait
+             * 唤醒后从这里读);SVC 路径另经 msg_buf copy_to_user。 */
+            waiter->cont.u.ntfn.word = consumed;
             if (waiter->cont.msg_buf != NULL) {
                 /* signal 方在锁内完成移交(4 字节);失败不回滚——字已被
                  * 消费,等待者以 FAULT 醒来比静默丢字更可诊断。 */
                 if (copy_to_user(waiter->cont.msg_buf, &consumed,
                                  sizeof(consumed)) != KERN_OK) {
+                    waiter->cont.object = NULL;
                     waiter->cont.result = KERN_ERR_FAULT;
                     syscall_cont_wake(waiter, KERN_ERR_FAULT);
                     irq_spin_unlock(&notification_lock, crit);
@@ -239,6 +243,92 @@ kern_err_t notification_poll(notification_id_t id, uint32_t *out_word) {
 
     irq_spin_unlock(&notification_lock, crit);
     return KERN_OK;
+}
+
+/*============================================================================
+ * 内核任务阻塞 wait(线程式,event_wait 同款手动协议)
+ *
+ * 与 notification_wait_syscall(SVC 两阶段)的差异:手动在对象锁内完成
+ * 出队+置 BLOCKED(消除 sched_block 的解锁窗口唤醒丢失竞态),唤醒后
+ * 从 cont.u.ntfn.word 取移交字。内核服务任务(timer/irq/BH,P2-2/P2-3)
+ * 与 K 白盒测试用这个;用户任务走 SVC。
+ *============================================================================*/
+
+kern_err_t notification_wait(notification_id_t id, uint32_t timeout,
+                             uint32_t *out_word) {
+    if (hal_irq_get_active() >= 0) {
+        return KERN_ERR_ISR;
+    }
+    uint32_t crit = irq_spin_lock(&notification_lock);
+
+    notification_t *ntfn = get_notification(id);
+    if (ntfn == NULL) {
+        irq_spin_unlock(&notification_lock, crit);
+        return KERN_ERR_PARAM;
+    }
+
+    if (ntfn->word != 0U) {
+        uint32_t w = ntfn->word;
+        ntfn->word = 0;
+        irq_spin_unlock(&notification_lock, crit);
+        if (out_word != NULL) {
+            *out_word = w;
+        }
+        return KERN_OK;
+    }
+
+    if (timeout == 0U) {
+        irq_spin_unlock(&notification_lock, crit);
+        return KERN_ERR_TIMEOUT;
+    }
+
+    tcb_t *current = sched_get_current();
+    if (current == NULL ||
+        current->id < 0 || current->id >= KERN_MAX_TASKS) {
+        irq_spin_unlock(&notification_lock, crit);
+        return KERN_ERR_STATE;
+    }
+
+    current->cont.op = BLOCK_REASON_NOTIFICATION;
+    current->cont.object = ntfn;
+    current->cont.msg_buf = NULL;  /* 内核路径:字经 cont.u.ntfn 移交 */
+    current->cont.u.ntfn.word = 0;
+
+    wait_queue_add(&ntfn->wait_queue, current);
+
+    {
+        extern void sched_remove_ready(tcb_t *tcb);
+        sched_remove_ready(current);
+    }
+    current->state = TASK_STATE_BLOCKED;
+    current->cont.result = KERN_OK;
+    current->cont.deadline = sched_timeout_deadline(timeout);
+
+    irq_spin_unlock(&notification_lock, crit);
+
+    hal_trigger_pendsv();
+
+    while (current->state == TASK_STATE_BLOCKED) {
+        __asm volatile("wfi");
+        __asm volatile("dmb");
+    }
+
+    kern_err_t result = current->cont.result;
+    uint32_t w = current->cont.u.ntfn.word;
+
+    /* signal 已摘队列并清 object;超时路径由 task_unlink_blocked 走
+     * notification_cleanup_task 摘除。此处兜底幂等 unlink。 */
+    crit = irq_spin_lock(&notification_lock);
+    if (current->cont.object == ntfn) {
+        wait_queue_remove(&ntfn->wait_queue, current);
+        current->cont.object = NULL;
+    }
+    irq_spin_unlock(&notification_lock, crit);
+
+    if (result == KERN_OK && out_word != NULL) {
+        *out_word = w;
+    }
+    return result;
 }
 
 /*============================================================================
