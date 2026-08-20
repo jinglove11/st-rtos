@@ -148,7 +148,7 @@ typedef enum {
 #define TASK_SHM_MAP_MAX 5
 typedef struct {
     uint8_t  in_use;
-    uint8_t  region;
+    uint8_t  region;   /* P1-3: 顾问值(驻留槽或 0xFF),生命周期在 mpu 软表 */
     uint8_t  rights;
     uint8_t  _pad;
     cap_id_t cap;

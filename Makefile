@@ -433,6 +433,7 @@ TEST_SOURCES += src/tests/abi/test_mpu.c
 TEST_SOURCES += src/tests/abi/test_notification.c
 TEST_SOURCES += src/tests/abi/test_ntfn_user.c
 TEST_SOURCES += src/tests/k/test_notification.c
+TEST_SOURCES += src/tests/k/test_mpu_aspace.c
 TEST_SOURCES += src/tests/abi/test_syscall_user.c
 TEST_SOURCES += src/tests/abi/test_usercopy.c
 # SYS 层: 启动健康

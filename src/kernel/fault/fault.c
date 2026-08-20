@@ -301,6 +301,17 @@ void fault_handler_c(uint32_t fault_type, void *exc_frame, uint32_t exc_return) 
         is_user_fault = 1;
     }
 
+#if MPU_ENABLE
+    /* P1-3: 用户数据访问违例先尝试按需换入 —— 软映射表有覆盖该地址且
+     * 未驻留的表项时,LRU 换入运行时槽并重试指令(非故障)。
+     * 已驻留仍违例(真实权限/XN)或无覆盖映射 → 走正常故障处理。 */
+    if (is_user_fault && fault_type == FAULT_TYPE_MEMMANAGE &&
+        (cfsr & (1U << 7)) /* MMFSR.MMARVALID */ &&
+        mpu_map_demand_load(current, crash_dump.mmfar) == 1) {
+        return;
+    }
+#endif
+
     if (is_user_fault) {
         /* 用户任务 fault → 终止任务 */
         (void)task_terminate_with_result(current, KERN_ERR_FAULT);

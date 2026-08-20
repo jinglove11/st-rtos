@@ -2,7 +2,7 @@
 
 Auto-generated from [`Kconfig`](../../Kconfig) by [`scripts/gen_kconfig_docs.py`](../../scripts/gen_kconfig_docs.py).
 
-**139 options** across **23** menu groups.
+**140 options** across **23** menu groups.
 
 To refresh this page after editing Kconfig:
 
@@ -120,6 +120,7 @@ python3 scripts/gen_kconfig_docs.py
 | Option | Type | Default | Description |
 |---|---|---|---|
 | [`MPU_ENABLE`](MPU_ENABLE.md) | `bool` | `y` | Enable MPU memory protection |
+| [`MPU_MAP_MAX`](MPU_MAP_MAX.md) | `int` | `16` | Per-task software MPU mapping table size (P1-3) |
 | [`MPU_REGION_COUNT`](MPU_REGION_COUNT.md) | `int` | `5` | MPU regions per task |
 | [`SYSCALL_ENABLE`](SYSCALL_ENABLE.md) | `bool` | `y` | Enable syscall interface |
 | [`SYSCALL_TABLE_SIZE`](SYSCALL_TABLE_SIZE.md) | `int` | `96` | Syscall table size |

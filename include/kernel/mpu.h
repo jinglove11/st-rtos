@@ -76,8 +76,27 @@
  * 动态区分配器(P1-3)。
  *============================================================================*/
 #if MPU_ENABLE
+/* genconfig 不物化 .config 缺失符号的 Kconfig 默认值(P0-8 缺口):
+ * 回退与 Kconfig default 16 保持一致。 */
+#ifndef MPU_MAP_MAX
+#define MPU_MAP_MAX 16
+#endif
+
+/* P1-3: 软映射表项 —— 映射的持久记录;硬件槽(3..)是它的 LRU 驻留缓存 */
+typedef struct {
+    uintptr_t base;
+    uint32_t  size;
+    uint32_t  attr;      /* AP_*|ATTR_*|XN 意图(不含 RASR_ENABLE) */
+    int8_t    slot;      /* 当前驻留硬件槽(3..),-1 = 未驻留 */
+    uint32_t  lru_seq;   /* 驻留换序 */
+    uint8_t   in_use;
+} mpu_map_t;
+
 typedef struct address_space {
-    uint32_t regions[MPU_REGION_COUNT][2];  /* [RBAR, RASR/RLAR] */
+    uint32_t regions[MPU_REGION_COUNT][2];  /* 硬件镜像(SVC/PendSV 重载源) */
+    mpu_map_t maps[MPU_MAP_MAX];            /* P1-3: 软映射表 */
+    int8_t   slot_owner[MPU_REGION_COUNT];  /* 槽 → 软表项 idx,-1 空 */
+    uint32_t lru_tick;
     uint8_t  in_use;
 } address_space_t;
 
@@ -85,6 +104,20 @@ typedef struct address_space {
 address_space_t *mpu_aspace_acquire(void);
 /* 任务资源清理时归还(幂等,同时清 TCB 指针) */
 void mpu_aspace_release_task(tcb_t *tcb);
+
+/* P1-3: 动态映射接口(内核内部;mem.c 的 kshm/kmmio 走这里)
+ * attr = AP_*|ATTR_*|XN_ENABLE(不含 RASR_ENABLE)。
+ * 硬件运行时槽满时不失败 —— 新表项暂不驻留,首次访问经 MemManage
+ * 按需换入(mpu_map_demand_load)。 */
+int mpu_map_add(tcb_t *task, uintptr_t base, uint32_t size, uint32_t attr);
+kern_err_t mpu_map_remove(tcb_t *task, uintptr_t base);
+/* 诊断/测试:base 覆盖的软表项当前驻留槽,-1 = 未驻留/无映射 */
+int mpu_map_slot_of(tcb_t *task, uintptr_t base);
+/* MemManage 按需换入(fault.c 调,作用域=故障核):
+ *   1  = 已换入(写硬件+镜像),异常返回重试即恢复
+ *   0  = 命中映射且已驻留(真实权限/执行违例,按故障处理)
+ *  -1  = 无覆盖映射 */
+int mpu_map_demand_load(tcb_t *task, uint32_t fault_addr);
 #endif /* MPU_ENABLE */
 
 void mpu_init(void);

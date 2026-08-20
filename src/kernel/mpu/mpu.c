@@ -68,9 +68,11 @@ static address_space_t aspace_pool[KERNEL_MAX_TASKS];
 address_space_t *mpu_aspace_acquire(void) {
     for (uint32_t i = 0; i < KERNEL_MAX_TASKS; i++) {
         if (!aspace_pool[i].in_use) {
+            memset(&aspace_pool[i], 0, sizeof(aspace_pool[i]));
             aspace_pool[i].in_use = 1U;
-            memset(&aspace_pool[i].regions, 0,
-                   sizeof(aspace_pool[i].regions));
+            for (uint32_t r = 0; r < MPU_REGION_COUNT; r++) {
+                aspace_pool[i].slot_owner[r] = -1;
+            }
             return &aspace_pool[i];
         }
     }
@@ -89,6 +91,183 @@ void mpu_aspace_release_task(tcb_t *tcb) {
             return;
         }
     }
+}
+
+/*============================================================================
+ * P1-3: 动态映射 —— 软表 + 硬件槽 LRU 驻留缓存
+ *============================================================================*/
+
+/* 驻留:encode 进镜像 + 更新槽归属/LRU。不直接写硬件 —— 硬件在 SVC/
+ * PendSV 返回路径统一从镜像重载;fault 换入路径额外立即写本核。 */
+static void aspace_slot_program(address_space_t *as, int slot, int map_idx) {
+    mpu_map_t *m = &as->maps[map_idx];
+    mpu_region_encode((uint32_t)slot, (uint32_t)m->base, m->size,
+                      RASR_ENABLE | m->attr,
+                      &as->regions[slot][0], &as->regions[slot][1]);
+    m->slot = (int8_t)slot;
+    m->lru_seq = ++as->lru_tick;
+    as->slot_owner[slot] = (int8_t)map_idx;
+}
+
+static void aspace_slot_evict(address_space_t *as, int slot) {
+    int8_t owner = as->slot_owner[slot];
+    if (owner >= 0 && owner < MPU_MAP_MAX) {
+        as->maps[owner].slot = -1;
+    }
+    as->slot_owner[slot] = -1;
+    as->regions[slot][0] = 0;
+    as->regions[slot][1] = 0;
+}
+
+/* 运行时槽 = 3..MPU_REGION_COUNT-1(0/1/2 为静态布局) */
+static int runtime_slot_first(void) { return 3; }
+
+static int aspace_free_slot(address_space_t *as) {
+    for (int r = runtime_slot_first(); r < MPU_REGION_COUNT; r++) {
+        if (as->slot_owner[r] < 0) {
+            return r;
+        }
+    }
+    return -1;
+}
+
+static int aspace_lru_victim_slot(address_space_t *as) {
+    int victim = -1;
+    uint32_t oldest = 0;
+    for (int r = runtime_slot_first(); r < MPU_REGION_COUNT; r++) {
+        int8_t owner = as->slot_owner[r];
+        if (owner < 0) {
+            return r;  /* 空槽优先 */
+        }
+        if (victim < 0 || as->maps[owner].lru_seq < oldest) {
+            victim = r;
+            oldest = as->maps[owner].lru_seq;
+        }
+    }
+    return victim;
+}
+
+int mpu_map_add(tcb_t *task, uintptr_t base, uint32_t size, uint32_t attr) {
+    if (task == NULL || task->aspace == NULL) {
+        return -(int)KERN_ERR_STATE;
+    }
+    if (size == 0U) {
+        return -(int)KERN_ERR_PARAM;
+    }
+    address_space_t *as = task->aspace;
+
+    for (uint32_t i = 0; i < MPU_MAP_MAX; i++) {
+        if (as->maps[i].in_use && as->maps[i].base == base) {
+            return -(int)KERN_ERR_BUSY;
+        }
+    }
+    int mi = -1;
+    for (uint32_t i = 0; i < MPU_MAP_MAX; i++) {
+        if (!as->maps[i].in_use) {
+            mi = (int)i;
+            break;
+        }
+    }
+    if (mi < 0) {
+        return -(int)KERN_ERR_RESOURCE;  /* 只有软表满才拒映射 */
+    }
+
+    as->maps[mi].base = base;
+    as->maps[mi].size = size;
+    as->maps[mi].attr = attr;
+    as->maps[mi].slot = -1;
+    as->maps[mi].lru_seq = 0;
+    as->maps[mi].in_use = 1;
+
+    int slot = aspace_free_slot(as);
+    if (slot >= 0) {
+        aspace_slot_program(as, slot, mi);
+    }
+    return mi;
+}
+
+kern_err_t mpu_map_remove(tcb_t *task, uintptr_t base) {
+    if (task == NULL || task->aspace == NULL) {
+        return KERN_ERR_STATE;
+    }
+    address_space_t *as = task->aspace;
+    for (uint32_t i = 0; i < MPU_MAP_MAX; i++) {
+        if (as->maps[i].in_use && as->maps[i].base == base) {
+            if (as->maps[i].slot >= 0) {
+                aspace_slot_evict(as, as->maps[i].slot);
+            }
+            memset(&as->maps[i], 0, sizeof(as->maps[i]));
+            return KERN_OK;
+        }
+    }
+    return KERN_ERR_NOEXIST;
+}
+
+int mpu_map_slot_of(tcb_t *task, uintptr_t base) {
+    if (task == NULL || task->aspace == NULL) {
+        return -1;
+    }
+    address_space_t *as = task->aspace;
+    for (uint32_t i = 0; i < MPU_MAP_MAX; i++) {
+        if (as->maps[i].in_use && as->maps[i].base == base) {
+            return as->maps[i].slot;
+        }
+    }
+    return -1;
+}
+
+/* 单槽硬件装载(fault 换入用):本核立即生效,禁-置-启序防瞬时错覆盖 */
+static void mpu_slot_hw_load(uint32_t slot, uint32_t rbar, uint32_t rlar) {
+#if BOARD_MPU_ARMV8
+    uint32_t saved_ctrl = MPU_CTRL;
+    __asm volatile("dsb" ::: "memory");
+    MPU_CTRL = 0;
+    __asm volatile("dsb; isb" ::: "memory");
+#endif
+    MPU_RNR = slot;
+    MPU_RBAR = rbar;
+#if BOARD_MPU_ARMV8
+    MPU_RLAR = rlar;
+    __asm volatile("dsb; isb" ::: "memory");
+    MPU_CTRL = saved_ctrl;
+    __asm volatile("isb" ::: "memory");
+#else
+    MPU_RASR = rlar;
+    __asm volatile("dsb; isb" ::: "memory");
+#endif
+}
+
+int mpu_map_demand_load(tcb_t *task, uint32_t fault_addr) {
+    if (task == NULL || task->aspace == NULL) {
+        return -1;
+    }
+    address_space_t *as = task->aspace;
+
+    int mi = -1;
+    for (uint32_t i = 0; i < MPU_MAP_MAX; i++) {
+        if (as->maps[i].in_use &&
+            fault_addr >= (uint32_t)as->maps[i].base &&
+            fault_addr < (uint32_t)as->maps[i].base + as->maps[i].size) {
+            mi = (int)i;
+            break;
+        }
+    }
+    if (mi < 0) {
+        return -1;  /* 无覆盖映射:走正常故障处理 */
+    }
+    if (as->maps[mi].slot >= 0) {
+        return 0;   /* 已驻留仍违例:真实权限/执行故障 */
+    }
+
+    int slot = aspace_lru_victim_slot(as);
+    if (slot < 0) {
+        return -1;  /* 无运行时槽(配置异常),按故障处理 */
+    }
+    aspace_slot_evict(as, slot);
+    aspace_slot_program(as, slot, mi);
+    mpu_slot_hw_load((uint32_t)slot, as->regions[slot][0],
+                     as->regions[slot][1]);
+    return 1;
 }
 #endif /* MPU_ENABLE */
 

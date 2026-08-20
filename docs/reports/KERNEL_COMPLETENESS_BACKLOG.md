@@ -96,7 +96,19 @@
     待维护者。
   - 剩余 slice 2:aspace cap 化/共享(多任务同 address_space,M4 进程语义)、
     与 P1-3 动态区分配器衔接
-- [ ] P1-3 (C3) MPU region 动态分配器(突破每任务 5 映射上限)
+- [x] P1-3 (C3) MPU region 动态分配器(突破每任务 5 映射上限)
+  - 实现(2026-08-20):软映射表 mpu_map_t[MPU_MAP_MAX](Kconfig,default 16)进入
+    address_space;硬件运行时槽(3..MPU_REGION_COUNT-1)降级为表的 LRU 驻留缓存
+    (slot_owner 双向归属 + lru_seq)。mpu_map_add/remove/slot_of/demand_load API;
+    槽满不拒映射(表满才 RESOURCE),MemManage(MMARVALID)fault 钩子按需 LRU 换入
+    (写本核硬件 + 镜像,正常异常返回重试;已驻留仍违例=真实故障放行)。mem.c
+    kshm/kmmio 三 map 三 unmap 全量迁移(槽满仍成功);mmio_map_t 补 addr 字段
+    (unmap 时 cap 可能已吊销,不能靠 cap 反查);shm_mapping_t.region 降为顾问值。
+    mpu.h MPU_MAP_MAX #ifndef 回退(genconfig 不物化默认值,P0-8 缺口,与
+    SMP_STRESS_ITERATIONS 同款)。k/test_mpu_aspace.c(模块 mpu_aspace):容量
+    超槽/LRU 逐出恰一/驻留重入 0/未覆盖 -1/remove 清槽归属/表满/重复 base/无
+    aspace 拒绝。验证:双板 + CI 全矩阵绿;用户任务真实 fault 换入端到端归板上
+    回归。
 - [ ] P1-4 (C2) 用户任务私有 data/heap 域(code/rodata/data/stack region 布局)
 - [ ] P1-5 (C1) ELF loader:完整段校验 + 溢出检查 + W^X 强制
 - [ ] P1-6 (C1) ELF loader:重定位(R_ARM_ABS32/MOVW)+ backing 跟踪与退出回收

@@ -725,31 +725,17 @@ kern_err_t kmem_map_to_task(tcb_t *task, cap_id_t cap,
         return KERN_ERR_RESOURCE;
     }
 
-    /* P1-2: 区表在 address_space;内核任务无 aspace,不可映射 */
-    if (task->aspace == NULL) {
-        return KERN_ERR_STATE;
-    }
-
-    int region = -1;
-    for (uint32_t r = 3; r < MPU_REGION_COUNT; r++) {
-        if ((task->aspace->regions[r][1] & RASR_ENABLE) == 0) {
-            region = (int)r;
-            break;
-        }
-    }
-    if (region < 0) {
-        return KERN_ERR_RESOURCE;
-    }
-
+    /* P1-3: 登记软映射表;硬件运行时槽满时不失败(MemManage 按需换入)。
+     * SHM/Frame 数据区 */
     uint32_t ap = (rights & CAP_WRITE) ? AP_FULL : AP_PRW_URO;
-    mpu_region_encode((uint32_t)region, (uint32_t)(uintptr_t)frame->base,
-                      (uint32_t)frame->size,
-                      RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE,
-                      &task->aspace->regions[region][0],
-                      &task->aspace->regions[region][1]);
+    int map_id = mpu_map_add(task, (uintptr_t)frame->base,
+                             (uint32_t)frame->size, ap | ATTR_NORMAL_WBWA | XN_ENABLE);
+    if (map_id < 0) {
+        return (kern_err_t)(-map_id);
+    }
 
     task->shm_maps[map_slot].in_use = 1U;
-    task->shm_maps[map_slot].region = (uint8_t)region;
+    task->shm_maps[map_slot].region = 0xFFU;  /* P1-3: 驻留由软表管理,此字段为顾问值 */
     task->shm_maps[map_slot].rights = rights;
     task->shm_maps[map_slot].cap = cap;
     task->shm_maps[map_slot].addr = frame->base;
@@ -1019,31 +1005,17 @@ kern_err_t kshm_map_to_task(tcb_t *task, cap_id_t cap,
         return KERN_ERR_RESOURCE;
     }
 
-    /* P1-2: 区表在 address_space;内核任务无 aspace,不可映射 */
-    if (task->aspace == NULL) {
-        return KERN_ERR_STATE;
-    }
-
-    int region = -1;
-    for (uint32_t r = 3; r < MPU_REGION_COUNT; r++) {
-        if ((task->aspace->regions[r][1] & RASR_ENABLE) == 0) {
-            region = (int)r;
-            break;
-        }
-    }
-    if (region < 0) {
-        return KERN_ERR_RESOURCE;
-    }
-
+    /* P1-3: 登记软映射表;硬件运行时槽满时不失败(MemManage 按需换入)。
+     * SHM 数据区 */
     uint32_t ap = (rights & CAP_WRITE) ? AP_FULL : AP_PRW_URO;
-    mpu_region_encode((uint32_t)region, (uint32_t)(uintptr_t)shm->base,
-                      (uint32_t)shm->size,
-                      RASR_ENABLE | ap | ATTR_NORMAL_WBWA | XN_ENABLE,
-                      &task->aspace->regions[region][0],
-                      &task->aspace->regions[region][1]);
+    int map_id = mpu_map_add(task, (uintptr_t)shm->base,
+                             (uint32_t)shm->size, ap | ATTR_NORMAL_WBWA | XN_ENABLE);
+    if (map_id < 0) {
+        return (kern_err_t)(-map_id);
+    }
 
     task->shm_maps[map_slot].in_use = 1U;
-    task->shm_maps[map_slot].region = (uint8_t)region;
+    task->shm_maps[map_slot].region = 0xFFU;  /* P1-3: 驻留由软表管理,此字段为顾问值 */
     task->shm_maps[map_slot].rights = rights;
     task->shm_maps[map_slot].cap = cap;
     task->shm_maps[map_slot].addr = shm->base;
@@ -1070,13 +1042,8 @@ kern_err_t kshm_unmap_from_task(tcb_t *task, cap_id_t cap) {
                 result = KERN_ERR_CAP;
             }
 
-            uint8_t region = task->shm_maps[i].region;
-            if (region < 8) {
-                if (task->aspace != NULL) {
-                    task->aspace->regions[region][0] = 0;
-                    task->aspace->regions[region][1] = 0;
-                }
-            }
+            /* P1-3: 生命周期在软表(含驻留槽清除) */
+            (void)mpu_map_remove(task, (uintptr_t)task->shm_maps[i].addr);
             memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
             return result;
         }
@@ -1105,13 +1072,8 @@ void kshm_unmap_cap_from_all_tasks(cap_id_t cap) {
                 continue;
             }
 
-            uint8_t region = task->shm_maps[i].region;
-            if (region < 8) {
-                if (task->aspace != NULL) {
-                    task->aspace->regions[region][0] = 0;
-                    task->aspace->regions[region][1] = 0;
-                }
-            }
+            /* P1-3: 生命周期在软表(含驻留槽清除) */
+            (void)mpu_map_remove(task, (uintptr_t)task->shm_maps[i].addr);
             memset(&task->shm_maps[i], 0, sizeof(task->shm_maps[i]));
             if (task == current) {
                 current_changed = 1;
@@ -1163,8 +1125,9 @@ void kshm_unmap_all_for_task(tcb_t *task) {
 #define TASK_MMIO_MAP_MAX 4
 typedef struct {
     uint8_t  in_use;
-    uint8_t  region;
+    uint8_t  region;   /* P1-3 后为顾问值(驻留槽或 0xFF),生命周期在软表 */
     cap_id_t cap;
+    void    *addr;     /* P1-3: unmap 定位软映射表项(cap 可能已被吊销) */
 } mmio_map_t;
 static mmio_map_t task_mmio_maps[KERNEL_MAX_TASKS][TASK_MMIO_MAP_MAX];
 
@@ -1210,34 +1173,19 @@ kern_err_t kmmio_map_to_task(tcb_t *task, cap_id_t cap,
         return KERN_ERR_RESOURCE;
     }
 
-    /* P1-2: 区表在 address_space;内核任务无 aspace,不可映射 */
-    if (task->aspace == NULL) {
-        return KERN_ERR_STATE;
-    }
-
-    int region = -1;
-    for (uint32_t r = 3; r < MPU_REGION_COUNT; r++) {
-        if ((task->aspace->regions[r][1] & RASR_ENABLE) == 0) {
-            region = (int)r;
-            break;
-        }
-    }
-    if (region < 0) {
-        return KERN_ERR_RESOURCE;
-    }
-
+    /* P1-3: 登记软映射表;硬件运行时槽满时不失败(MemManage 按需换入)。
+     * Device 强序 */
     uint32_t ap = (rights & CAP_WRITE) ? AP_FULL : AP_PRW_URO;
-    /* Device memory: ATTR_DEVICE (strongly-ordered, no cache). XN off — MMIO
-     * is data, never executed. */
-    mpu_region_encode((uint32_t)region, (uint32_t)mmio->base,
-                      (uint32_t)mmio->size,
-                      RASR_ENABLE | ap | ATTR_DEVICE | XN_ENABLE,
-                      &task->aspace->regions[region][0],
-                      &task->aspace->regions[region][1]);
+    int map_id = mpu_map_add(task, (uintptr_t)mmio->base,
+                             (uint32_t)mmio->size, ap | ATTR_DEVICE | XN_ENABLE);
+    if (map_id < 0) {
+        return (kern_err_t)(-map_id);
+    }
 
     task_mmio_maps[task->id][map_slot].in_use = 1U;
-    task_mmio_maps[task->id][map_slot].region = (uint8_t)region;
+    task_mmio_maps[task->id][map_slot].region = 0xFFU;  /* P1-3: 驻留由软表管理,此字段为顾问值 */
     task_mmio_maps[task->id][map_slot].cap = cap;
+    task_mmio_maps[task->id][map_slot].addr = (void *)(uintptr_t)mmio->base;
 
     /* If the task is mapping into itself (the common case: a driver task
      * calls sys_mmio_map from its own context), the new MPU region won't take
@@ -1266,13 +1214,8 @@ kern_err_t kmmio_unmap_from_task(tcb_t *task, cap_id_t cap) {
     for (uint32_t i = 0; i < TASK_MMIO_MAP_MAX; i++) {
         if (task_mmio_maps[task->id][i].in_use &&
             task_mmio_maps[task->id][i].cap == cap) {
-            uint8_t region = task_mmio_maps[task->id][i].region;
-            if (region < 8) {
-                if (task->aspace != NULL) {
-                    task->aspace->regions[region][0] = 0;
-                    task->aspace->regions[region][1] = 0;
-                }
-            }
+            (void)mpu_map_remove(task,
+                                 (uintptr_t)task_mmio_maps[task->id][i].addr);
             memset(&task_mmio_maps[task->id][i], 0,
                    sizeof(task_mmio_maps[task->id][i]));
             return KERN_OK;
@@ -1292,13 +1235,8 @@ void kmmio_unmap_all_for_task(tcb_t *task) {
     }
     for (uint32_t i = 0; i < TASK_MMIO_MAP_MAX; i++) {
         if (task_mmio_maps[task->id][i].in_use) {
-            uint8_t region = task_mmio_maps[task->id][i].region;
-            if (region < 8) {
-                if (task->aspace != NULL) {
-                    task->aspace->regions[region][0] = 0;
-                    task->aspace->regions[region][1] = 0;
-                }
-            }
+            (void)mpu_map_remove(task,
+                                 (uintptr_t)task_mmio_maps[task->id][i].addr);
             memset(&task_mmio_maps[task->id][i], 0,
                    sizeof(task_mmio_maps[task->id][i]));
         }

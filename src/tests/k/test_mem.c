@@ -303,7 +303,8 @@ static void test_kshm_map_to_task(void) {
         if (tcb != NULL && tcb->shm_maps[i].in_use &&
             tcb->shm_maps[i].cap == task_cap) {
             mapped_slot = i;
-            mapped_region = tcb->shm_maps[i].region;
+            mapped_region = mpu_map_slot_of(
+                tcb, (uintptr_t)tcb->shm_maps[i].addr);
             break;
         }
     }
@@ -342,7 +343,8 @@ static void test_kshm_map_to_task(void) {
         if (tcb != NULL && tcb->shm_maps[i].in_use &&
             tcb->shm_maps[i].cap == task_cap) {
             mapped_slot = i;
-            mapped_region = tcb->shm_maps[i].region;
+            mapped_region = mpu_map_slot_of(
+                tcb, (uintptr_t)tcb->shm_maps[i].addr);
             break;
         }
     }
@@ -397,7 +399,8 @@ static void test_kshm_revoke_unmaps_task(void) {
     for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
         if (tcb != NULL && tcb->shm_maps[i].in_use &&
             tcb->shm_maps[i].cap == task_cap) {
-            mapped_region = tcb->shm_maps[i].region;
+            mapped_region = mpu_map_slot_of(
+                tcb, (uintptr_t)tcb->shm_maps[i].addr);
             saw_mapping = 1;
             break;
         }
@@ -464,7 +467,8 @@ static void test_kframe_revoke_unmaps_task(void) {
     for (int i = 0; i < TASK_SHM_MAP_MAX; i++) {
         if (tcb != NULL && tcb->shm_maps[i].in_use &&
             tcb->shm_maps[i].cap == task_cap) {
-            mapped_region = tcb->shm_maps[i].region;
+            mapped_region = mpu_map_slot_of(
+                tcb, (uintptr_t)tcb->shm_maps[i].addr);
             saw_mapping = 1;
             break;
         }
