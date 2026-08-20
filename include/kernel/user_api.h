@@ -454,8 +454,10 @@ static inline void *sys_ch_get_shm(int ch_id) {
  * 内存管理 — 用户态内联封装
  *============================================================================*/
 
-static inline int sys_mem_alloc(int size) {
-    return sys_call1(SYSCALL_MEM_ALLOC, size);
+/* P0-2(B5): rights 显式指定(READ/WRITE/MANAGE/TRANSFER 的非空子集,
+ * 不含 GRANT)。ABI 1.1 起双参;旧单参调用编译期即失配。 */
+static inline int sys_mem_alloc(int size, int rights) {
+    return sys_call2(SYSCALL_MEM_ALLOC, size, rights);
 }
 
 static inline int sys_mem_free(int mem_cap) {

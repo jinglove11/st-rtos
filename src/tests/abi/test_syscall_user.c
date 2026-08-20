@@ -101,7 +101,7 @@ static void user_raw_object_id_control_task(void *arg) {
     int ep_cap = sys_ep_create("raw_audit_ep", KERN_EP_MSG_SIZE, 1);
     int ch_cap = sys_ch_create(KERN_CH_MSG_SIZE, 0);
     int timer_cap = sys_timer_create("raw_audit_timer", NULL, NULL, 1);
-    int frame_cap = sys_mem_alloc(64);
+    int frame_cap = sys_mem_alloc(64, CAP_READ | CAP_WRITE | CAP_MANAGE);
     int peer_a_cap = sys_task_create("raw_peer_a",
                                      user_raw_audit_peer_task,
                                      NULL, 8, 512);
@@ -315,7 +315,7 @@ static void user_timer_notify_task(void *arg) {
 static void user_mem_cap_task(void *arg) {
     (void)arg;
 
-    int cap = sys_mem_alloc(32);
+    int cap = sys_mem_alloc(32, CAP_READ | CAP_WRITE | CAP_MANAGE);
     int err = KERN_OK;
     if (cap < 0) {
         sys_task_exit((void *)(intptr_t)cap);

@@ -336,7 +336,7 @@ int fs_server_run_with_dev(int ep_cap, uint32_t max_requests,
     }
 
     /* Phase B:fs_server 自管 inode 池 + ramfs。 */
-    int store_mem_cap = sys_mem_alloc(4096);
+    int store_mem_cap = sys_mem_alloc(4096, CAP_READ | CAP_WRITE | CAP_MANAGE);
     int init_err = KERN_OK;
     fs_store_ctx_t *ctx = NULL;
     void *store = NULL;

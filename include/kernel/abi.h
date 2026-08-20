@@ -52,12 +52,15 @@ extern "C" {
  * ABI 版本 (单一来源: kernel_config.h 的 KERN_ABI_MAJOR/MINOR)
  *============================================================================*/
 
+/* ABI 版本单一来源(原注释称 kernel_config.h,实际从未在那里定义)。
+ * 1.1 (P0-2): SYSCALL_MEM_ALLOC 增加 rights 参数(显式衰减,不再默认
+ * 全权)。调用方全部在树内同步更新,无外部消费者,按兼容扩展处理。 */
 #ifndef KERN_ABI_MAJOR
 #define KERN_ABI_MAJOR  1
 #endif
 
 #ifndef KERN_ABI_MINOR
-#define KERN_ABI_MINOR  0
+#define KERN_ABI_MINOR  1
 #endif
 
 /* sys_abi_version() 返回值: (MAJOR << 16) | MINOR */

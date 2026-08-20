@@ -1027,12 +1027,13 @@ static int sys_timer_bind(uint32_t a1, uint32_t a2, uint32_t a3,
 
 static int sys_mem_alloc(uint32_t a1, uint32_t a2, uint32_t a3,
                                  uint32_t a4, uint32_t a5, uint32_t a6) {
-    U(a2);U(a3);U(a4);U(a5);U(a6);
-    if (a1 == 0) return KERN_ERR_PARAM;
+    U(a3);U(a4);U(a5);U(a6);
+    /* P0-2(B5): rights 显式化,不再默认全权。合法集合不含 CAP_GRANT
+     * (mem cap 不可派生子 cap,流转只能走 IPC transfer)。 */
+    uint32_t valid = CAP_READ | CAP_WRITE | CAP_MANAGE | CAP_TRANSFER;
+    if (a1 == 0 || a2 == 0 || (a2 & ~valid) != 0) return KERN_ERR_PARAM;
 #if CAP_ENABLE
-    cap_id_t cap = kmem_alloc_cap((size_t)a1,
-                                  CAP_READ | CAP_WRITE | CAP_MANAGE |
-                                  CAP_TRANSFER);
+    cap_id_t cap = kmem_alloc_cap((size_t)a1, (uint8_t)a2);
     if (cap < 0) return KERN_ERR_RESOURCE;
     return (int)cap;
 #else
@@ -1831,7 +1832,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_IRQ_BIND,      sys_irq_bind,      3),
     SYSDEF(SYSCALL_BH_CREATE,     sys_bh_create,     2),
     SYSDEF(SYSCALL_BH_SCHEDULE,   sys_bh_schedule,   1),
-    SYSDEF(SYSCALL_MEM_ALLOC,     sys_mem_alloc,     1),
+    SYSDEF(SYSCALL_MEM_ALLOC,     sys_mem_alloc,     2),
     SYSDEF(SYSCALL_MEM_FREE,      sys_mem_free,      1),
     SYSDEF(SYSCALL_MEM_SIZE,      sys_mem_size,      1),
     SYSDEF(SYSCALL_MEM_MAP,       sys_mem_map,       2),
