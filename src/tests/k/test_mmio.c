@@ -54,14 +54,14 @@ static int count_enabled_regions(tcb_t *tcb) {
 static void test_mmio_map_programs_region(void) {
     test_section("Test 1: mmio map programs MPU region");
 
-    task_id_t tid = task_create("mmio_t1", mmio_scratch_task, NULL, 10, 1024);
+    task_id_t tid = task_create_user("mmio_t1", mmio_scratch_task, NULL, 10, 1024);
     TEST_ASSERT(tid >= 0, "scratch task created");
     if (tid < 0) return;
     tcb_t *tcb = task_get_tcb(tid);
     if (tcb == NULL) { task_delete(tid); return; }
 
     cap_id_t cap = KERN_INVALID_ID;
-    kern_err_t e = kmmio_create_cap(TEST_MMIO_BASE, TEST_MMIO_SIZE, 4,
+    kern_err_t e = kmmio_create_cap_for(tcb, TEST_MMIO_BASE, TEST_MMIO_SIZE, 4,
                                     CAP_READ | CAP_WRITE, &cap);
     TEST_ASSERT_EQ((int)KERN_OK, (int)e, "kmmio_create_cap OK");
     TEST_ASSERT(cap >= 0, "cap id valid");
@@ -89,14 +89,14 @@ static void test_mmio_map_programs_region(void) {
 static void test_mmio_unmap_clears_region(void) {
     test_section("Test 2: mmio unmap clears region");
 
-    task_id_t tid = task_create("mmio_t2", mmio_scratch_task, NULL, 10, 1024);
+    task_id_t tid = task_create_user("mmio_t2", mmio_scratch_task, NULL, 10, 1024);
     TEST_ASSERT(tid >= 0, "scratch task created");
     if (tid < 0) return;
     tcb_t *tcb = task_get_tcb(tid);
     if (tcb == NULL) { task_delete(tid); return; }
 
     cap_id_t cap = KERN_INVALID_ID;
-    (void)kmmio_create_cap(TEST_MMIO_BASE, TEST_MMIO_SIZE, 4,
+    (void)kmmio_create_cap_for(tcb, TEST_MMIO_BASE, TEST_MMIO_SIZE, 4,
                            CAP_READ | CAP_WRITE, &cap);
     TEST_ASSERT(cap >= 0, "cap created");
     if (cap < 0) { task_delete(tid); return; }
@@ -120,7 +120,7 @@ static void test_mmio_unmap_clears_region(void) {
 static void test_mmio_rights_and_bad_cap(void) {
     test_section("Test 3: wrong rights / bad cap rejected");
 
-    task_id_t tid = task_create("mmio_t3", mmio_scratch_task, NULL, 10, 1024);
+    task_id_t tid = task_create_user("mmio_t3", mmio_scratch_task, NULL, 10, 1024);
     TEST_ASSERT(tid >= 0, "scratch task created");
     if (tid < 0) return;
     tcb_t *tcb = task_get_tcb(tid);
@@ -128,7 +128,7 @@ static void test_mmio_rights_and_bad_cap(void) {
 
     /* READ-only cap, request WRITE → rejected. */
     cap_id_t cap = KERN_INVALID_ID;
-    (void)kmmio_create_cap(TEST_MMIO_BASE, TEST_MMIO_SIZE, 4, CAP_READ, &cap);
+    (void)kmmio_create_cap_for(tcb, TEST_MMIO_BASE, TEST_MMIO_SIZE, 4, CAP_READ, &cap);
     TEST_ASSERT(cap >= 0, "read-only cap created");
     if (cap < 0) { task_delete(tid); return; }
 

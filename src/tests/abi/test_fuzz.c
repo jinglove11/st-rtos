@@ -94,6 +94,7 @@ static int fuzz_is_blocking_syscall(uint32_t num) {
         case SYSCALL_CH_SEND_CAPS:
         case SYSCALL_CH_RECV:
         case SYSCALL_CH_RECV_CAPS:
+        case SYSCALL_NTFN_WAIT:      /* P1-1: 阻塞等待 */
             return 1;
         default:
             return 0;
@@ -131,6 +132,8 @@ static void test_syscall_fuzz_random(void) {
             syscall_num == SYSCALL_MUTEX_CREATE ||
             syscall_num == SYSCALL_MQUEUE_CREATE ||
             syscall_num == SYSCALL_EVENT_CREATE ||
+            syscall_num == SYSCALL_NTFN_CREATE || /* P1-1: 分配 cap+对象 */
+            syscall_num == SYSCALL_NTFN_DELETE || /* 改对象状态 */
             syscall_num == SYSCALL_EP_CREATE ||
             syscall_num == SYSCALL_CH_CREATE ||
             syscall_num == SYSCALL_TIMER_CREATE ||

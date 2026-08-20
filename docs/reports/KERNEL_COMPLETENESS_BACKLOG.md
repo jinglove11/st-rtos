@@ -81,8 +81,11 @@
     5 组用户契约:单任务全链(无徽章 signal=no-op/徽章字位/消费/delete 后 cap 吊销)、
     rights(WRITE 才能 signal,READ 才能 wait/poll)、SVC 超时、SVC 阻塞被内核
     signal 唤醒(用户内存 copyout)、用户→用户跨任务 signal(字=signaler 徽章)。
-    验证:双板 + CI 全矩阵 6/6 绿(2026-08-20);板上回归待维护者。irq/timer
-    消费者接入归 P2-2/P2-3。
+    验证:双板 + CI 全矩阵 6/6 绿 + 板上真机(工作配置 3351/3351 含 ntfn 63/63 +
+    ntfn_user 24/24;SMP preset 3386/3386,2026-08-20)。板上修复:signal 唤醒改
+    直写 msg_buf(阻塞时已按等待者上下文校验;copy_to_user 按当前=signal 方的
+    MPU 区校验,跨任务等待者栈必被拒——endpoint/mqueue 同款 memcpy 范式);
+    fuzz 跳过清单补 NTFN_CREATE/DELETE/WAIT。irq/timer 消费者接入归 P2-2/P2-3。
 - [~] P1-2 (C2) `mpu_domain_t`/`address_space_t` 从 TCB 分离 mapping policy
   - slice 1(2026-08-20):行为保持重构。新增 `address_space_t`(regions[8][2],
     mpu.h)+ KERNEL_MAX_TASKS 池(mpu_aspace_acquire/release_task);TCB 的内嵌
@@ -92,8 +95,7 @@
     kshm/kmmio unmap 之后归还)、mem.c(map 三路径加 NULL 守卫+扫描/编码/
     unmap 清零迁指针)、usercopy(MPU 校验 NULL 早退)、fault(区转储 NULL 安全)、
     elf_loader(region 3)、白盒测试 3 文件;gen_tcb_offsets.c 同步(off_mpu_regions
-    → off_aspace,asm 无直接引用)。验证:双板 + CI 全矩阵 6/6 绿;板上回归
-    待维护者。
+    → off_aspace,asm 无直接引用)。验证:双板 + CI 全矩阵 6/6 绿 + 板上真机(工作配置/SMP 双 preset 全绿)。
   - 剩余 slice 2:aspace cap 化/共享(多任务同 address_space,M4 进程语义)、
     与 P1-3 动态区分配器衔接
 - [x] P1-3 (C3) MPU region 动态分配器(突破每任务 5 映射上限)

@@ -178,16 +178,11 @@ static kern_err_t ntfn_signal_locked(notification_t *ntfn, uint32_t badge,
              * 唤醒后从这里读);SVC 路径另经 msg_buf copy_to_user。 */
             waiter->cont.u.ntfn.word = consumed;
             if (waiter->cont.msg_buf != NULL) {
-                /* signal 方在锁内完成移交(4 字节);失败不回滚——字已被
-                 * 消费,等待者以 FAULT 醒来比静默丢字更可诊断。 */
-                if (copy_to_user(waiter->cont.msg_buf, &consumed,
-                                 sizeof(consumed)) != KERN_OK) {
-                    waiter->cont.object = NULL;
-                    waiter->cont.result = KERN_ERR_FAULT;
-                    syscall_cont_wake(waiter, KERN_ERR_FAULT);
-                    irq_spin_unlock(&notification_lock, crit);
-                    return KERN_OK;
-                }
+                /* 唤醒时直写(endpoint/mqueue 同款):指针在阻塞时已按
+                 * 等待者上下文校验过(user_access_ok),这里不能用
+                 * copy_to_user —— 它按当前任务(signal 方)的 MPU 区校验,
+                 * 跨任务等待者栈指针必然被拒。 */
+                *(uint32_t *)waiter->cont.msg_buf = consumed;
             }
             waiter->cont.object = NULL;
             waiter->cont.result = KERN_OK;
