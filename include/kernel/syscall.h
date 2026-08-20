@@ -134,6 +134,10 @@
 #define SYSCALL_CAP_BADGE        84            /* M2-#7: read badge of a cap */
 #define SYSCALL_FACTORY_CREATE   85            /* M2: capability-authorized object creation */
 #define SYSCALL_ABI_VERSION      86            /* M3-Step1: query kernel ABI version */
+#define SYSCALL_NTFN_CREATE      87            /* P1-1: notification create (full cap) */
+#define SYSCALL_NTFN_SIGNAL      88            /* P1-1: signal via badged cap */
+#define SYSCALL_NTFN_WAIT        89            /* P1-1: block until word!=0, consume it */
+#define SYSCALL_NTFN_POLL        90            /* P1-1: consume word without blocking */
 
 /*============================================================================
  * Syscall 分发

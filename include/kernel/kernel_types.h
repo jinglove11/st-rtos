@@ -51,6 +51,7 @@ typedef int16_t sem_id_t;        // 信号量 ID
 typedef int16_t mutex_id_t;      // 互斥锁 ID
 typedef int16_t queue_id_t;      // 消息队列 ID
 typedef int16_t event_id_t;      // 事件标志组 ID
+typedef int16_t notification_id_t; // P1-1: notification 对象 ID
 typedef int16_t timer_id_t;      // 定时器 ID
 /* Capability handles use bit 31 as the invalid/sign bit and keep every valid
  * handle positive.  The capability implementation currently assigns bits
@@ -136,6 +137,7 @@ typedef enum {
     BLOCK_REASON_EP_RECV   = 10, // 等待 endpoint 请求
     BLOCK_REASON_CH_SEND   = 11, // 等待 channel 对端接收
     BLOCK_REASON_CH_RECV   = 12, // 等待 channel 对端发送
+    BLOCK_REASON_NOTIFICATION = 13, // P1-1: 等待 notification word
 } block_reason_t;
 
 /*============================================================================
@@ -189,6 +191,7 @@ typedef struct {
         struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ep_recv;
         struct { cap_id_t *out_caps; uint8_t *out_cap_count; } ch;
         struct { uint32_t wait_flags; uint32_t wait_opt; uint32_t *received; } event;
+        struct { uint32_t word; } ntfn;  /* P1-1: 唤醒时移交的消费字(诊断镜像) */
         struct {
             uint8_t body[KERN_CH_MSG_SIZE];
             ipc_cap_xfer_t caps[IPC_CAPS_MAX];
@@ -347,6 +350,18 @@ typedef struct {
     wait_queue_t wait_queue;            // 等待队列
     uint8_t     in_use;                 // 使用标志
 } event_t;
+
+/*============================================================================
+ * P1-1 (A4): 独立 notification 对象
+ * 与 event 的差异见 notification.h(聚合徽章/整字消费/单等待者移交)。
+ *============================================================================*/
+
+typedef struct {
+    kobject_header_t hdr;               // CAP_OBJ_NOTIFICATION
+    uint32_t    word;                   // 聚合徽章字(signal |= / wait 取清)
+    wait_queue_t wait_queue;            // 等待队列(至多移交队头一个)
+    uint8_t     in_use;                 // 使用标志
+} notification_t;
 
 /*============================================================================
  * 软件定时器

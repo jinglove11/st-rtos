@@ -21,6 +21,7 @@
 #include "mutex.h"
 #include "mqueue.h"
 #include "event.h"
+#include "notification.h"
 /* Phase F4: vfs.h 移除 (内核 VFS 已删) */
 #include "mem.h"
 #include "root_bootstrap.h"
@@ -492,6 +493,16 @@ static kern_err_t task_unlink_blocked(tcb_t *tcb) {
         if (tcb->cont.object) {
             event_cleanup_task(tcb->cont.object, tcb);
         }
+        break;
+
+    case BLOCK_REASON_NOTIFICATION:
+#if IPC_NOTIFICATION
+        if (tcb->cont.object) {
+            notification_cleanup_task(tcb->cont.object, tcb);
+        }
+#else
+        return KERN_ERR_BUSY;
+#endif
         break;
 
     case BLOCK_REASON_EP_SEND:

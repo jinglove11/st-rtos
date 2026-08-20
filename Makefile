@@ -360,6 +360,7 @@ KERN_SOURCES += src/kernel/ipc/semaphore.c
 KERN_SOURCES += src/kernel/ipc/mutex.c
 KERN_SOURCES += src/kernel/ipc/mqueue.c
 KERN_SOURCES += src/kernel/ipc/event.c
+KERN_SOURCES += src/kernel/ipc/notification.c
 KERN_SOURCES += src/kernel/ipc/ipc_transfer.c
 KERN_SOURCES += src/kernel/ipc/endpoint.c
 KERN_SOURCES += src/kernel/ipc/channel.c
@@ -430,6 +431,7 @@ TEST_SOURCES += src/tests/abi/test_fuzz.c
 TEST_SOURCES += src/tests/abi/test_irq_user.c
 TEST_SOURCES += src/tests/abi/test_mpu.c
 TEST_SOURCES += src/tests/abi/test_notification.c
+TEST_SOURCES += src/tests/k/test_notification.c
 TEST_SOURCES += src/tests/abi/test_syscall_user.c
 TEST_SOURCES += src/tests/abi/test_usercopy.c
 # SYS 层: 启动健康

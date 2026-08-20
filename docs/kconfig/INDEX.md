@@ -2,7 +2,7 @@
 
 Auto-generated from [`Kconfig`](../../Kconfig) by [`scripts/gen_kconfig_docs.py`](../../scripts/gen_kconfig_docs.py).
 
-**137 options** across **23** menu groups.
+**139 options** across **23** menu groups.
 
 To refresh this page after editing Kconfig:
 
@@ -65,6 +65,8 @@ python3 scripts/gen_kconfig_docs.py
 | [`IPC_MQUEUE_MAX`](IPC_MQUEUE_MAX.md) | `int` | `4` | Maximum message queues |
 | [`IPC_MUTEX`](IPC_MUTEX.md) | `bool` | `y` | Enable mutex |
 | [`IPC_MUTEX_MAX`](IPC_MUTEX_MAX.md) | `int` | `8` | Maximum mutexes |
+| [`IPC_NOTIFICATION`](IPC_NOTIFICATION.md) | `bool` | `n` | Enable notification objects (P1-1, seL4-style) |
+| [`IPC_NOTIFICATION_MAX`](IPC_NOTIFICATION_MAX.md) | `int` | `8` | Maximum notification objects |
 | [`IPC_SEMAPHORE`](IPC_SEMAPHORE.md) | `bool` | `y` | Enable semaphore |
 | [`IPC_SEMAPHORE_MAX`](IPC_SEMAPHORE_MAX.md) | `int` | `8` | Maximum semaphores |
 | [`MUTEX_DEADLOCK_DETECT`](MUTEX_DEADLOCK_DETECT.md) | `bool` | `y` | Enable deadlock detection |

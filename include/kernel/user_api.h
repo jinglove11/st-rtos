@@ -486,6 +486,30 @@ static inline int sys_shm_unmap(int shm_cap) {
 }
 
 /*============================================================================
+ * P1-1: notification 对象 — 用户态内联封装
+ * create 返回全权 cap;signal 用 mint 出的带徽章 cap(字位=徽章);
+ * wait/poll 消费整个 word。对象需 IPC_NOTIFICATION=y。
+ *============================================================================*/
+static inline int sys_ntfn_create(void) {
+    return sys_call0(SYSCALL_NTFN_CREATE);
+}
+
+static inline int sys_ntfn_signal(int ntfn_cap) {
+    return sys_call1(SYSCALL_NTFN_SIGNAL, ntfn_cap);
+}
+
+static inline int sys_ntfn_wait(int ntfn_cap, uint32_t timeout,
+                                uint32_t *out_word) {
+    return sys_call3(SYSCALL_NTFN_WAIT, ntfn_cap, timeout,
+                     (int)(uintptr_t)out_word);
+}
+
+static inline int sys_ntfn_poll(int ntfn_cap, uint32_t *out_word) {
+    return sys_call2(SYSCALL_NTFN_POLL, ntfn_cap,
+                     (int)(uintptr_t)out_word);
+}
+
+/*============================================================================
  * VFS 文件操作 — 用户态内联封装(reserved ABI,恒 NOSYS)
  * 内核 VFS 已删(P0-6):这些编号 reserved 永不复用,内核槽位无条件
  * 返回 NOSYS(不随 VFS_ENABLE 摇摆)。inline 保留让旧代码能编译,

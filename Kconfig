@@ -289,6 +289,20 @@ config IPC_EVENT_MAX
     default 4
     range 1 16
 
+config IPC_NOTIFICATION
+    bool "Enable notification objects (P1-1, seL4-style)"
+    default n
+    help
+      独立 notification 对象:单字聚合徽章 word,signal 只做 |=,
+      wait/poll 消费整字。与 event(按位匹配)互补,是 timer/irq/BH
+      通知化(P2-2/P2-3)与 M4 的前置。默认关闭,待消费者接入后转正。
+
+config IPC_NOTIFICATION_MAX
+    int "Maximum notification objects"
+    depends on IPC_NOTIFICATION
+    default 8
+    range 1 32
+
 config IPC_ENDPOINT
     bool "Enable endpoint (C/S messaging)"
     default y

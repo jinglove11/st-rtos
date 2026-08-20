@@ -11,6 +11,7 @@
 #include "mutex.h"
 #include "mqueue.h"
 #include "event.h"
+#include "notification.h"
 #include "endpoint.h"
 #if FAULT_ENDPOINT
 #include "fault_endpoint.h"
@@ -439,6 +440,80 @@ static int sys_event_set(uint32_t a1, uint32_t a2, uint32_t a3,
     return event_set((event_id_t)a1, a2);
 #endif
 }
+
+/*============================================================================
+ * P1-1: notification 对象(独立于 event;badge 驱动的聚合通知)
+ *============================================================================*/
+
+#if IPC_NOTIFICATION
+static int sys_ntfn_create(uint32_t a1, uint32_t a2, uint32_t a3,
+                           uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
+    notification_id_t id = notification_create();
+    if (id < 0) return (int)id;
+#if CAP_ENABLE
+    tcb_t *cur = sched_get_current();
+    void *obj = notification_obj_for_cap(id);
+    cap_id_t cap = cap_create_for(cur, obj, CAP_OBJ_NOTIFICATION, CAP_FULL);
+    if (cap < 0) {
+        (void)notification_delete(id);
+        return KERN_ERR_RESOURCE;
+    }
+    return (int)cap;
+#else
+    return (int)id;
+#endif
+}
+
+static int sys_ntfn_signal(uint32_t a1, uint32_t a2, uint32_t a3,
+                           uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    U(a2);  /* badge 取自 cap,显式参数仅在 !CAP_ENABLE 配置使用 */
+    /* badge 来自 signal cap 本身(sys_cap_mint 铸入)——这是 notification
+     * 与 event 的本质差异:字位标识"谁发的",调用方无法伪造。 */
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_NOTIFICATION, CAP_WRITE);
+    if (!obj) return KERN_ERR_CAP;
+    uint32_t badge = cap_get_badge((cap_id_t)a1);
+    return notification_signal(notification_id_from_obj(obj), badge);
+#else
+    return notification_signal((notification_id_t)a1, a2);
+#endif
+}
+
+static int sys_ntfn_wait(uint32_t a1, uint32_t a2, uint32_t a3,
+                         uint32_t a4, uint32_t a5, uint32_t a6) {
+    U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_NOTIFICATION, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    return notification_wait_syscall(notification_id_from_obj(obj), a2,
+                                     (void *)(uintptr_t)a3);
+#else
+    return notification_wait_syscall((notification_id_t)a1, a2,
+                                     (void *)(uintptr_t)a3);
+#endif
+}
+
+static int sys_ntfn_poll(uint32_t a1, uint32_t a2, uint32_t a3,
+                         uint32_t a4, uint32_t a5, uint32_t a6) {
+    uint32_t word = 0;
+    U(a3);U(a4);U(a5);U(a6);
+#if CAP_ENABLE
+    void *obj = cap_resolve((cap_id_t)a1, CAP_OBJ_NOTIFICATION, CAP_READ);
+    if (!obj) return KERN_ERR_CAP;
+    kern_err_t err = notification_poll(notification_id_from_obj(obj), &word);
+#else
+    kern_err_t err = notification_poll((notification_id_t)a1, &word);
+#endif
+    if (err != KERN_OK) return (int)err;
+    if (a2 != 0U &&
+        copy_to_user((void *)(uintptr_t)a2, &word, sizeof(word)) != KERN_OK) {
+        return KERN_ERR_FAULT;
+    }
+    return KERN_OK;
+}
+#endif /* IPC_NOTIFICATION */
 
 static int sys_mutex_delete(uint32_t a1, uint32_t a2, uint32_t a3,
                                     uint32_t a4, uint32_t a5, uint32_t a6) {
@@ -1846,6 +1921,12 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_BADGE,     sys_cap_badge,     1),
     SYSDEF(SYSCALL_FACTORY_CREATE, sys_factory_create, 2),
     SYSDEF(SYSCALL_ABI_VERSION,    sys_abi_version,    0),
+#if IPC_NOTIFICATION
+    SYSDEF(SYSCALL_NTFN_CREATE,     sys_ntfn_create,   0),
+    SYSDEF(SYSCALL_NTFN_SIGNAL,     sys_ntfn_signal,   1),
+    SYSDEF(SYSCALL_NTFN_WAIT,       sys_ntfn_wait,     3),
+    SYSDEF(SYSCALL_NTFN_POLL,       sys_ntfn_poll,     2),
+#endif
     SYSDEF(SYSCALL_SHM_CREATE,    sys_shm_create,    2),
     SYSDEF(SYSCALL_SHM_MAP,       sys_shm_map,       2),
     SYSDEF(SYSCALL_SHM_UNMAP,     sys_shm_unmap,     1),

@@ -54,12 +54,14 @@
  * - FACTORY: 对象工厂 cap (创建新内核对象的权限,如 task_create_cap)
  * - FRAME:   内存帧 backing object；M4 将在此之上建立完整地址域
  * - SYSTEM:  系统操作 cap (reboot/info/debug 控制等特权操作)
+ * - NOTIFICATION: P1-1 seL4 风格聚合通知对象 (badge 驱动 signal)
  * SYSTEM 仍留给 M5 的 root/management 边界。 */
 #define CAP_OBJ_CNODE       15
 #define CAP_OBJ_FACTORY     16
 #define CAP_OBJ_FRAME       17
 #define CAP_OBJ_SYSTEM      18
-#define CAP_OBJ_TYPE_MAX   19
+#define CAP_OBJ_NOTIFICATION 19
+#define CAP_OBJ_TYPE_MAX   20
 
 /*============================================================================
  * Per-task CSpace / CNode leaf

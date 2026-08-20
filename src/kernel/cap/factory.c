@@ -7,6 +7,7 @@
 #include "channel.h"
 #include "endpoint.h"
 #include "event.h"
+#include "notification.h"
 #include "mqueue.h"
 #include "mem.h"
 #include "mutex.h"
@@ -119,6 +120,11 @@ static void factory_delete_created(uint8_t obj_type, int id) {
         case CAP_OBJ_EVENT:
             (void)event_delete((event_id_t)id);
             break;
+#if IPC_NOTIFICATION
+        case CAP_OBJ_NOTIFICATION:
+            (void)notification_delete((notification_id_t)id);
+            break;
+#endif
         case CAP_OBJ_TIMER:
             (void)timer_delete((timer_id_t)id);
             break;
@@ -165,6 +171,13 @@ static int factory_allocate_object(tcb_t *caller,
             id = event_create(request->param0);
             *out_object = id >= 0 ? event_obj_for_cap((event_id_t)id) : NULL;
             break;
+#if IPC_NOTIFICATION
+        case CAP_OBJ_NOTIFICATION:
+            id = notification_create();
+            *out_object = id >= 0
+                ? notification_obj_for_cap((notification_id_t)id) : NULL;
+            break;
+#endif
         case CAP_OBJ_TIMER:
             if ((caller->attrs & TASK_ATTR_USER) != 0U &&
                 request->entry != 0U) {

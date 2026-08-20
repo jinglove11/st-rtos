@@ -10,6 +10,7 @@
 #include "mutex.h"
 #include "mqueue.h"
 #include "event.h"
+#include "notification.h"
 #include "endpoint.h"
 #include "channel.h"
 
@@ -21,6 +22,9 @@ static inline void ipc_init(void) {
     mutex_init();
     mqueue_init();
     event_init();
+#if IPC_NOTIFICATION
+    notification_init();
+#endif
     endpoint_init();
     channel_init();
 }
