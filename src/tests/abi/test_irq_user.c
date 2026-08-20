@@ -19,6 +19,10 @@
 #include "capability.h"
 #include "user_api.h"
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 #define TEST_IRQ_USER_BIND      ((int16_t)(BOARD_IRQ_COUNT - 2U))
 #define TEST_IRQ_BIND_RIGHTS    ((int16_t)(BOARD_IRQ_COUNT - 1U))
 
@@ -276,3 +280,4 @@ static void test_irq_user_module(void) {
 }
 
 TEST_ABI_MODULE(irq_user, test_irq_user_module);
+#endif /* TEST_ENABLE */

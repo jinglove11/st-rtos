@@ -57,16 +57,13 @@ run_rp2350_preset() {
         return 4
     fi
 
-    if [[ "$preset" != "full" ]]; then
-        python3 scripts/verify_pico2w_build.py \
-            --elf build/rp2350-pico-sdk/my-rtos-pico2w.elf \
-            --uf2 build/rp2350-pico-sdk/my-rtos-pico2w.uf2 \
-            --nm "$ROOT/tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/arm-none-eabi-nm" \
-            --picotool "$ROOT/tools/picotool/picotool/picotool" >>"$log" 2>&1 || {
-            fail "verify_pico2w_build.py failed (see $log)"
-            return 5
-        }
-    fi
+    python3 scripts/verify_pico2w_build.py \
+        --elf build/rp2350-pico-sdk/my-rtos-pico2w.elf \
+        --uf2 build/rp2350-pico-sdk/my-rtos-pico2w.uf2 \
+        --nm "$ROOT/tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/arm-none-eabi-nm" >>"$log" 2>&1 || {
+        fail "verify_pico2w_build.py failed (see $log)"
+        return 5
+    }
 
     pass "RP2350/$preset: ELF + UF2 built, image verified"
 }

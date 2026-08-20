@@ -40,10 +40,13 @@
 static device_t device_pool[DEVICE_MAX];
 static irq_spinlock_t device_lock;
 
+/* 唯一调用方在 trace_dev 路径内;TRACE 关闭的镜像(release)不得残留死函数 */
+#if TRACE_ENABLE
 static uint8_t device_current_task_id(void) {
     tcb_t *current = sched_get_current();
     return current ? (uint8_t)current->id : 0xFFU;
 }
+#endif
 
 int16_t device_get_id(device_t *dev) {
     if (!dev) return KERN_INVALID_ID;

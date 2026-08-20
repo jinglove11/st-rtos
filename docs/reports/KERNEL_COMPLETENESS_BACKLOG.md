@@ -29,8 +29,21 @@
     + configs/rp2350_dev_defconfig。顺带修两个存量 TEST-off 断裂:cap_test_* 钩子
     guard 失配(内核侧 TEST_ENABLE vs 测试侧 TEST_MODULE_CAP,双侧对齐后者)、
     main.c release 分支缺 system_init.h。dev 镜像构建绿(test_runner 符号缺席验证)
+  - 验证补漏(2026-08-20 复核):dev 镜像此前仍链入 11 个无 TEST 门控的测试模块
+    (注册宏无总门,service_model 的注册还落在文件级守卫之外)→ 11 个测试文件统一
+    `#if TEST_ENABLE` 全文件包裹,dev 镜像测试符号清零(text 404K→169K);dev
+    defconfig 残留 TEST_MODULE_*=y 一并清除。另修两处 master 存量断裂:release
+    (device.c device_current_task_id 在 TRACE off 下 unused)与 tiny
+    (IPC_EP_MSG_SIZE=32 装不下 ns_name_msg_t=44,nameserver.h 加 _Static_assert
+    钉死契约,tiny 提到 48)。verify_pico2w_build.py 弃用 picotool info(镜像内
+    ASCII 误读 bug,见 KNOWN_ISSUES)改 UF2 直解,ci_local 恢复 full 校验。
+    全矩阵绿:rp2350 tiny/default/release/full + stm32 + docs(kconfig 文档补生成
+    DEV_PROFILE 页)。
 - [ ] P0-6 (C7) 清理 10 个 sys_nosys VFS 死槽(保留 ABI 编号,注释明确 reserved)
 - [ ] P0-7 (D5) kernel_config.h 移出 git 跟踪,改为纯生成物(.gitignore + 构建依赖修正)
+- [ ] P0-8 (D6) genconfig 输出不执行 depends 收缩(Kconfig 依赖仅在交互菜单 UI 生效,
+  defconfig 携带违依赖符号会被原样写进 kernel_config.h——P0-5 验证中 dev 镜像链入
+  测试代码的根因;顺手评估 range 下限同样不收缩的问题)
 
 ## P1 M4 批(结构性,L 级,每次一个可验证切片)
 

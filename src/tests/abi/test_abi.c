@@ -10,6 +10,10 @@
 #include "kernel_types.h"
 #include "factory.h"
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 /*============================================================================
  * Test 1: sys_abi_version 返回正确值
  *============================================================================*/
@@ -141,3 +145,4 @@ static void test_abi_module(void) {
 }
 
 TEST_ABI_MODULE(abi, test_abi_module);
+#endif /* TEST_ENABLE */

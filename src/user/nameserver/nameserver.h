@@ -34,6 +34,11 @@ typedef struct {
     uint32_t owner_badge;
 } ns_name_msg_t;
 
+/* nameserver 消息直接复用 endpoint 消息缓冲:IPC_EP_MSG_SIZE 必须
+ * 容纳整个协议头+名字,否则客户端写越界(把配置错误钉死在编译期)。 */
+_Static_assert(sizeof(ns_name_msg_t) <= KERN_EP_MSG_SIZE,
+               "IPC_EP_MSG_SIZE too small for ns_name_msg_t (need >= 44)");
+
 typedef struct {
     uint8_t in_use;
     char name[NS_NAME_MAX];

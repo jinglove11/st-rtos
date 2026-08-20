@@ -20,6 +20,10 @@
 #include "trace.h"
 #include "stats.h"
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 /*============================================================================
  * 测试数据
  *============================================================================*/
@@ -406,3 +410,4 @@ static void test_timer_module(void) {
  *============================================================================*/
 
 TEST_K_MODULE(timer, test_timer_module);
+#endif /* TEST_ENABLE */

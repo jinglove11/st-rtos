@@ -103,10 +103,13 @@ waker 以 -2 唤醒),del 本身 TERMINATED。属超窄时序窗口 (任何代码
 (sched_wake_param_join_hits/ra,冷路径零扰动): 下次触发 RACEDBG
 将直接打印投递者地址,addr2line 即可定罪。
 
-**附带 (CI 工具,非运行问题)**: verify_pico2w_build.py 的 UF2 元数据
-校验在 default/release (偶发 full) 上 flaky — picotool 解析镜像时把
-"cap " 字符串误当指针 ("failed to read memory at 0x20706163")。
-ELF 构建正常、板上运行正常,与 picotool 版本相关,待单独排查。
+**附带 (CI 工具,非运行问题) — 已绕开 (2026-08-20)**: verify_pico2w_build.py
+原先的 UF2 元数据校验依赖 `picotool info`,而 picotool 解析镜像时会把
+镜像内 ASCII 字符串(观察过 "cap "、"fact")误当指针 ("failed to read
+memory at 0x…"),随镜像布局 flaky。ELF/UF2 本身与板上运行一直正常。
+处置:脚本改为直接解析 UF2 块结构(magic/family ID 集合/pico2_w 板卡串),
+不再调用 picotool;ci_local.sh 恢复 full preset 的镜像校验。picotool
+本体 bug(换版本/上报上游)另案,不影响 CI。
 
 ## 7. 附带观测(非失败,一并记录)
 

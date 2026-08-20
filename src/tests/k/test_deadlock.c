@@ -16,6 +16,10 @@
 #include "task.h"
 #include "kernel_types.h"
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 /*============================================================================
  * 测试 1: 两任务环死锁 (AB-BA)
  *
@@ -374,3 +378,4 @@ static void test_deadlock_module(void) {
  *============================================================================*/
 
 TEST_K_MODULE(deadlock, test_deadlock_module);
+#endif /* TEST_ENABLE */

@@ -17,6 +17,10 @@
 #include "timer.h"
 #include "mem.h"
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 #if CAP_ENABLE
 #include "capability.h"
 #endif
@@ -318,3 +322,4 @@ static void test_syscall_module(void) {
 TEST_K_MODULE(syscall, test_syscall_module);
 
 #endif /* SYSCALL_ENABLE */
+#endif /* TEST_ENABLE */

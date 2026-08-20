@@ -24,6 +24,10 @@
 #include "capability.h"
 #include "user_api.h"
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 /* Keep synthetic test IRQs inside the active board's NVIC range. */
 #define TEST_IRQ_CAP_LIFECYCLE  ((int16_t)(BOARD_IRQ_COUNT - 5U))
 #define TEST_IRQ_CAP_BIND       ((int16_t)(BOARD_IRQ_COUNT - 4U))
@@ -641,3 +645,4 @@ static void test_irq_module(void) {
  *============================================================================*/
 
 TEST_K_MODULE(irq, test_irq_module);
+#endif /* TEST_ENABLE */

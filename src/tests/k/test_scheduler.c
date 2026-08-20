@@ -31,6 +31,10 @@
 #include "mutex.h"
 #include <string.h>
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 #if !SMP
 /*============================================================================
  * 测试 0: 单核系统只能有一个 RUNNING TCB
@@ -860,3 +864,4 @@ static void test_scheduler_module(void) {
  *============================================================================*/
 
 TEST_K_MODULE(scheduler, test_scheduler_module);
+#endif /* TEST_ENABLE */

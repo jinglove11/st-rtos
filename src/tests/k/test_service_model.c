@@ -17,6 +17,10 @@
 #include "fs_types.h"   /* Phase F2: dirent_t/vfs_stat_t (原在 inode.h) */
 #include <string.h>
 
+#if TEST_ENABLE
+/* P0-5 验证补漏:TEST-off 镜像(dev/release/tiny)不得链入测试代码。
+ * TEST_ENABLE 为测试代码链接总门(与既有模块级 TEST_MODULE_* 门互补)。 */
+
 #if TEST_ENABLE && CAP_ENABLE && MPU_ENABLE
 
 static void root_dummy_task(void *arg) {
@@ -3185,3 +3189,4 @@ void test_service_model_module(void) {
 }
 
 TEST_K_MODULE(service_model, test_service_model_module);
+#endif /* TEST_ENABLE */

@@ -2,7 +2,7 @@
 
 Auto-generated from [`Kconfig`](../../Kconfig) by [`scripts/gen_kconfig_docs.py`](../../scripts/gen_kconfig_docs.py).
 
-**136 options** across **23** menu groups.
+**137 options** across **23** menu groups.
 
 To refresh this page after editing Kconfig:
 
@@ -215,6 +215,7 @@ python3 scripts/gen_kconfig_docs.py
 
 | Option | Type | Default | Description |
 |---|---|---|---|
+| [`DEV_PROFILE`](DEV_PROFILE.md) | `bool` | `n` | Development image (shell without test framework) |
 | [`TEST_ENABLE`](TEST_ENABLE.md) | `bool` | `y` | Enable test framework |
 | [`TEST_MODULE_BLOCK`](TEST_MODULE_BLOCK.md) | `bool` | `y` | Block device (flash) tests |
 | [`TEST_MODULE_CAP`](TEST_MODULE_CAP.md) | `bool` | `y` | Capability system tests |
