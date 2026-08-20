@@ -268,10 +268,10 @@ kern_err_t cap_register_revoke_hook(uint8_t obj_type,
  *============================================================================*/
 cap_id_t cap_self_find_slot(tcb_t *owner, uint8_t obj_type, uint8_t index);
 
-#if TEST_ENABLE
+#if TEST_MODULE_CAP
 /* Boundary-test hooks.  They are absent from production builds and exist so
  * generation exhaustion can be verified without executing 16 million
- * create/delete cycles on target hardware. */
+ * create/delete cycles on target hardware. (P0-5: guard 对齐 test_capability.c) */
 uint32_t cap_test_generation_limit(void);
 uint32_t cap_test_local_generation_limit(void);
 kern_err_t cap_test_force_generation(cap_id_t cap, uint32_t generation,

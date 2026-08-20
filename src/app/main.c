@@ -22,7 +22,9 @@ int main(void) {
 /* release profile: 直接初始化内核 + root/init */
 #include "kernel.h"
 #include "task.h"
+#include "system_init.h"
 #include "root_bootstrap.h"
+#include "shell.h"
 
 #if INIT_PROCESS
 extern void init_main(void *arg);
@@ -41,6 +43,12 @@ int main(void) {
 #if FAULT_ENDPOINT && SUPERVISOR
     (void)root_bootstrap_spawn_supervisor();
 #endif
+#endif
+
+#if DEV_PROFILE && SHELL_ENABLE
+    /* dev profile:无测试框架的 release 路径 + 特权 shell(诊断用)。
+     * shell 与 init 并存:shell 是内核任务,不是 init 的子进程。 */
+    shell_start();
 #endif
 
     kern_start();

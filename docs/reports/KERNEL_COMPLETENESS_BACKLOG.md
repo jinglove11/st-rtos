@@ -24,7 +24,11 @@
 - [x] P0-4 (D1) CMake 弃用 GLOB_RECURSE,改显式 source manifest(对齐 Makefile)
   - 实现:三处 GLOB(GLOB_RECURSE ×1 + GLOB ×4)全部替换为显式 set() 清单
     (kernel 36 / user 13 / tests 44 文件);新文件需手动登记。双板构建绿(2026-08-20)
-- [ ] P0-5 (D2) 补齐 test/dev/release 三 profile(dev = 无测试有 shell 的开发镜像)
+- [x] P0-5 (D2) 补齐 test/dev/release 三 profile(dev = 无测试有 shell 的开发镜像)
+  - 实现:Kconfig DEV_PROFILE(depends !TEST_ENABLE && SHELL_ENABLE)+ main.c release 分支起 shell
+    + configs/rp2350_dev_defconfig。顺带修两个存量 TEST-off 断裂:cap_test_* 钩子
+    guard 失配(内核侧 TEST_ENABLE vs 测试侧 TEST_MODULE_CAP,双侧对齐后者)、
+    main.c release 分支缺 system_init.h。dev 镜像构建绿(test_runner 符号缺席验证)
 - [ ] P0-6 (C7) 清理 10 个 sys_nosys VFS 死槽(保留 ABI 编号,注释明确 reserved)
 - [ ] P0-7 (D5) kernel_config.h 移出 git 跟踪,改为纯生成物(.gitignore + 构建依赖修正)
 

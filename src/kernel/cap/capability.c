@@ -1938,7 +1938,9 @@ uint16_t cap_free_count(void) {
     return free_count;
 }
 
-#if TEST_ENABLE
+/* 测试钩子区:guard 与 test_capability.c 的编译条件 (CAP_ENABLE 已由
+ * 文件级保证 && TEST_MODULE_CAP) 对齐,避免 TEST 关而模块开时失配。 */
+#if TEST_MODULE_CAP
 uint32_t cap_test_generation_limit(void) {
     return CAP_GENERATION_MAX;
 }

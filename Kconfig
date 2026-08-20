@@ -380,6 +380,14 @@ endmenu
 
 menu "Test Configuration"
 
+config DEV_PROFILE
+    bool "Development image (shell without test framework)"
+    depends on !TEST_ENABLE && SHELL_ENABLE
+    default n
+    help
+      dev profile:不编译测试框架,release 启动路径 + 特权 shell。
+      介于 test(全套测试)与 release(纯 init)之间的开发镜像。
+
 config TEST_ENABLE
     bool "Enable test framework"
     default y
