@@ -190,6 +190,44 @@ static void test_elf_segment_validation(void) {
 }
 
 /*============================================================================
+ * Test 4 (P1-6): 重定位 ELF(ABS32 + THM MOVW/MOVT,RAM-text 模式)
+ *============================================================================*/
+
+#ifdef TEST_ELF_REL_PATH
+extern const uint8_t __test_elf_rel_start[];
+extern const uint8_t __test_elf_rel_end[];
+
+static void test_elf_relocations(void) {
+    test_section("Test 4: relocation ELF (ABS32 + MOVW/MOVT)");
+
+    size_t size = (size_t)(__test_elf_rel_end - __test_elf_rel_start);
+    TEST_ASSERT(size > sizeof(Elf32_Ehdr), "reloc ELF embedded");
+    if (size <= sizeof(Elf32_Ehdr)) return;
+
+    /* 5 轮加载→执行→回收:exit 0(重定位判定全过)+ 无 cap/对象泄漏 */
+    for (int round = 0; round < 5; round++) {
+        task_id_t tid = KERN_INVALID_ID;
+        kern_err_t e = elf_load(__test_elf_rel_start, size,
+                                "elf_rel", 8, &tid);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)e, "reloc elf_load OK");
+        if (e != KERN_OK) return;
+        TEST_ASSERT(tid >= 0, "task id valid");
+
+        e = task_start(tid);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)e, "reloc elf started");
+
+        uintptr_t rv = 0;
+        e = task_join(tid, (void **)&rv, 20000U);
+        TEST_ASSERT_EQ((int)KERN_OK, (int)e, "reloc elf joined");
+        TEST_ASSERT_EQ(0, (int)rv,
+                       "reloc verdict 0 (ABS32/MOVW/bss/data all ok)");
+        (void)task_delete(tid);
+    }
+    test_pass("relocation ELF round-trip x5 (backing reclaimed)");
+}
+#endif /* TEST_ELF_REL_PATH */
+
+/*============================================================================
  * Module registration
  *============================================================================*/
 
@@ -197,6 +235,9 @@ static void test_elf_module(void) {
     test_elf_load_and_run();
     test_elf_bad_magic_rejected();
     test_elf_segment_validation();
+#ifdef TEST_ELF_REL_PATH
+    test_elf_relocations();
+#endif
 }
 
 TEST_K_MODULE(elf, test_elf_module);

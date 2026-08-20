@@ -140,13 +140,20 @@ static void task_exit_handler(void) {
 
 #if SYSCALL_ENABLE
 static void user_task_exit_handler(void) {
-    register int r0 __asm("r0") = SYSCALL_TASK_EXIT;
-
-    __asm volatile("svc #1" : "+r"(r0) :: "memory");
-
-    while (1) {
-        __asm volatile("wfi");
-    }
+    /* P1-6: 入口 R0 = 任务函数返回值(C ABI),转发到退出 retval 位(R1),
+     * R0 覆写为 syscall 号。显式调 sys_task_exit 的应用不受影响
+     * (它们自行设 R1);从 _start return 的 ELF 应用从此获得正确的
+     * 退出状态(此前 R1 为残留垃圾)。 */
+    __asm volatile(
+        "mov r1, r0\n\t"
+        "movs r0, %0\n\t"
+        "svc #1\n\t"
+        "1: wfi\n\t"
+        "b 1b\n\t"
+        :
+        : "i"(SYSCALL_TASK_EXIT)
+        : "r0", "r1", "memory");
+    __builtin_unreachable();
 }
 #endif
 

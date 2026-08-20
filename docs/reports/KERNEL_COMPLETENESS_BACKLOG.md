@@ -132,7 +132,19 @@
     负向测试 8 组(构造最小 ELF 变体):W^X/越界/memsz<filesz/无 X 段/
     entry 越界/截断/phentsize/双 X 段。验证:双板 + CI + 板上真机
     3360/3360(elf 模块 20/20,正向加载执行 exit=0)。
-- [ ] P1-6 (C1) ELF loader:重定位(R_ARM_ABS32/MOVW)+ backing 跟踪与退出回收
+- [x] P1-6 (C1) ELF loader:重定位(R_ARM_ABS32/MOVW)+ backing 跟踪与退出回收
+  - 实现(2026-08-20):--emit-relocs 静态重定位引擎 —— R_ARM_ABS32(bias 精确恢复
+    addend:new = old + (S'-S_link))、R_ARM_MOVW/MOVT_ABS(A32)与 R_ARM_THM_MOVW/
+    MOVT_ABS(T32,半字视图访问 + 实测编码位域 imm4/i/imm3/imm8)、R_ARM_V4BX 跳过;
+    不支持类型/段外目标/未定义符号一律 PARAM。镜像含 SHT_REL → text 落 RAM 模式
+    (RX 帧:AP_PRW_URO 无 XN,W^X 保持;entry = 帧基址 + 偏移;帧先以创建者名义
+    分配含 TRANSFER 权,建任务后 cap_move_to 移交,退出自动回收)。XIP 模式
+    (无重定位)行为不变。节表/symtab/REL 段全部镜像界内校验(溢出安全)。
+    user_task_exit_handler 入口 R0→R1 转发(C 返回值 = 退出状态,修返回式 ELF
+    应用 retval 丢失)。test_elf_rel_app(.data RAM link VMA + ABS32 + 显式
+    #:lower16:/:upper16:)+ Test 4 五轮加载-执行-回收。板上修复三处:
+    THM 半字索引(uint32_t[1] 误取下一字)、TRANSFER 权、exit R1 转发。
+    验证:板上 3387/3387(elf 47/47,5 轮零 fault 零 cap 泄漏)+ CI 全矩阵绿。
 - [ ] P1-7 验收:两个用户"进程"同名全局变量互不可见 + ELF 万次加载无泄漏
 
 ## P2 边界收敛批

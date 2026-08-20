@@ -177,6 +177,21 @@ add_custom_command(
             ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_app.ld
     COMMENT "Building test ELF app"
 )
+add_custom_command(
+    OUTPUT ${TEST_ELF_DIR}/test_elf_rel.elf
+    COMMAND ${TOOLCHAIN_BIN}/arm-none-eabi-gcc
+        -mcpu=cortex-m33 -mthumb -ffreestanding -nostdlib -Os
+        -c ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_rel_app.c
+        -o ${TEST_ELF_DIR}/test_elf_rel_app.o
+    COMMAND ${TOOLCHAIN_BIN}/arm-none-eabi-ld
+        --emit-relocs
+        -T ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_rel_app.ld
+        ${TEST_ELF_DIR}/test_elf_rel_app.o
+        -o ${TEST_ELF_DIR}/test_elf_rel.elf
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_rel_app.c
+            ${CMAKE_CURRENT_LIST_DIR}/src/user/apps/test_elf_rel_app.ld
+    COMMENT "Building relocation test ELF app"
+)
 add_custom_target(test_elf_blob DEPENDS ${TEST_ELF_PATH})
 
 # Always add the blob source; the #if ELF_LOADER guard in the file handles
@@ -185,12 +200,15 @@ add_custom_target(test_elf_blob DEPENDS ${TEST_ELF_PATH})
 # recompiles test_elf_blob.c whenever the embedded ELF changes. Without this,
 # .incbin embeds stale data (CMake doesn't track .incbin file dependencies).
 target_compile_definitions(my-rtos-pico2w PRIVATE
-    TEST_ELF_PATH=${TEST_ELF_PATH})
+    TEST_ELF_PATH=${TEST_ELF_PATH}
+    TEST_ELF_REL_PATH=${TEST_ELF_DIR}/test_elf_rel.elf)
 set_source_files_properties(src/kernel/loader/test_elf_blob.c PROPERTIES
     OBJECT_DEPENDS ${TEST_ELF_PATH})
 target_sources(my-rtos-pico2w PRIVATE
     src/kernel/loader/test_elf_blob.c)
 add_dependencies(my-rtos-pico2w test_elf_blob)
+set_source_files_properties(src/kernel/loader/test_elf_blob.c PROPERTIES
+    OBJECT_DEPENDS "${TEST_ELF_PATH};${TEST_ELF_DIR}/test_elf_rel.elf")
 
 # P0-7: kernel_config.h is a pure build artifact (untracked), regenerated from
 # .config whenever the config/Kconfig/translator change.  Mirrors the Makefile

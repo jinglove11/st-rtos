@@ -31,4 +31,19 @@ __asm__(
     ".section .text\n"
 );
 
+/* P1-6: 重定位版 test ELF(ABS32 + THM MOVW/MOVT;驱动 RAM-text 模式)。
+ * Make 构建不定义 TEST_ELF_REL_PATH 时此块编译为空(与上面同机制)。 */
+#ifdef TEST_ELF_REL_PATH
+#define INCBIN_REL_DIRECTIVE ".incbin \"" TOSTRING(TEST_ELF_REL_PATH) "\"\n"
+__asm__(
+    ".section .elf_payload,\"a\",%progbits\n"
+    ".global __test_elf_rel_start\n"
+    ".global __test_elf_rel_end\n"
+    "__test_elf_rel_start:\n"
+    INCBIN_REL_DIRECTIVE
+    "__test_elf_rel_end:\n"
+    ".section .text\n"
+);
+#endif
+
 #endif /* ELF_LOADER */

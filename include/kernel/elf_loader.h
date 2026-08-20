@@ -78,6 +78,51 @@ typedef struct {
 #define PF_R          4
 
 /*============================================================================
+ * P1-6 (C1): 静态重定位支持 —— 节头/符号/REL 解析
+ *============================================================================*/
+
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint32_t sh_flags;
+    uint32_t sh_addr;
+    uint32_t sh_offset;
+    uint32_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint32_t sh_addralign;
+    uint32_t sh_entsize;
+} Elf32_Shdr;
+
+typedef struct {
+    uint32_t st_name;
+    uint32_t st_value;
+    uint32_t st_size;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+} Elf32_Sym;
+
+typedef struct {
+    uint32_t r_offset;
+    uint32_t r_info;
+} Elf32_Rel;
+
+#define SHT_SYMTAB    2
+#define SHT_STRTAB    3
+#define SHT_REL       9
+
+#define SHN_UNDEF     0
+
+/* ARM 重定位类型(仅支持可静态应用的子集;其余拒绝) */
+#define R_ARM_ABS32            2   /* (S + A) |> word32 */
+#define R_ARM_V4BX             40  /* NOP 标记,跳过 */
+#define R_ARM_MOVW_ABS_NC      41  /* (S + A)[15:0] |> MOVW imm16 (A32) */
+#define R_ARM_MOVT_ABS         42  /* (S + A)[31:16] |> MOVT imm16 (A32) */
+#define R_ARM_THM_MOVW_ABS_NC  47  /* 同上, T32 编码 */
+#define R_ARM_THM_MOVT_ABS     48
+
+/*============================================================================
  * API
  *============================================================================*/
 
