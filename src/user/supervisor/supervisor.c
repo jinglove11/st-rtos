@@ -4,6 +4,7 @@
  */
 
 #include "supervisor.h"
+#include "factory.h"
 #include <string.h>
 
 #if SUPERVISOR && FAULT_ENDPOINT
@@ -494,9 +495,24 @@ void supervisor_monitor_loop(void *arg) {
                                          crashy_app_entry, NULL,
                                          8 /* priority */, 1024 /* stack */,
                                          0x1F /* CAP_FULL; GRANT stripped on restart */);
-        int app = sys_task_create("crashy_app", crashy_app_entry, NULL, 8, 1024);
-        if (app >= 0) {
-            (void)sys_task_start(app);
+        /* P2-1: 经 factory(bootstrap 授予,仅 TASK 位)拉起 crashy_app */
+        int factory_cap = sys_cap_self_slot(CAP_OBJ_FACTORY, 0);
+        if (factory_cap >= 0) {
+            factory_create_request_t req;
+            memset(&req, 0, sizeof(req));
+            req.obj_type = CAP_OBJ_TASK;
+            req.rights = CAP_FULL;
+            req.name[0] = 'c'; req.name[1] = 'r'; req.name[2] = 'a';
+            req.name[3] = 's'; req.name[4] = 'h'; req.name[5] = 'y';
+            req.name[6] = '_'; req.name[7] = 'a'; req.name[8] = 'p';
+            req.name[9] = 'p';
+            req.entry = (uint32_t)(uintptr_t)crashy_app_entry;
+            req.param0 = 8U;
+            req.param1 = 1024U;
+            int app = sys_factory_create(factory_cap, &req);
+            if (app >= 0) {
+                (void)sys_task_start(app);
+            }
         }
     }
 #endif

@@ -113,6 +113,13 @@ static int sys_task_exit(uint32_t a1, uint32_t a2, uint32_t a3,
 static int sys_task_create(uint32_t a1, uint32_t a2, uint32_t a3,
                                    uint32_t a4, uint32_t a5, uint32_t a6) {
     U(a6);
+    /* P2-1 (A5): 用户态直呼已封 —— 任务创建必须经 factory cap 授权
+     * (sys_factory_create, CAP_OBJ_TASK 位)。内核上下文(测试/引导)
+     * 不受影响。 */
+    tcb_t *caller = sched_get_current();
+    if (caller != NULL && (caller->attrs & TASK_ATTR_USER) != 0U) {
+        return KERN_ERR_PERM;
+    }
     char name_buf[KERN_TASK_NAME_LEN];
     task_func_t entry = (task_func_t)(uintptr_t)a2;
     void *arg         = (void *)(uintptr_t)a3;

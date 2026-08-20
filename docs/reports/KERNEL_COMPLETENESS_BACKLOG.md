@@ -160,7 +160,14 @@
 
 ## P2 边界收敛批
 
-- [ ] P2-1 (A5) 封 `sys_task_create` 用户直呼:init 全面迁 factory cap 路径后加 PERM 门
+- [x] P2-1 (A5) 封 `sys_task_create` 用户直呼:init 全面迁 factory cap 路径后加 PERM 门
+  - 实现(2026-08-20):syscall 层加门(用户态 caller → KERN_ERR_PERM,内核上下文
+    不受影响);init_spawn_service 迁 sys_factory_create(init 持 root bootstrap
+    全量 factory);supervisor 的 crashy_app 拉起迁 factory,root_bootstrap 补授
+    仅 TASK 位最小 factory;abi raw_audit 的 peers 改特权编排者预建 + task cap
+    授予(self_slot 发现)。新增契约用例:用户直呼必得 PERM(Test 9z)。
+    验证:板上 3398/3398(supervisor 重启链/init 服务编排全走 factory)+
+    CI 全矩阵 7/7。
 - [ ] P2-2 (A2) timer 通知化:去内核回调路径,全部走 notification
 - [ ] P2-3 (A2) BH 服务任务去内核化或并入 IRQ 通知路径
 - [ ] P2-4 (A1) sync 四族降级用户态库(保留内核兼容层,Kconfig 切换)

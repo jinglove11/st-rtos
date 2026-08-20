@@ -106,12 +106,10 @@ static void user_raw_object_id_control_task(void *arg) {
     int ch_cap = sys_ch_create(KERN_CH_MSG_SIZE, 0);
     int timer_cap = sys_timer_create("raw_audit_timer", NULL, NULL, 1);
     int frame_cap = sys_mem_alloc(64, CAP_READ | CAP_WRITE | CAP_MANAGE);
-    int peer_a_cap = sys_task_create("raw_peer_a",
-                                     user_raw_audit_peer_task,
-                                     NULL, 8, 512);
-    int peer_b_cap = sys_task_create("raw_peer_b",
-                                     user_raw_audit_peer_task,
-                                     NULL, 8, 512);
+    /* P2-1: 用户直呼 sys_task_create 已封 —— peers 由特权编排者预建
+     * 并授 task cap(self_slot(CAP_OBJ_TASK, 0/1) 发现)。 */
+    int peer_a_cap = sys_cap_self_slot(CAP_OBJ_TASK, 0);
+    int peer_b_cap = sys_cap_self_slot(CAP_OBJ_TASK, 1);
 
     if (sem_cap < 0 || mutex_cap < 0 || mq_cap < 0 || event_cap < 0 ||
         ep_cap < 0 || ch_cap < 0 || timer_cap < 0 || frame_cap < 0 ||
@@ -504,6 +502,23 @@ static int test_invoke_svc2_invalid(void) {
     return r0;
 }
 
+/* P2-1: 用户态直呼 sys_task_create 已封 —— 必得 KERN_ERR_PERM
+ * (任务创建唯一合法路径:factory cap 的 CAP_OBJ_TASK 位)。 */
+static void user_task_create_denied_task(void *arg) {
+    (void)arg;
+    int r = sys_task_create("denied_spawn",
+                            (void (*)(void *))user_task_create_denied_task,
+                            NULL, 8, 512);
+    sys_task_exit((void *)(intptr_t)
+                  (r == KERN_ERR_PERM ? KERN_OK : KERN_ERR_STATE));
+}
+
+static void test_task_create_user_gate(void) {
+    test_section("Test 9z: user sys_task_create gated to PERM");
+    test_user_case("task_create user gate", user_task_create_denied_task,
+                   KERN_OK, 5000U);
+}
+
 static void test_syscall_security_negative(void) {
     test_section("Test 9: Syscall security negative cases");
 
@@ -532,9 +547,25 @@ static void test_syscall_security_negative(void) {
         return;
     }
 
+    /* P2-1: 预建 peers(不 start,仅作为 cap 载体)并授予 attacker */
+    task_id_t peer_a = task_create_user("raw_peer_a",
+                                        user_raw_audit_peer_task,
+                                        NULL, 8, 512);
+    task_id_t peer_b = task_create_user("raw_peer_b",
+                                        user_raw_audit_peer_task,
+                                        NULL, 8, 512);
+    TEST_ASSERT(peer_a >= 0 && peer_b >= 0, "audit peers pre-created");
+    tcb_t *atk = attacker >= 0 ? task_get_tcb(attacker) : NULL;
+    if (peer_a >= 0 && peer_b >= 0 && atk != NULL) {
+        (void)cap_create_for(atk, task_obj_for_cap(peer_a),
+                             CAP_OBJ_TASK, CAP_FULL);
+        (void)cap_create_for(atk, task_obj_for_cap(peer_b),
+                             CAP_OBJ_TASK, CAP_FULL);
+    }
+
     task_start(attacker);
     void *retval = NULL;
-    kern_err_t join_err = task_join(attacker, &retval, 2000);
+    kern_err_t join_err = task_join(attacker, &retval, 4000);
     TEST_ASSERT_EQ((int)KERN_OK, (int)join_err, "raw-id attacker joined");
     uint32_t raw_audit = join_err == KERN_OK
         ? (uint32_t)(uintptr_t)retval : UINT32_MAX;
@@ -3084,6 +3115,7 @@ static void test_user_channel_recv_caps_sleepable(void) {
 static void test_syscall_user_module(void) {
     test_user_local_cptr_lifecycle();
     test_syscall_security_negative();
+    test_task_create_user_gate();
     test_user_timer_endpoint_notification();
     test_user_mem_cap_syscalls();
     test_user_shm_map_syscalls();

@@ -15,10 +15,12 @@
 #if INIT_PROCESS
 
 #include "supervisor.h"
+#include "factory.h"
 #include "user_api.h"
 #include "fs_proto.h"
 #include "nameserver.h"
 #include <stdint.h>
+#include <string.h>
 
 #if FAULT_ENDPOINT && SUPERVISOR
 #define INIT_HAS_SUPERVISOR 1
@@ -69,9 +71,23 @@ static int init_spawn_service(const char *name, task_func_t entry,
         return self_cap;
     }
 
-    /* 创建服务任务；服务从目标 CNode 查询 Move 后的新 CPtr。 */
-    int task_cap = sys_task_create(name, entry, NULL,
-                                   prio, stack);
+    /* P2-1: 经 factory cap 创建服务任务(用户直呼 sys_task_create 已封)。
+     * init 持 root bootstrap 授予的全量 factory。 */
+    int factory_cap = sys_cap_self_slot(CAP_OBJ_FACTORY, 0);
+    if (factory_cap < 0) {
+        return factory_cap;
+    }
+    factory_create_request_t req;
+    memset(&req, 0, sizeof(req));
+    req.obj_type = CAP_OBJ_TASK;
+    req.rights = CAP_FULL;
+    for (uint32_t i = 0; i + 1U < sizeof(req.name) && name[i]; i++) {
+        req.name[i] = name[i];
+    }
+    req.entry = (uint32_t)(uintptr_t)entry;
+    req.param0 = prio;
+    req.param1 = stack;
+    int task_cap = sys_factory_create(factory_cap, &req);
     if (task_cap < 0) {
         return task_cap;
     }

@@ -448,6 +448,15 @@ kern_err_t root_bootstrap_spawn_supervisor(void) {
         return (kern_err_t)fe;
     }
 
+    /* P2-1: crashy_app 的重启拉起走 factory(仅 TASK 位,最小权限;
+     * 用户直呼 sys_task_create 已封)。 */
+    cap_id_t sf = factory_create_root_cap(
+        sup, FACTORY_OBJECT_BIT(CAP_OBJ_TASK), CAP_READ | CAP_WRITE);
+    if (sf < 0) {
+        (void)task_delete(sup_tid);
+        return (kern_err_t)sf;
+    }
+
     return root_bootstrap_start_service(sup_cap);
 }
 #endif /* FAULT_ENDPOINT && SUPERVISOR */
