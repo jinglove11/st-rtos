@@ -188,8 +188,27 @@ target_sources(my-rtos-pico2w PRIVATE
     src/kernel/loader/test_elf_blob.c)
 add_dependencies(my-rtos-pico2w test_elf_blob)
 
+# P0-7: kernel_config.h is a pure build artifact (untracked), regenerated from
+# .config whenever the config/Kconfig/translator change.  Mirrors the Makefile
+# rule; fresh clones and TEST-off branch builds no longer depend on a stale
+# committed header diverging from .config.
+add_custom_command(
+    OUTPUT  ${CMAKE_CURRENT_LIST_DIR}/include/kernel/kernel_config.h
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/scripts/menuconfig.py genconfig
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/.config
+            ${CMAKE_CURRENT_LIST_DIR}/Kconfig
+            ${CMAKE_CURRENT_LIST_DIR}/scripts/menuconfig.py
+    VERBATIM
+)
+add_custom_target(gen_kernel_config
+    DEPENDS ${CMAKE_CURRENT_LIST_DIR}/include/kernel/kernel_config.h)
+add_dependencies(my-rtos-pico2w gen_kernel_config)
+
 # Generate TCB field offsets for assembly (PendSV/SVC/first_switch).
 # Tracks kernel_types.h automatically; the .S files .include the result.
+# Depends on kernel_config.h — order after gen_kernel_config on fresh clones.
 add_custom_command(
     OUTPUT  ${CMAKE_CURRENT_LIST_DIR}/include/kernel/tcb_offsets.inc
     COMMAND ${Python3_EXECUTABLE}
@@ -204,6 +223,7 @@ add_custom_command(
 )
 add_custom_target(gen_tcb_offsets
     DEPENDS ${CMAKE_CURRENT_LIST_DIR}/include/kernel/tcb_offsets.inc)
+add_dependencies(gen_tcb_offsets gen_kernel_config)
 add_dependencies(my-rtos-pico2w gen_tcb_offsets)
 
 target_include_directories(my-rtos-pico2w PRIVATE

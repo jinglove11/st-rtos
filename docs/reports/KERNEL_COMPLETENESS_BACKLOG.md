@@ -47,7 +47,11 @@
     去 VFS 门控并铺满全部 10 编号。附带:test_smp.c 补 SMP_STRESS_ITERATIONS
     #ifndef 回退(genconfig 不物化 Kconfig 默认值,P0-8 缺口,陈旧 .o 曾掩盖)。
     双板构建绿(测试对象全量重编验证,2026-08-20)
-- [ ] P0-7 (D5) kernel_config.h 移出 git 跟踪,改为纯生成物(.gitignore + 构建依赖修正)
+- [x] P0-7 (D5) kernel_config.h 移出 git 跟踪,改为纯生成物(.gitignore + 构建依赖修正)
+  - 实现:git rm --cached + .gitignore;CMake 补 add_custom_command(menuconfig.py
+    genconfig,DEPENDS .config/Kconfig/menuconfig.py)+ gen_kernel_config target,
+    gen_tcb_offsets 顺序依赖之;Makefile 原有 $(CONFIG_HEADER) 规则即可。验证:
+    删除头文件后 RP2350(cmake)与 STM32(make)均从零重生成并构建绿(2026-08-20)
 - [ ] P0-8 (D6) genconfig 输出不执行 depends 收缩(Kconfig 依赖仅在交互菜单 UI 生效,
   defconfig 携带违依赖符号会被原样写进 kernel_config.h——P0-5 验证中 dev 镜像链入
   测试代码的根因;顺手评估 range 下限同样不收缩的问题)
