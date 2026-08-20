@@ -444,7 +444,7 @@ static volatile int ep_cap_server_done;
 static volatile int ep_cap_client_done;
 static volatile int ep_cap_server_ok;
 static volatile int ep_cap_client_ok;
-static int ep_cap_object;
+static test_cap_obj_t ep_cap_object;
 static cap_id_t ep_shm_src;
 static volatile int ep_shm_server_done;
 static volatile int ep_shm_client_done;
@@ -498,7 +498,8 @@ static void test_endpoint_cap_transfer(void) {
     test_ep_cap = endpoint_create("ep_cap", sizeof(uint32_t), 4);
     TEST_ASSERT(test_ep_cap >= 0, "endpoint created");
 
-    ep_cap_object = 1234;
+    TEST_CAP_OBJ_INIT(&ep_cap_object, CAP_OBJ_ENDPOINT);
+    ep_cap_object.val = 1234;
     ep_cap_server_done = 0;
     ep_cap_client_done = 0;
     ep_cap_server_ok = 0;
@@ -707,7 +708,7 @@ static volatile int ch_cap_a_done;
 static volatile int ch_cap_b_done;
 static volatile int ch_cap_a_ok;
 static volatile int ch_cap_b_ok;
-static int ch_cap_object;
+static test_cap_obj_t ch_cap_object;
 
 static void ch_cap_peer_a(void *arg) {
     (void)arg;
@@ -757,7 +758,8 @@ static void test_channel_cap_transfer(void) {
     test_ch_cap = channel_create(sizeof(uint32_t), 0);
     TEST_ASSERT(test_ch_cap >= 0, "channel created");
 
-    ch_cap_object = 5678;
+    TEST_CAP_OBJ_INIT(&ch_cap_object, CAP_OBJ_CHANNEL);
+    ch_cap_object.val = 5678;
     ch_cap_a_done = 0;
     ch_cap_b_done = 0;
     ch_cap_a_ok = 0;

@@ -246,7 +246,8 @@ static void test_cap_mutate_fuzz(void) {
     uint16_t free_before = cap_free_count();
 
     /* 创建一个 parent cap 作为 derive/mint 的源 */
-    int parent_obj = 0x42;
+    test_cap_obj_t parent_obj;
+    TEST_CAP_OBJ_INIT(&parent_obj, CAP_OBJ_SEMAPHORE);
     cap_id_t parent = cap_create(&parent_obj, CAP_OBJ_SEMAPHORE,
                                  CAP_FULL, 0);
     TEST_ASSERT(parent > 0, "mutate fuzz: parent cap created");

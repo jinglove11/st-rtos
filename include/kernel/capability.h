@@ -159,14 +159,16 @@ kern_err_t cap_object_pin_for(tcb_t *owner, cap_id_t cap, uint8_t obj_type,
                               uint32_t *out_badge);
 kern_err_t cap_object_unpin(void *object, uint8_t obj_type);
 
-/* M2-Step3a: cap_create_for 是 cap_create_for_gen 的 wrapper。
- * obj_generation=0 → cap_get_entry 跳过对象 generation cross-check
- * (用于无 header 的栈/堆临时对象,如 test_capability.c 的 &test_obj)。
- * 真池对象 (sem/mutex/mqueue/event/timer/...) 应直接调 cap_create_for_gen
- * 传入对象当前 hdr.generation。 */
+/* P0-1(B3): cap_create_for 自动从对象 header 取 generation。
+ * 所有被 cap 引用的对象必须嵌入 kobject_header_t(真实内核对象已全部
+ * 满足);object==NULL 仍允许(纯句柄测试用例),gen=0 且不参与
+ * cross-check。显式 gen 差异场景(伪造/stale 测试)用 cap_create_for_gen。 */
 static inline cap_id_t cap_create_for(tcb_t *owner, void *object,
                                        uint8_t obj_type, uint8_t rights) {
-    return cap_create_for_gen(owner, object, obj_type, rights, 0);
+    return cap_create_for_gen(owner, object, obj_type, rights,
+                              object != NULL
+                                  ? ((const kobject_header_t *)object)->generation
+                                  : 0U);
 }
 void    *cap_lookup_for(tcb_t *owner, cap_id_t cap, uint8_t obj_type, uint8_t required_rights);
 kern_err_t cap_get_type_for(tcb_t *owner, cap_id_t cap, uint8_t *out_type);

@@ -285,13 +285,11 @@ static cap_entry_t *cap_get_entry(cap_id_t cap) {
         return NULL;
     }
 
-    /* M2-Step3a: 对象 generation cross-check。
-     * obj_generation=0 (栈/堆临时对象,如 test_capability.c 的 &test_obj)
-     * 跳过校验,保持向后兼容。
-     * obj_generation>0 (真池对象 sem/mutex/.../timer 等,header 在 offset 0)
-     * 要求 entry->object 头部的 kobject_header_t.generation 与创建时一致。
-     * 对象 slot 复用 + bump generation 后,旧 cap 在此失效。 */
-    if (entry->obj_generation != 0 && entry->object != NULL) {
+    /* M2-Step3a → P0-1(B3): 对象 generation cross-check,无豁免。
+     * 所有创建路径的非空对象都携带真实 generation(gen-0 创建已被
+     * cap_create_for_gen_badge 拒绝)。对象 delete 时 bump generation,
+     * 旧 cap 在此失效。NULL 对象(纯句柄用例)不参与校验。 */
+    if (entry->object != NULL) {
         const kobject_header_t *kh = (const kobject_header_t *)entry->object;
         if (kobj_generation_is_retired(kh->generation) ||
             kh->generation != entry->obj_generation) {
@@ -802,6 +800,11 @@ cap_id_t cap_create_for_gen_badge(tcb_t *owner, void *object,
         kobj_generation_is_retired(obj_generation)) {
         return CAP_INVALID;
     }
+    /* P0-1(B3): 关闭 gen-0 后门 —— 非空对象必须携带真实 generation,
+     * 否则对象槽复用防护对该对象失效。NULL 对象(纯句柄用例)仍允许。 */
+    if (object != NULL && obj_generation == 0U) {
+        return CAP_INVALID;
+    }
 
     uint32_t crit = CAP_LOCK();
     int slot = cap_alloc_slot();
@@ -841,7 +844,7 @@ cap_id_t cap_create_for_gen_badge(tcb_t *owner, void *object,
         CAP_UNLOCK(crit);
         return CAP_INVALID;
     }
-    if (obj_generation != 0U && object != NULL) {
+    if (object != NULL) {
         kobject_header_t *header = (kobject_header_t *)object;
         if (header->generation == obj_generation) {
             header->flags &= ~KOBJ_FLAG_CLEANUP_PENDING;
@@ -860,12 +863,14 @@ cap_id_t cap_create_for_gen(tcb_t *owner, void *object, uint8_t obj_type,
 
 cap_id_t cap_create(void *object, uint8_t obj_type, uint8_t rights, uint8_t owner) {
     tcb_t *current = sched_get_current();
+    uint32_t obj_gen = object != NULL
+        ? ((const kobject_header_t *)object)->generation : 0U;
 
     if (current != NULL && (current->attrs & TASK_ATTR_USER) != 0) {
-        return cap_create_for_gen(current, object, obj_type, rights, 0);
+        return cap_create_for_gen(current, object, obj_type, rights, obj_gen);
     }
 
-    cap_id_t cap = cap_create_for_gen(NULL, object, obj_type, rights, 0);
+    cap_id_t cap = cap_create_for_gen(NULL, object, obj_type, rights, obj_gen);
     uint32_t crit = CAP_LOCK();
     cap_entry_t *entry = cap_get_entry(cap);
     if (entry != NULL) {

@@ -87,7 +87,7 @@ static void test_syscall_sem(void) {
     /* --- Part B: Direct cap_create, then test via SVC --- */
     {
         sem_id_t sid = sem_create(0, 1);
-        cap_id_t dcap = cap_create_for_gen(NULL, sem_obj_for_cap(sid), CAP_OBJ_SEMAPHORE, CAP_FULL, 0);
+        cap_id_t dcap = cap_create_for(NULL, sem_obj_for_cap(sid), CAP_OBJ_SEMAPHORE, CAP_FULL);
         (void)cap_resolve(dcap, CAP_OBJ_SEMAPHORE, CAP_WRITE);
         kern_err_t derr = (kern_err_t)sys_call1(SYSCALL_SEM_POST, dcap);
         TEST_ASSERT_EQ(KERN_OK, derr, "PartB: direct-cap via SVC POST OK");
@@ -246,7 +246,9 @@ static void test_reply_cap_revoke_hook(void) {
 
     /* 撤销 reply cap (模拟 cap_revoke 路径) */
     if (reply_cap != KERN_INVALID_ID) {
-        cap_id_t obj = cap_create_for(NULL, &ep, CAP_OBJ_REPLY, CAP_WRITE);
+        test_cap_obj_t reply_obj;
+        TEST_CAP_OBJ_INIT(&reply_obj, CAP_OBJ_REPLY);
+        cap_id_t obj = cap_create_for(NULL, &reply_obj, CAP_OBJ_REPLY, CAP_WRITE);
         if (obj != KERN_INVALID_ID) {
             cap_revoke(obj);
             /* revoke hook 应该已经清理 reply 状态 */

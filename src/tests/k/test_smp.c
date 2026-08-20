@@ -309,12 +309,13 @@ static void test_cross_core_endpoint_ping_pong(void) {
      (SMP_STRESS_ITERATIONS / 100U))
 
 #if CAP_ENABLE
-static uint32_t smp_cap_object[2];
+static test_cap_obj_t smp_cap_object[2];
 static volatile uint32_t smp_cap_count[2];
 static volatile uint32_t smp_cap_errors[2];
 
 static void smp_cap_stress_task(void *arg) {
     uint32_t index = (uint32_t)(uintptr_t)arg;
+    TEST_CAP_OBJ_INIT(&smp_cap_object[index], CAP_OBJ_SYSTEM);
 
     for (uint32_t i = 0; i < SMP_POOL_STRESS_ITERATIONS; i++) {
         cap_id_t root = cap_create(&smp_cap_object[index], CAP_OBJ_SYSTEM,
@@ -744,7 +745,7 @@ static uint64_t test_cspace_occupied(tcb_t *task) {
     return cnode != NULL ? cnode->occupied : 0;
 }
 
-static uint32_t smp_cap_xfer_object[2];
+static test_cap_obj_t smp_cap_xfer_object[2];
 static volatile uint32_t smp_xfer_ok[2];
 static volatile uint32_t smp_xfer_busy[2];
 static volatile uint32_t smp_xfer_err[2];
@@ -760,6 +761,7 @@ static void smp_cap_xfer_dst_task(void *arg) {
 
 static void smp_cap_xfer_task(void *arg) {
     uint32_t index = (uint32_t)(uintptr_t)arg;
+    TEST_CAP_OBJ_INIT(&smp_cap_xfer_object[index], CAP_OBJ_SYSTEM);
     tcb_t *me = task_get_tcb(task_self());
     tcb_t *dst = task_get_tcb(smp_xfer_dst_id);
 
@@ -796,8 +798,8 @@ static void test_cross_core_cap_transfer(void) {
     smp_xfer_ok[0] = smp_xfer_ok[1] = 0U;
     smp_xfer_busy[0] = smp_xfer_busy[1] = 0U;
     smp_xfer_err[0] = smp_xfer_err[1] = 0U;
-    smp_cap_xfer_object[0] = 3301U;
-    smp_cap_xfer_object[1] = 3302U;
+    smp_cap_xfer_object[0].val = 3301U;
+    smp_cap_xfer_object[1].val = 3302U;
 
     task_id_t dst = task_create("smp_dst", smp_cap_xfer_dst_task, NULL, 8, 1024);
     TEST_ASSERT(dst >= 0, "shared dst task created");

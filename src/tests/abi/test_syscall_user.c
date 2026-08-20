@@ -588,7 +588,7 @@ static void test_user_timer_endpoint_notification(void) {
         return;
     }
 
-    cap_id_t timer_cap = cap_create_for_gen(NULL, timer_obj_for_cap(tid), CAP_OBJ_TIMER, CAP_FULL, 0);
+    cap_id_t timer_cap = cap_create_for(NULL, timer_obj_for_cap(tid), CAP_OBJ_TIMER, CAP_FULL);
     TEST_ASSERT(timer_cap >= 0, "user timer cap created");
     if (timer_cap < 0) {
         cap_delete(ep_cap);
@@ -1611,7 +1611,8 @@ static void test_user_endpoint_send_caps_sleepable(void) {
         return;
     }
 
-    int cap_object = 0x5151;
+    test_cap_obj_t cap_object;
+    TEST_CAP_OBJ_INIT(&cap_object, CAP_OBJ_ENDPOINT);
     cap_id_t src_cap = cap_create(&cap_object, CAP_OBJ_ENDPOINT,
                                   CAP_FULL, 0);
     TEST_ASSERT(src_cap >= 0, "send_caps source cap created");
@@ -1710,8 +1711,8 @@ static void test_user_endpoint_recv_caps_sleepable(void) {
         return;
     }
 
-    cap_id_t sem_cap = cap_create_for_gen(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE,
-                                  CAP_WRITE | CAP_TRANSFER, 0);
+    cap_id_t sem_cap = cap_create_for(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE,
+                                  CAP_WRITE | CAP_TRANSFER);
     TEST_ASSERT(sem_cap >= 0, "recv_caps semaphore cap created");
     if (sem_cap < 0) {
         sem_delete(sem);
@@ -2018,7 +2019,7 @@ static void test_user_sem_wait_sleepable(void) {
     TEST_ASSERT(sem >= 0, "sleepable semaphore created");
     if (sem < 0) return;
 
-    cap_id_t sem_cap = cap_create_for_gen(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE, CAP_FULL, 0);
+    cap_id_t sem_cap = cap_create_for(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE, CAP_FULL);
     TEST_ASSERT(sem_cap >= 0, "sleepable semaphore cap created");
     if (sem_cap < 0) {
         sem_delete(sem);
@@ -2070,7 +2071,7 @@ static void test_user_sem_wait_sleep_timeout(void) {
     TEST_ASSERT(sem >= 0, "timeout semaphore created");
     if (sem < 0) return;
 
-    cap_id_t sem_cap = cap_create_for_gen(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE, CAP_FULL, 0);
+    cap_id_t sem_cap = cap_create_for(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE, CAP_FULL);
     TEST_ASSERT(sem_cap >= 0, "timeout semaphore cap created");
     if (sem_cap < 0) {
         sem_delete(sem);
@@ -2118,7 +2119,7 @@ static void test_user_sem_wait_delete_wakeup(void) {
     TEST_ASSERT(sem >= 0, "delete-wakeup semaphore created");
     if (sem < 0) return;
 
-    cap_id_t sem_cap = cap_create_for_gen(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE, CAP_FULL, 0);
+    cap_id_t sem_cap = cap_create_for(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE, CAP_FULL);
     TEST_ASSERT(sem_cap >= 0, "delete-wakeup semaphore cap created");
     if (sem_cap < 0) {
         sem_delete(sem);
@@ -2181,7 +2182,7 @@ static void test_user_mutex_lock_sleepable(void) {
         return;
     }
 
-    cap_id_t mutex_cap = cap_create_for_gen(NULL, mutex_obj_for_cap(mid), CAP_OBJ_MUTEX, CAP_FULL, 0);
+    cap_id_t mutex_cap = cap_create_for(NULL, mutex_obj_for_cap(mid), CAP_OBJ_MUTEX, CAP_FULL);
     TEST_ASSERT(mutex_cap >= 0, "sleepable mutex cap created");
     if (mutex_cap < 0) {
         mutex_unlock(mid);
@@ -2243,7 +2244,7 @@ static void test_user_mutex_lock_sleep_timeout(void) {
         return;
     }
 
-    cap_id_t mutex_cap = cap_create_for_gen(NULL, mutex_obj_for_cap(mid), CAP_OBJ_MUTEX, CAP_FULL, 0);
+    cap_id_t mutex_cap = cap_create_for(NULL, mutex_obj_for_cap(mid), CAP_OBJ_MUTEX, CAP_FULL);
     TEST_ASSERT(mutex_cap >= 0, "timeout mutex cap created");
     if (mutex_cap < 0) {
         mutex_unlock(mid);
@@ -2295,7 +2296,7 @@ static void test_user_mqueue_recv_sleepable(void) {
     TEST_ASSERT(mq >= 0, "sleepable mqueue created");
     if (mq < 0) return;
 
-    cap_id_t mq_cap = cap_create_for_gen(NULL, mqueue_obj_for_cap(mq), CAP_OBJ_MQUEUE, CAP_FULL, 0);
+    cap_id_t mq_cap = cap_create_for(NULL, mqueue_obj_for_cap(mq), CAP_OBJ_MQUEUE, CAP_FULL);
     TEST_ASSERT(mq_cap >= 0, "sleepable mqueue cap created");
     if (mq_cap < 0) {
         mqueue_delete(mq);
@@ -2348,7 +2349,7 @@ static void test_user_mqueue_recv_sleep_timeout(void) {
     TEST_ASSERT(mq >= 0, "timeout mqueue created");
     if (mq < 0) return;
 
-    cap_id_t mq_cap = cap_create_for_gen(NULL, mqueue_obj_for_cap(mq), CAP_OBJ_MQUEUE, CAP_FULL, 0);
+    cap_id_t mq_cap = cap_create_for(NULL, mqueue_obj_for_cap(mq), CAP_OBJ_MQUEUE, CAP_FULL);
     TEST_ASSERT(mq_cap >= 0, "timeout mqueue cap created");
     if (mq_cap < 0) {
         mqueue_delete(mq);
@@ -2405,7 +2406,7 @@ static void test_user_mqueue_send_sleepable(void) {
         return;
     }
 
-    cap_id_t mq_cap = cap_create_for_gen(NULL, mqueue_obj_for_cap(mq), CAP_OBJ_MQUEUE, CAP_FULL, 0);
+    cap_id_t mq_cap = cap_create_for(NULL, mqueue_obj_for_cap(mq), CAP_OBJ_MQUEUE, CAP_FULL);
     TEST_ASSERT(mq_cap >= 0, "send mqueue cap created");
     if (mq_cap < 0) {
         mqueue_delete(mq);
@@ -2465,7 +2466,7 @@ static void test_user_event_wait_sleepable(void) {
     TEST_ASSERT(eid >= 0, "sleepable event created");
     if (eid < 0) return;
 
-    cap_id_t event_cap = cap_create_for_gen(NULL, event_obj_for_cap(eid), CAP_OBJ_EVENT, CAP_FULL, 0);
+    cap_id_t event_cap = cap_create_for(NULL, event_obj_for_cap(eid), CAP_OBJ_EVENT, CAP_FULL);
     TEST_ASSERT(event_cap >= 0, "sleepable event cap created");
     if (event_cap < 0) {
         event_delete(eid);
@@ -2517,7 +2518,7 @@ static void test_user_event_wait_sleep_timeout(void) {
     TEST_ASSERT(eid >= 0, "timeout event created");
     if (eid < 0) return;
 
-    cap_id_t event_cap = cap_create_for_gen(NULL, event_obj_for_cap(eid), CAP_OBJ_EVENT, CAP_FULL, 0);
+    cap_id_t event_cap = cap_create_for(NULL, event_obj_for_cap(eid), CAP_OBJ_EVENT, CAP_FULL);
     TEST_ASSERT(event_cap >= 0, "timeout event cap created");
     if (event_cap < 0) {
         event_delete(eid);
@@ -2566,7 +2567,7 @@ static void test_user_event_wait_delete_wakeup(void) {
     TEST_ASSERT(eid >= 0, "delete-wakeup event created");
     if (eid < 0) return;
 
-    cap_id_t event_cap = cap_create_for_gen(NULL, event_obj_for_cap(eid), CAP_OBJ_EVENT, CAP_FULL, 0);
+    cap_id_t event_cap = cap_create_for(NULL, event_obj_for_cap(eid), CAP_OBJ_EVENT, CAP_FULL);
     TEST_ASSERT(event_cap >= 0, "delete-wakeup event cap created");
     if (event_cap < 0) {
         event_delete(eid);
@@ -2885,7 +2886,8 @@ static void test_user_channel_send_caps_sleepable(void) {
         return;
     }
 
-    int cap_object = 0x4348;
+    test_cap_obj_t cap_object;
+    TEST_CAP_OBJ_INIT(&cap_object, CAP_OBJ_CHANNEL);
     cap_id_t src_cap = cap_create(&cap_object, CAP_OBJ_ENDPOINT,
                                   CAP_FULL, 0);
     TEST_ASSERT(src_cap >= 0, "channel send_caps source cap created");
@@ -2992,8 +2994,8 @@ static void test_user_channel_recv_caps_sleepable(void) {
         return;
     }
 
-    cap_id_t sem_cap = cap_create_for_gen(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE,
-                                  CAP_WRITE | CAP_TRANSFER, 0);
+    cap_id_t sem_cap = cap_create_for(NULL, sem_obj_for_cap(sem), CAP_OBJ_SEMAPHORE,
+                                  CAP_WRITE | CAP_TRANSFER);
     TEST_ASSERT(sem_cap >= 0, "channel recv_caps semaphore cap created");
     if (sem_cap < 0) {
         sem_delete(sem);

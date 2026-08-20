@@ -191,7 +191,8 @@ static void test_fault_releases_caps(void) {
     test_section("user fault releases caps");
 
 #if MPU_ENABLE && CAP_ENABLE
-    static int fault_cap_object;
+    static test_cap_obj_t fault_cap_object;
+    TEST_CAP_OBJ_INIT(&fault_cap_object, CAP_OBJ_SEMAPHORE);
 
     uint16_t base_refs = cap_object_refcount(&fault_cap_object, CAP_OBJ_SEMAPHORE);
     task_id_t tid = task_create_user("f_cap", fault_task_null_write,

@@ -23,6 +23,22 @@
 #define TEST_FRAMEWORK_H
 
 #include <stdint.h>
+#include "kobject.h"
+
+/*============================================================================
+ * cap 假对象(P0-1/B3)
+ *
+ * gen-0 豁免移除后,凡被 cap 系统引用的对象必须嵌入 kobject_header_t。
+ * 测试用假对象统一用本类型;val 供标记值/身份断言;&fake 与 &fake.hdr
+ * 同址,旧调用点传 &fake 不需要改。
+ *============================================================================*/
+
+typedef struct {
+    kobject_header_t hdr;
+    uint32_t val;
+} test_cap_obj_t;
+
+#define TEST_CAP_OBJ_INIT(p, type) kobj_header_init(&(p)->hdr, (type))
 
 /*============================================================================
  * 测试层

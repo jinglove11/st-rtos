@@ -13,7 +13,8 @@
 
 ## P0 快赢批(S 级,先清完)
 
-- [ ] P0-1 (B3) 移除 `obj_generation=0` 校验豁免后门(capability.c:288);同步修 test_capability.c 的临时对象用法
+- [x] P0-1 (B3) 移除 `obj_generation=0` 校验豁免后门(capability.c:288);同步修 test_capability.c 的临时对象用法
+  - 实现:cap_create/cap_create_for 自动从对象 header 取 generation;cap_create_for_gen_badge 拒绝非空对象+gen0创建;cap_get_entry 豁免移除。测试侧 51+ 处假对象迁 test_cap_obj_t(带真 header),2 处 (sup_id+1) 假任务指针改 task_obj_for_cap,15 处真对象显式 gen0 改 cap_create_for。双板构建绿(2026-08-20)
 - [ ] P0-2 (B5) `sys_mem_alloc` 按 rights 参数发放,不再默认全权 RW|MANAGE|TRANSFER
 - [ ] P0-3 (C8) sync 四族用户 syscall 取舍评估落文档(结论可以是"保留",但要写清 why)
 - [ ] P0-4 (D1) CMake 弃用 GLOB_RECURSE,改显式 source manifest(对齐 Makefile)

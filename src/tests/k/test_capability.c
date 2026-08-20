@@ -31,7 +31,8 @@ static uint64_t test_cspace_occupied(tcb_t *task) {
 
 static void test_cap_create_basic(void) {
     test_section("Test 1: cap_create basic");
-    int test_obj = 42;
+    test_cap_obj_t test_obj;
+    TEST_CAP_OBJ_INIT(&test_obj, CAP_OBJ_SEMAPHORE);
 
     cap_id_t cap = cap_create(&test_obj, CAP_OBJ_SEMAPHORE,
                               CAP_FULL, 1);
@@ -47,7 +48,8 @@ static void test_cap_create_basic(void) {
 
 static void test_cap_create_pool_full(void) {
     test_section("Test 2: cap_create pool full");
-    int dummy = 0;
+    test_cap_obj_t dummy;
+    TEST_CAP_OBJ_INIT(&dummy, CAP_OBJ_SEMAPHORE);
     cap_id_t caps[CAP_MAX_COUNT];
     uint16_t free_before = cap_free_count();
 
@@ -74,7 +76,8 @@ static void test_cap_create_pool_full(void) {
 static void test_cap_resolve_valid(void) {
     test_section("Test 3: cap_resolve valid");
 
-    int obj = 123;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_MUTEX);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_MUTEX, CAP_READ | CAP_WRITE, 1);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create for resolve");
 
@@ -103,7 +106,8 @@ static void test_cap_resolve_bad_token(void) {
 static void test_cap_resolve_wrong_type(void) {
     test_section("Test 5: cap_resolve wrong type");
 
-    int obj = 42;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_SEMAPHORE);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_SEMAPHORE, CAP_FULL, 1);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create sem for type check");
 
@@ -120,7 +124,8 @@ static void test_cap_resolve_wrong_type(void) {
 static void test_cap_resolve_no_rights(void) {
     test_section("Test 6: cap_resolve insufficient rights");
 
-    int obj = 55;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_EVENT);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_EVENT, CAP_READ, 1);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create read-only");
 
@@ -137,7 +142,8 @@ static void test_cap_resolve_no_rights(void) {
 static void test_cap_delete_resolve(void) {
     test_section("Test 7: cap_delete then resolve");
 
-    int obj = 77;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_TIMER);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_TIMER, CAP_FULL, 1);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create before delete");
 
@@ -153,7 +159,8 @@ static void test_cap_delete_resolve(void) {
 static void test_cap_derive_subset(void) {
     test_section("Test 8: cap_derive subset");
 
-    int obj = 99;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_MQUEUE);
     cap_id_t parent = cap_create(&obj, CAP_OBJ_MQUEUE,
                                  CAP_READ | CAP_WRITE | CAP_GRANT, 1);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create parent");
@@ -181,7 +188,8 @@ static void test_cap_derive_subset(void) {
 static void test_cap_derive_superset_fails(void) {
     test_section("Test 9: cap_derive superset fails");
 
-    int obj = 11;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_EVENT);
     cap_id_t parent = cap_create(&obj, CAP_OBJ_EVENT, CAP_READ, 1);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create parent read-only");
 
@@ -198,7 +206,8 @@ static void test_cap_derive_superset_fails(void) {
 static void test_cap_derive_no_grant(void) {
     test_section("Test 10: cap_derive without GRANT");
 
-    int obj = 22;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_TIMER);
     cap_id_t parent = cap_create(&obj, CAP_OBJ_TIMER, CAP_READ | CAP_WRITE, 1);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create without GRANT");
 
@@ -215,7 +224,9 @@ static void test_cap_derive_no_grant(void) {
 static void test_cap_revoke_all(void) {
     test_section("Test 11: cap_revoke_all");
 
-    int obj1 = 33, obj2 = 44;
+    test_cap_obj_t obj1;
+    TEST_CAP_OBJ_INIT(&obj1, CAP_OBJ_SEMAPHORE);
+    test_cap_obj_t obj2; TEST_CAP_OBJ_INIT(&obj2, CAP_OBJ_MUTEX);
     cap_id_t c1 = cap_create(&obj1, CAP_OBJ_SEMAPHORE, CAP_FULL, 5);
     cap_id_t c2 = cap_create(&obj2, CAP_OBJ_MUTEX, CAP_FULL, 5);
 
@@ -237,7 +248,8 @@ static void test_cap_revoke_all(void) {
 static void test_cap_revoke_single(void) {
     test_section("Test 12: cap_revoke single");
 
-    int obj = 66;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_EVENT);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_EVENT, CAP_FULL, 1);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create for revoke");
 
@@ -305,7 +317,8 @@ static void test_cap_no_permission(void) {
     test_section("Test 16: no permission → denied");
 
     /* 创建只有 READ 权限的能力 */
-    int obj = 99;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_SEMAPHORE);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_SEMAPHORE, CAP_READ, 1);
     TEST_ASSERT(cap >= 0, "create read-only cap");
 
@@ -348,8 +361,10 @@ static void test_cap_no_permission(void) {
 static void test_cap_stale_generation(void) {
     test_section("Test 17: stale generation rejected");
 
-    int obj1 = 101;
-    int obj2 = 202;
+    test_cap_obj_t obj1;
+    TEST_CAP_OBJ_INIT(&obj1, CAP_OBJ_MUTEX);
+    test_cap_obj_t obj2;
+    TEST_CAP_OBJ_INIT(&obj2, CAP_OBJ_MUTEX);
     cap_id_t old_cap = cap_create(&obj1, CAP_OBJ_MUTEX, CAP_FULL, 1);
     TEST_ASSERT(old_cap != ((cap_id_t)-1), "create original cap");
 
@@ -375,7 +390,8 @@ static void test_cap_stale_generation(void) {
 static void test_cap_generation_exhaustion_retires_slot(void) {
     test_section("Test 17a: generation exhaustion retires slot");
 
-    int obj = 0x32434150;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_SYSTEM);
     uint16_t free_before = cap_free_count();
     cap_id_t original = cap_create(&obj, CAP_OBJ_SYSTEM, CAP_FULL, 1);
     TEST_ASSERT(original != KERN_INVALID_ID, "create cap for generation boundary");
@@ -579,7 +595,8 @@ static void test_cap_mint_badge(void) {
     test_section("Test 17c: mint with rights subset + badge (M2-#7)");
 
 #if CAP_ENABLE
-    int obj = 0xAB;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t parent = cap_create(&obj, CAP_OBJ_ENDPOINT,
                                  CAP_READ | CAP_WRITE | CAP_GRANT, 1);
     TEST_ASSERT(parent != ((cap_id_t)-1), "M2-#7: parent cap created");
@@ -720,7 +737,8 @@ static void test_cap_copy_atomic_on_full(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 0x77;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t src_cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_WRITE | CAP_TRANSFER | CAP_GRANT);
     TEST_ASSERT(src_cap > 0, "M2-#8: src cap created");
@@ -783,7 +801,8 @@ static void test_cap_copy_atomic_on_full(void) {
 static void test_cap_revoke_cascade(void) {
     test_section("Test 18: revoke cascades to children");
 
-    int obj = 303;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_CHANNEL);
     cap_id_t parent = cap_create(&obj, CAP_OBJ_CHANNEL,
                                  CAP_READ | CAP_WRITE | CAP_GRANT, 1);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create grant parent");
@@ -808,7 +827,8 @@ static void test_cap_revoke_cascade(void) {
 static void test_cap_delete_preserves_children(void) {
     test_section("Test 18b: delete preserves children");
 
-    int obj = 404;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_CHANNEL);
     cap_id_t parent = cap_create(&obj, CAP_OBJ_CHANNEL,
                                  CAP_READ | CAP_WRITE | CAP_GRANT, 1);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create delete parent");
@@ -834,7 +854,8 @@ static void test_cap_delete_preserves_children(void) {
 static void test_cap_cspace_required_for_user(void) {
     test_section("Test 19: user lookup requires CSpace entry");
 
-    int obj = 404;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t cap = cap_create(&obj, CAP_OBJ_ENDPOINT, CAP_READ, 9);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create uninstalled cap");
 
@@ -863,7 +884,8 @@ static void test_cap_cspace_install_and_revoke(void) {
     TEST_ASSERT(tcb != NULL, "get CSpace task TCB");
     tcb->attrs = TASK_ATTR_USER;
 
-    int obj = 505;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_CHANNEL);
     cap_id_t cap = cap_create_for(tcb, &obj, CAP_OBJ_CHANNEL, CAP_READ);
     TEST_ASSERT(cap != ((cap_id_t)-1), "cap_create_for succeeds");
     TEST_ASSERT(test_cspace_occupied(tcb) != 0,
@@ -900,10 +922,11 @@ static void test_cap_cspace_extended_slots(void) {
     }
     tcb->attrs = TASK_ATTR_USER;
 
-    int objects[20];
+    test_cap_obj_t objects[20];
     cap_id_t caps[20];
     for (uint32_t i = 0; i < 20U; i++) {
-        objects[i] = 600 + (int)i;
+        TEST_CAP_OBJ_INIT(&objects[i], CAP_OBJ_CHANNEL);
+        objects[i].val = 600 + (uint32_t)i;
         caps[i] = cap_create_for(tcb, &objects[i],
                                  CAP_OBJ_CHANNEL, CAP_READ);
         TEST_ASSERT(caps[i] >= 0, "extended CSpace cap created");
@@ -955,7 +978,8 @@ static void test_cap_cspace_over_32_slots(void) {
     tcb->attrs = TASK_ATTR_USER;
 
     /* 填充 48 个 slot (绕过 32 边界)。cap_pool 上限是 CAP_MAX_COUNT=128,够。 */
-    int dummy_obj = 0;
+    test_cap_obj_t dummy_obj;
+    TEST_CAP_OBJ_INIT(&dummy_obj, CAP_OBJ_SEMAPHORE);
     cap_id_t caps[48];
     int filled = 0;
     for (int i = 0; i < 48; i++) {
@@ -1010,8 +1034,10 @@ static void test_cap_revoke_object(void) {
     a->attrs = TASK_ATTR_USER;
     b->attrs = TASK_ATTR_USER;
 
-    int obj = 700;
-    int other = 701;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
+    test_cap_obj_t other;
+    TEST_CAP_OBJ_INIT(&other, CAP_OBJ_ENDPOINT);
     cap_id_t root = cap_create_for(a, &obj, CAP_OBJ_ENDPOINT,
                                    CAP_FULL);
     cap_id_t copy = cap_copy_to(a, root, b, CAP_READ);
@@ -1063,7 +1089,8 @@ static void test_cap_copy_to_task(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 606;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t parent = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                      CAP_READ | CAP_WRITE | CAP_TRANSFER);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create transferable parent");
@@ -1108,7 +1135,8 @@ static void test_cap_move_to_task(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 707;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_CHANNEL);
     cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_CHANNEL,
                                   CAP_READ | CAP_TRANSFER);
     TEST_ASSERT(cap != ((cap_id_t)-1), "create movable cap");
@@ -1149,8 +1177,10 @@ static void test_ipc_cap_transfer_rollback(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int good_obj = 808;
-    int bad_obj = 909;
+    test_cap_obj_t good_obj;
+    TEST_CAP_OBJ_INIT(&good_obj, CAP_OBJ_ENDPOINT);
+    test_cap_obj_t bad_obj;
+    TEST_CAP_OBJ_INIT(&bad_obj, CAP_OBJ_CHANNEL);
     cap_id_t good = cap_create_for(src, &good_obj, CAP_OBJ_ENDPOINT,
                                    CAP_READ | CAP_TRANSFER);
     cap_id_t bad = cap_create_for(src, &bad_obj, CAP_OBJ_CHANNEL, CAP_READ);
@@ -1203,8 +1233,10 @@ static void test_ipc_cap_move_rollback(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int move_obj = 1001;
-    int bad_obj = 1002;
+    test_cap_obj_t move_obj;
+    TEST_CAP_OBJ_INIT(&move_obj, CAP_OBJ_ENDPOINT);
+    test_cap_obj_t bad_obj;
+    TEST_CAP_OBJ_INIT(&bad_obj, CAP_OBJ_CHANNEL);
     cap_id_t movable = cap_create_for(src, &move_obj, CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_TRANSFER);
     cap_id_t bad = cap_create_for(src, &bad_obj, CAP_OBJ_CHANNEL, CAP_READ);
@@ -1253,7 +1285,8 @@ static void test_ipc_cap_move_success(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int move_obj = 2001;
+    test_cap_obj_t move_obj;
+    TEST_CAP_OBJ_INIT(&move_obj, CAP_OBJ_ENDPOINT);
     cap_id_t movable = cap_create_for(src, &move_obj, CAP_OBJ_ENDPOINT,
                                       CAP_READ | CAP_TRANSFER);
     TEST_ASSERT(movable != ((cap_id_t)-1), "create movable cap");
@@ -1299,9 +1332,12 @@ static void test_cap_explicit_transaction(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int copy_obj = 2101;
-    int move_obj = 2102;
-    int revoke_obj = 2103;
+    test_cap_obj_t copy_obj;
+    TEST_CAP_OBJ_INIT(&copy_obj, CAP_OBJ_ENDPOINT);
+    test_cap_obj_t move_obj;
+    TEST_CAP_OBJ_INIT(&move_obj, CAP_OBJ_CHANNEL);
+    test_cap_obj_t revoke_obj;
+    TEST_CAP_OBJ_INIT(&revoke_obj, CAP_OBJ_EVENT);
     cap_id_t copy_cap = cap_create_for(
         src, &copy_obj, CAP_OBJ_ENDPOINT,
         CAP_READ | CAP_WRITE | CAP_TRANSFER);
@@ -1384,8 +1420,10 @@ static void test_cap_transaction_failure_is_read_only(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int good_obj = 2201;
-    int bad_obj = 2202;
+    test_cap_obj_t good_obj;
+    TEST_CAP_OBJ_INIT(&good_obj, CAP_OBJ_ENDPOINT);
+    test_cap_obj_t bad_obj;
+    TEST_CAP_OBJ_INIT(&bad_obj, CAP_OBJ_CHANNEL);
     cap_id_t good = cap_create_for(src, &good_obj, CAP_OBJ_ENDPOINT,
                                    CAP_READ | CAP_TRANSFER);
     cap_id_t bad = cap_create_for(src, &bad_obj, CAP_OBJ_CHANNEL, CAP_READ);
@@ -1450,7 +1488,8 @@ static void test_cap_transaction_failure_is_read_only(void) {
      * full batch must fail during reservation without consuming that slot's
      * local generation or either reserved global pool slot. */
     cap_id_t filler[KERN_TASK_CAP_SLOTS - 1];
-    int filler_obj = 2203;
+    test_cap_obj_t filler_obj;
+    TEST_CAP_OBJ_INIT(&filler_obj, CAP_OBJ_EVENT);
     int filled = 0;
     for (int i = 0; i < KERN_TASK_CAP_SLOTS - 1; i++) {
         filler[i] = cap_create_for(dst, &filler_obj, CAP_OBJ_EVENT, CAP_READ);
@@ -1521,7 +1560,8 @@ static void test_cap_object_refcount(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 1101;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t parent = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                      CAP_READ | CAP_TRANSFER | CAP_GRANT);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create parent cap");
@@ -1568,7 +1608,8 @@ static void cap_test_cleanup(void *object, uint8_t obj_type) {
 static void test_cap_cleanup_callback(void) {
     test_section("Test 26: cap object cleanup callback");
 
-    int obj = 1201;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_MEMBLOCK);
     cap_cleanup_count = 0;
     kern_err_t err = cap_register_cleanup(CAP_OBJ_MEMBLOCK, cap_test_cleanup);
     TEST_ASSERT_EQ((int)KERN_OK, (int)err, "register cleanup callback");
@@ -1610,7 +1651,8 @@ static void cap_safe_point_cleanup(void *object, uint8_t obj_type) {
 static void test_cap_cleanup_outer_lock_safe_point(void) {
     test_section("Test 26b: cleanup waits for outer lock safe point");
 
-    int obj = 1202;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_SYSTEM);
     cap_safe_point_cleanup_count = 0;
     irq_spin_init_rank(&cap_test_outer_lock, LOCKDEP_RANK_OBJECT);
     irq_spin_init_rank(&cap_test_registry_lock, LOCKDEP_RANK_REGISTRY);
@@ -1649,7 +1691,8 @@ static void test_cap_revoke_deep_tree_cleanup_once(void) {
     test_section("Test 25b: deep derive tree cleanup once (A3)");
 
 #if CAP_ENABLE
-    int root_obj = 0xC0FFEE;
+    test_cap_obj_t root_obj;
+    TEST_CAP_OBJ_INIT(&root_obj, CAP_OBJ_MEMBLOCK);
     /* root 持 GRANT,可派生 */
     cap_id_t root = cap_create(&root_obj, CAP_OBJ_MEMBLOCK,
                                CAP_FULL, 1);
@@ -1747,7 +1790,7 @@ static void test_cap_derive_for_restart_strips_grant(void) {
 
     /* The supervisor's "self" TASK cap (mimics what sys_task_create grants). */
     cap_id_t parent = cap_create_for(sup,
-                                     (void *)(uintptr_t)(sup_id + 1),
+                                     task_obj_for_cap(sup_id),
                                      CAP_OBJ_TASK, CAP_FULL);
     TEST_ASSERT(parent != ((cap_id_t)-1), "supervisor gets CAP_FULL TASK cap");
 
@@ -1805,7 +1848,7 @@ static void test_cap_derive_for_restart_no_grant(void) {
 
     /* Parent with CAP_GRANT explicitly cleared. */
     cap_id_t parent = cap_create_for(sup,
-                                     (void *)(uintptr_t)(sup_id + 1),
+                                     task_obj_for_cap(sup_id),
                                      CAP_OBJ_TASK,
                                      CAP_FULL & ~CAP_GRANT);
     TEST_ASSERT(parent != ((cap_id_t)-1), "create no-grant parent");
@@ -1853,7 +1896,8 @@ static void test_cnode_cap_operations(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int object = 0x321;
+    test_cap_obj_t object;
+    TEST_CAP_OBJ_INIT(&object, CAP_OBJ_ENDPOINT);
     cap_id_t source = cap_create_for(src, &object, CAP_OBJ_ENDPOINT, CAP_FULL);
     cap_id_t dst_node = cap_cnode_cap_create(src, dst, CAP_WRITE);
     TEST_ASSERT(source >= 0 && dst_node >= 0,
@@ -1874,7 +1918,8 @@ static void test_cnode_cap_operations(void) {
     TEST_ASSERT(cap_lookup_for(dst, minted, CAP_OBJ_ENDPOINT, CAP_WRITE) == NULL,
                 "CNode Mint cannot amplify rights");
 
-    int moved_object = 0x654;
+    test_cap_obj_t moved_object;
+    TEST_CAP_OBJ_INIT(&moved_object, CAP_OBJ_CHANNEL);
     cap_id_t moved_source = cap_create_for(src, &moved_object,
                                            CAP_OBJ_CHANNEL,
                                            CAP_READ | CAP_TRANSFER);
@@ -1923,7 +1968,8 @@ static void test_cnode_generation_on_task_reuse(void) {
     }
 
     uint32_t object_generation = first_node->hdr.generation;
-    int object = 7;
+    test_cap_obj_t object;
+    TEST_CAP_OBJ_INIT(&object, CAP_OBJ_EVENT);
     cap_id_t cap = cap_create_for(first, &object, CAP_OBJ_EVENT, CAP_READ);
     TEST_ASSERT(cap >= 0, "cap installed for local generation test");
 
@@ -1977,8 +2023,10 @@ static void test_local_cptr_isolation_and_stale_rejection(void) {
     tcb_t *b = task_get_tcb(b_id);
     a->attrs = TASK_ATTR_USER;
     b->attrs = TASK_ATTR_USER;
-    int a_obj = 101;
-    int b_obj = 202;
+    test_cap_obj_t a_obj;
+    TEST_CAP_OBJ_INIT(&a_obj, CAP_OBJ_ENDPOINT);
+    test_cap_obj_t b_obj;
+    TEST_CAP_OBJ_INIT(&b_obj, CAP_OBJ_ENDPOINT);
     cap_id_t a_cap = cap_create_for(a, &a_obj, CAP_OBJ_ENDPOINT, CAP_READ);
     cap_id_t b_cap = cap_create_for(b, &b_obj, CAP_OBJ_ENDPOINT, CAP_READ);
     TEST_ASSERT(cap_is_local_cptr(a_cap) && cap_is_local_cptr(b_cap),
@@ -2043,7 +2091,8 @@ static void test_local_cptr_generation_exhaustion(void) {
     tcb_t *task = task_get_tcb(tid);
     task->attrs = TASK_ATTR_USER;
 
-    int object = 303;
+    test_cap_obj_t object;
+    TEST_CAP_OBJ_INIT(&object, CAP_OBJ_EVENT);
     cap_id_t original = cap_create_for(task, &object, CAP_OBJ_EVENT, CAP_READ);
     cap_id_t boundary = KERN_INVALID_ID;
     uint8_t retired_slot = UINT8_MAX;
@@ -2100,7 +2149,8 @@ static void test_txn_revoke_between_prepare_commit(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 2301;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                   CAP_READ | CAP_TRANSFER);
     TEST_ASSERT(cap >= 0, "create transferable cap");
@@ -2149,7 +2199,8 @@ static void test_txn_object_delete_between_prepare_commit(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 2302;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                   CAP_READ | CAP_TRANSFER);
     TEST_ASSERT(cap >= 0, "create transferable cap");
@@ -2194,7 +2245,8 @@ static void test_txn_sender_fault_after_transfer(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 2303;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                   CAP_READ | CAP_TRANSFER);
     TEST_ASSERT(cap >= 0, "create transferable cap");
@@ -2233,7 +2285,8 @@ static void test_txn_sender_fault_between_prepare_commit(void) {
     src->attrs = TASK_ATTR_USER;
     dst->attrs = TASK_ATTR_USER;
 
-    int obj = 2304;
+    test_cap_obj_t obj;
+    TEST_CAP_OBJ_INIT(&obj, CAP_OBJ_ENDPOINT);
     cap_id_t cap = cap_create_for(src, &obj, CAP_OBJ_ENDPOINT,
                                   CAP_READ | CAP_TRANSFER);
     TEST_ASSERT(cap >= 0, "create transferable cap");
