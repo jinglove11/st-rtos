@@ -166,17 +166,37 @@ static void test_syscall_bad_user_pointers(void) {
                         0, 10, 512);
     TEST_ASSERT_EQ(KERN_ERR_PARAM, err, "bad task name pointer rejected");
 
-#if VFS_ENABLE
-    /* Phase D:文件 syscall 返回 NOSYS (由 fs_server user 服务提供) */
+    /* P0-6: 已删的内核 VFS ABI 10 个编号 reserved,任何配置下恒 NOSYS
+     * (此前条目在 #if VFS_ENABLE 内且所有 preset 关闭,raw 调用返回 PARAM)。 */
     err = sys_call2(SYSCALL_OPEN, (int)(uintptr_t)0xBBBBBBBBu, 0);
-    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "open returns NOSYS (fs_server)");
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: open returns NOSYS");
+
+    err = sys_call1(SYSCALL_CLOSE, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: close returns NOSYS");
 
     err = sys_call3(SYSCALL_READ, 0, (int)(uintptr_t)0xBBBBBBBBu, 4);
-    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "read returns NOSYS (fs_server)");
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: read returns NOSYS");
 
     err = sys_call3(SYSCALL_WRITE, 0, (int)(uintptr_t)0xBBBBBBBBu, 4);
-    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "write returns NOSYS (fs_server)");
-#endif
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: write returns NOSYS");
+
+    err = sys_call3(SYSCALL_IOCTL, 0, 0, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: ioctl returns NOSYS");
+
+    err = sys_call3(SYSCALL_LSEEK, 0, 0, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: lseek returns NOSYS");
+
+    err = sys_call2(SYSCALL_READDIR, 0, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: readdir returns NOSYS");
+
+    err = sys_call1(SYSCALL_UNLINK, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: unlink returns NOSYS");
+
+    err = sys_call1(SYSCALL_MKDIR, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: mkdir returns NOSYS");
+
+    err = sys_call2(SYSCALL_STAT, 0, 0);
+    TEST_ASSERT_EQ(KERN_ERR_NOSYS, err, "reserved: stat returns NOSYS");
 }
 
 /*============================================================================

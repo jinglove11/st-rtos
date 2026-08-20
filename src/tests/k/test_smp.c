@@ -19,6 +19,13 @@
 
 #include <stdint.h>
 
+/* genconfig 不物化 .config 缺失符号的 Kconfig 默认值(P0-8 缺口):
+ * 只开 TEST_MODULE_SMP 而未写 SMP_STRESS_ITERATIONS 的配置从零构建
+ * 会未定义。回退与 Kconfig default 10000 保持一致。 */
+#ifndef SMP_STRESS_ITERATIONS
+#define SMP_STRESS_ITERATIONS 10000U
+#endif
+
 /* A stress test must fail with a useful phase/result instead of making the
  * complete suite look dead forever.  These bounds do not reduce iteration
  * counts or concurrency: they only turn a lost wakeup/deadlock into a

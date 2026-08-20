@@ -39,7 +39,14 @@
     ASCII 误读 bug,见 KNOWN_ISSUES)改 UF2 直解,ci_local 恢复 full 校验。
     全矩阵绿:rp2350 tiny/default/release/full + stm32 + docs(kconfig 文档补生成
     DEV_PROFILE 页)。
-- [ ] P0-6 (C7) 清理 10 个 sys_nosys VFS 死槽(保留 ABI 编号,注释明确 reserved)
+- [x] P0-6 (C7) 清理 10 个 sys_nosys VFS 死槽(保留 ABI 编号,注释明确 reserved)
+  - 实现:sys_nosys → sys_reserved_vfs,10 个槽位(OPEN..LSEEK 32-37、READDIR..STAT
+    67-70)移出 #if VFS_ENABLE 无条件占表恒 NOSYS——此前条目藏在 VFS_ENABLE 内而
+    所有 preset 均关,raw 调用落表洞返回 PARAM,与 user_api.h 承诺的 NOSYS 矛盾
+    (行为随配置摇摆)。syscall.h 编号注释 reserved 永不复用;test_syscall 断言
+    去 VFS 门控并铺满全部 10 编号。附带:test_smp.c 补 SMP_STRESS_ITERATIONS
+    #ifndef 回退(genconfig 不物化 Kconfig 默认值,P0-8 缺口,陈旧 .o 曾掩盖)。
+    双板构建绿(测试对象全量重编验证,2026-08-20)
 - [ ] P0-7 (D5) kernel_config.h 移出 git 跟踪,改为纯生成物(.gitignore + 构建依赖修正)
 - [ ] P0-8 (D6) genconfig 输出不执行 depends 收缩(Kconfig 依赖仅在交互菜单 UI 生效,
   defconfig 携带违依赖符号会被原样写进 kernel_config.h——P0-5 验证中 dev 镜像链入

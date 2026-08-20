@@ -69,13 +69,13 @@
 #define SYSCALL_CAP_TRANSFER     30  /* legacy raw-target ABI; kernel only */
 #define SYSCALL_CAP_REVOKE       31
 
-/* VFS */
-#define SYSCALL_OPEN             32
-#define SYSCALL_CLOSE            33
-#define SYSCALL_READ             34
-#define SYSCALL_WRITE            35
-#define SYSCALL_IOCTL            36
-#define SYSCALL_LSEEK            37
+/* VFS — reserved(内核 VFS 已删,P0-6):编号永不复用,槽位恒返回 NOSYS */
+#define SYSCALL_OPEN             32  /* reserved (former VFS) */
+#define SYSCALL_CLOSE            33  /* reserved (former VFS) */
+#define SYSCALL_READ             34  /* reserved (former VFS) */
+#define SYSCALL_WRITE            35  /* reserved (former VFS) */
+#define SYSCALL_IOCTL            36  /* reserved (former VFS) */
+#define SYSCALL_LSEEK            37  /* reserved (former VFS) */
 
 /* IPC — 补全 */
 #define SYSCALL_MUTEX_DELETE     38
@@ -113,10 +113,11 @@
 #define SYSCALL_CAP_TYPE         64
 #define SYSCALL_CAP_RIGHTS       65
 #define SYSCALL_IRQ_BIND         66
-#define SYSCALL_READDIR          67
-#define SYSCALL_UNLINK           68
-#define SYSCALL_MKDIR            69
-#define SYSCALL_STAT             70
+/* VFS — reserved(内核 VFS 已删,P0-6):编号永不复用,槽位恒返回 NOSYS */
+#define SYSCALL_READDIR          67  /* reserved (former VFS) */
+#define SYSCALL_UNLINK           68  /* reserved (former VFS) */
+#define SYSCALL_MKDIR            69  /* reserved (former VFS) */
+#define SYSCALL_STAT             70  /* reserved (former VFS) */
 #define SYSCALL_FAULT_SUBSCRIBE  71
 #define SYSCALL_TASK_RESTART     72
 #define SYSCALL_GET_TICK         73

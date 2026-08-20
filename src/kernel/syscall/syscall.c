@@ -1392,14 +1392,17 @@ static int sys_cap_rights(uint32_t a1, uint32_t a2, uint32_t a3,
 #endif /* CAP_ENABLE */
 
 /*============================================================================
- * VFS 文件操作 (VFS_ENABLE)
+ * VFS 文件操作 — reserved ABI 编号(P0-6)
  *============================================================================*/
 
-/* Phase #24: VFS syscall 占位 (内核 VFS 已删,返回 NOSYS)。
- * user_api.h 的 inline 仍调这些 syscall 编号,内核统一返回 NOSYS。
- * user 任务应改用 fs_* IPC 走 fs_server。 */
-static int __attribute__((used)) sys_nosys(uint32_t a1, uint32_t a2, uint32_t a3,
-                     uint32_t a4, uint32_t a5, uint32_t a6) {
+/* P0-6(C7): 内核 VFS 已删,OPEN..LSEEK(32-37)与 READDIR..STAT(67-70)
+ * 共 10 个 ABI 编号 reserved,永不复用。槽位无条件占表并恒返回 NOSYS:
+ * 行为不随 VFS_ENABLE 摇摆(此前条目在 #if VFS_ENABLE 内,而所有 preset
+ * 均关闭该开关,raw 调用落到表洞返回 PARAM,与 user_api.h 承诺的 NOSYS
+ * 矛盾)。文件操作走 fs_server IPC。 */
+static int __attribute__((used)) sys_reserved_vfs(uint32_t a1, uint32_t a2,
+                                                  uint32_t a3, uint32_t a4,
+                                                  uint32_t a5, uint32_t a6) {
     U(a1);U(a2);U(a3);U(a4);U(a5);U(a6);
     return KERN_ERR_NOSYS;
 }
@@ -1853,18 +1856,17 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CAP_TYPE,      sys_cap_type,      1),
     SYSDEF(SYSCALL_CAP_RIGHTS,    sys_cap_rights,    1),
 #endif
-#if VFS_ENABLE
-    SYSDEF(SYSCALL_OPEN,          sys_nosys,         2),
-    SYSDEF(SYSCALL_CLOSE,         sys_nosys,         1),
-    SYSDEF(SYSCALL_READ,          sys_nosys,         3),
-    SYSDEF(SYSCALL_WRITE,         sys_nosys,         3),
-    SYSDEF(SYSCALL_IOCTL,         sys_nosys,         3),
-    SYSDEF(SYSCALL_LSEEK,        sys_nosys,         3),
-    SYSDEF(SYSCALL_READDIR,       sys_nosys,         2),
-    SYSDEF(SYSCALL_UNLINK,        sys_nosys,         1),
-    SYSDEF(SYSCALL_MKDIR,         sys_nosys,         1),
-    SYSDEF(SYSCALL_STAT,          sys_nosys,         2),
-#endif
+    /* reserved: 已删的内核 VFS ABI(编号永不复用,恒 NOSYS,见 sys_reserved_vfs) */
+    SYSDEF(SYSCALL_OPEN,          sys_reserved_vfs,  2),
+    SYSDEF(SYSCALL_CLOSE,         sys_reserved_vfs,  1),
+    SYSDEF(SYSCALL_READ,          sys_reserved_vfs,  3),
+    SYSDEF(SYSCALL_WRITE,         sys_reserved_vfs,  3),
+    SYSDEF(SYSCALL_IOCTL,         sys_reserved_vfs,  3),
+    SYSDEF(SYSCALL_LSEEK,         sys_reserved_vfs,  3),
+    SYSDEF(SYSCALL_READDIR,       sys_reserved_vfs,  2),
+    SYSDEF(SYSCALL_UNLINK,        sys_reserved_vfs,  1),
+    SYSDEF(SYSCALL_MKDIR,         sys_reserved_vfs,  1),
+    SYSDEF(SYSCALL_STAT,          sys_reserved_vfs,  2),
     SYSDEF(SYSCALL_FAULT_SUBSCRIBE, sys_fault_subscribe, 0),
     SYSDEF(SYSCALL_TASK_RESTART,    sys_task_restart,    6),
     SYSDEF(SYSCALL_GET_TICK,        sys_get_tick,        0),

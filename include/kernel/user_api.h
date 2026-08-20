@@ -486,9 +486,10 @@ static inline int sys_shm_unmap(int shm_cap) {
 }
 
 /*============================================================================
- * VFS 文件操作 — 用户态内联封装
- * Phase F3: 内核 VFS 移除,这些 syscall 返回 NOSYS。
- * 保留 inline (返回 NOSYS) 让旧代码能编译,实际文件操作走 fs_server IPC。
+ * VFS 文件操作 — 用户态内联封装(reserved ABI,恒 NOSYS)
+ * 内核 VFS 已删(P0-6):这些编号 reserved 永不复用,内核槽位无条件
+ * 返回 NOSYS(不随 VFS_ENABLE 摇摆)。inline 保留让旧代码能编译,
+ * 实际文件操作走 fs_server IPC(fs_* 系列)。
  *============================================================================*/
 static inline int open(const char *path, int flags) {
     (void)path; (void)flags;
