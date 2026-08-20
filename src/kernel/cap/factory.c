@@ -142,6 +142,7 @@ static void factory_delete_created(uint8_t obj_type, int id) {
 static int factory_allocate_object(tcb_t *caller,
                                    const factory_create_request_t *request,
                                    void **out_object) {
+    (void)caller; /* P2-2: TIMER 的 USER/entry 检查上移到入口(entry 一律拒) */
     int id;
     switch (request->obj_type) {
         case CAP_OBJ_TASK:
@@ -179,14 +180,13 @@ static int factory_allocate_object(tcb_t *caller,
             break;
 #endif
         case CAP_OBJ_TIMER:
-            if ((caller->attrs & TASK_ATTR_USER) != 0U &&
-                request->entry != 0U) {
+            /* P2-2: 内核回调路径已删 —— entry 一律拒绝(保持字段兼容) */
+            if (request->entry != 0U) {
                 return KERN_ERR_PERM;
             }
             id = timer_create(
                 request->name[0] != '\0' ? request->name : NULL,
-                (timer_callback_t)(uintptr_t)request->entry,
-                (void *)(uintptr_t)request->arg, request->param0);
+                request->param0);
             *out_object = id >= 0 ? timer_obj_for_cap((timer_id_t)id) : NULL;
             break;
         case CAP_OBJ_ENDPOINT:

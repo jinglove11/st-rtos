@@ -104,7 +104,7 @@ static void user_raw_object_id_control_task(void *arg) {
     int event_cap = sys_event_create(0);
     int ep_cap = sys_ep_create("raw_audit_ep", KERN_EP_MSG_SIZE, 1);
     int ch_cap = sys_ch_create(KERN_CH_MSG_SIZE, 0);
-    int timer_cap = sys_timer_create("raw_audit_timer", NULL, NULL, 1);
+    int timer_cap = sys_timer_create("raw_audit_timer", 1);
     int frame_cap = sys_mem_alloc(64, CAP_READ | CAP_WRITE | CAP_MANAGE);
     /* P2-1: 用户直呼 sys_task_create 已封 —— peers 由特权编排者预建
      * 并授 task cap(self_slot(CAP_OBJ_TASK, 0/1) 发现)。 */
@@ -266,7 +266,15 @@ static void user_forbidden_callback(void *arg) {
 
 static void user_callback_syscall_task(void *arg) {
     (void)arg;
-    int timer_err = sys_timer_create("u_tmr", user_forbidden_callback, NULL, 0);
+    /* P2-2 契约: timer 已无 entry 参数 —— entry 形态的值现在只是 period
+     * (结构上不可能注入内核回调;返回 cap 即证明未被当指针解释) */
+    int timer_err = sys_call4(SYSCALL_TIMER_CREATE,
+                              (int)(uintptr_t)"u_tmr",
+                              (int)(uintptr_t)user_forbidden_callback, 0, 0);
+    if (timer_err >= 0) {
+        (void)sys_cap_revoke(timer_err);
+        timer_err = (int)KERN_ERR_PERM;  /* 归一化: 成功创建 = 期望结果 */
+    }
     int irq_err = sys_call3(SYSCALL_IRQ_REGISTER, 1,
                             (int)(uintptr_t)user_forbidden_callback, 8);
     int bh_err = sys_call2(SYSCALL_BH_CREATE,
@@ -608,7 +616,7 @@ static void test_user_timer_endpoint_notification(void) {
     TEST_ASSERT(ep >= 0, "user timer endpoint created");
     if (ep < 0) return;
 
-    timer_id_t tid = timer_create("u_tmr_nt", NULL, NULL, 0);
+    timer_id_t tid = timer_create("u_tmr_nt", 0);
     TEST_ASSERT(tid >= 0, "user notification timer created");
     if (tid < 0) {
         endpoint_delete(ep);

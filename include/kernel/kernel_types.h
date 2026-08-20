@@ -411,14 +411,12 @@ typedef struct {
     // --- 时间参数 ---
     uint32_t        period;                     // 周期（ticks），0 表示单次
     uint32_t        expire;                     // 到期时间（ticks）
+    uint32_t        fire_count;                 // P2-2: 累计触发次数(回调删除后的计数替代)
 
-    // --- 回调信息 ---
-    timer_callback_t callback;                  // 回调函数
-    void           *arg;                        // 回调参数
-
-    // --- 通知信息 ---
-    ep_id_t         notify_ep;                  // 到期通知 endpoint
-    uint32_t        notify_badge;               // 到期通知 badge
+    // --- 通知信息 (P2-2: 内核回调路径已删,到期只发通知) ---
+    ep_id_t         notify_ep;                  // 绑定方式 A: endpoint 消息
+    uint32_t        notify_badge;               // badge(两种绑定共用)
+    void           *notify_ntfn;                // 绑定方式 B: notification 对象
 
     // --- 堆索引 ---
     int16_t         heap_index;                 // 在最小堆中的索引，-1 表示不在堆中
@@ -426,9 +424,10 @@ typedef struct {
     // --- 标志 ---
     uint8_t         one_shot;                   // 单次触发标志
     uint8_t         in_use;                     // 使用标志
-    uint8_t         stop_pending;               // 回调中请求了 stop
+    uint8_t         stop_pending;               // 外部请求了 stop
     uint8_t         delete_pending;             // 删除已请求
-    uint8_t         notify_bound;               // 是否绑定 endpoint 通知
+    uint8_t         notify_bound;               // 绑定方式 A(endpoint)
+    uint8_t         ntfn_bound;                 // 绑定方式 B(notification)
 } timer_t;
 
 /**

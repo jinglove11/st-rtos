@@ -476,7 +476,7 @@ void supervisor_monitor_loop(void *arg) {
      * SAME fault endpoint (bound below), so fault events and timer events
      * arrive on the single ep we recv on. We distinguish them by badge:
      * fault_event_t.fault_type is 1..4; the timer stamps SUPERVISOR_TIMER_BADGE. */
-    runtime.timer_cap = sys_timer_create("sup_timer", NULL, NULL, 1);
+    runtime.timer_cap = sys_timer_create("sup_timer", 1);
     if (runtime.timer_cap >= 0) {
         (void)sys_timer_bind(runtime.timer_cap, ep, (int)SUPERVISOR_TIMER_BADGE);
     }

@@ -6,6 +6,7 @@
  */
 
 #include "timer.h"
+#include "notification.h"
 #include "endpoint.h"
 #include "scheduler.h"
 #include "mqueue.h"
@@ -607,11 +608,13 @@ static void process_expired_timers(void) {
         timer->state = TIMER_STATE_RUNNING;
 
         uint8_t notify_bound = timer->notify_bound;
+        uint8_t ntfn_bound = timer->ntfn_bound;
         ep_id_t notify_ep = timer->notify_ep;
         uint32_t notify_badge = timer->notify_badge;
+#if IPC_NOTIFICATION
+        void *ntfn_obj = timer->notify_ntfn;
+#endif
         timer_id_t timer_id = timer->id;
-        timer_callback_t callback = timer->callback;
-        void *callback_arg = timer->arg;
         irq_spin_unlock(&timer_lock, crit);
 
         if (notify_bound) {
@@ -622,13 +625,18 @@ static void process_expired_timers(void) {
             (void)endpoint_notify(notify_ep, notify_msg);
         }
 
-        /* 回调执行 (内核测试用,user 任务被 sys_timer_create 拒绝)。
-         * Phase H2:timer_svc 保留内核特权 (需响应 SysTick + 回调),
-         * 和 bh_svc/irq_N 同为内核 TCB 一部分。 */
-        if (callback) {
-            callback(callback_arg);
+        /* P2-2: 到期即通知(word |= badge,ISR 安全)—— 内核回调路径已删 */
+#if IPC_NOTIFICATION
+        if (ntfn_bound && ntfn_obj != NULL) {
+            (void)notification_signal_obj(ntfn_obj, notify_badge);
         }
+#endif
         timer_record_event(timer_id, TRACE_TIMER_FIRE, KERN_OK);
+        crit = irq_spin_lock(&timer_lock);
+        if (timer->in_use) {
+            timer->fire_count++;
+        }
+        irq_spin_unlock(&timer_lock, crit);
 
         /* 周期定时器重新插入（除非回调中请求了停止） */
         crit = irq_spin_lock(&timer_lock);
@@ -700,8 +708,7 @@ static void timer_service_task(void *arg) {
  * 公开接口实现
  *============================================================================*/
 
-timer_id_t timer_create(const char *name, timer_callback_t callback,
-                        void *arg, uint32_t period) {
+timer_id_t timer_create(const char *name, uint32_t period) {
 #if TIMER_ENABLE
     uint32_t crit = irq_spin_lock(&timer_lock);
 
@@ -723,8 +730,9 @@ timer_id_t timer_create(const char *name, timer_callback_t callback,
     }
 
     timer->id = id;
-    timer->callback = callback;
-    timer->arg = arg;
+    timer->notify_ntfn = NULL;
+    timer->ntfn_bound = 0;
+    timer->fire_count = 0;
     timer->period = period;
     timer->one_shot = (period == 0) ? 1 : 0;
     timer->state = TIMER_STATE_IDLE;
@@ -850,6 +858,31 @@ kern_err_t timer_change_period(timer_id_t timer_id, uint32_t new_period) {
 #endif
 }
 
+kern_err_t timer_bind_notification(timer_id_t timer_id, void *ntfn_obj,
+                                   uint32_t badge) {
+#if TIMER_ENABLE && IPC_NOTIFICATION
+    if (ntfn_obj == NULL) {
+        return KERN_ERR_PARAM;
+    }
+    uint32_t crit = irq_spin_lock(&timer_lock);
+    timer_t *timer = timer_get(timer_id);
+    if (timer == NULL || timer->delete_pending) {
+        irq_spin_unlock(&timer_lock, crit);
+        return KERN_ERR_PARAM;
+    }
+    /* 方式 B 生效时解除方式 A(后绑定者生效) */
+    timer->notify_ntfn = ntfn_obj;
+    timer->notify_badge = badge;
+    timer->ntfn_bound = 1;
+    timer->notify_bound = 0;
+    irq_spin_unlock(&timer_lock, crit);
+    return KERN_OK;
+#else
+    (void)timer_id; (void)ntfn_obj; (void)badge;
+    return KERN_ERR_STATE;
+#endif
+}
+
 kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
                                uint32_t badge) {
 #if TIMER_ENABLE && IPC_ENDPOINT
@@ -865,6 +898,8 @@ kern_err_t timer_bind_endpoint(timer_id_t timer_id, ep_id_t ep_id,
     timer->notify_ep = ep_id;
     timer->notify_badge = badge;
     timer->notify_bound = 1;
+    timer->ntfn_bound = 0;
+    timer->notify_ntfn = NULL;
     irq_spin_unlock(&timer_lock, crit);
     return KERN_OK;
 #else
@@ -885,6 +920,19 @@ timer_state_t timer_get_state(timer_id_t timer_id) {
 #else
     (void)timer_id;
     return TIMER_STATE_DELETED;
+#endif
+}
+
+uint32_t timer_get_fire_count(timer_id_t timer_id) {
+#if TIMER_ENABLE
+    uint32_t crit = irq_spin_lock(&timer_lock);
+    timer_t *timer = timer_get(timer_id);
+    uint32_t n = timer ? timer->fire_count : 0U;
+    irq_spin_unlock(&timer_lock, crit);
+    return n;
+#else
+    (void)timer_id;
+    return 0U;
 #endif
 }
 

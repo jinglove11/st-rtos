@@ -1055,9 +1055,8 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
     U(a5);U(a6);
     char name_buf[TIMER_NAME_LEN];
 
-    if (syscall_current_is_user() && a2 != 0) {
-        return KERN_ERR_PERM;
-    }
+    /* P2-2: 新 ABI (name, period) —— entry 参数已不存在(回调路径删除) */
+    U(a3);U(a4);U(a5);U(a6);
 
     kern_err_t copy_err = strncpy_from_user(name_buf,
                                             (const char *)(uintptr_t)a1,
@@ -1066,15 +1065,8 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
         return copy_err;
     }
 
-    if (a2 != 0 &&
-        !user_access_ok((const void *)(uintptr_t)a2, 1, USER_ACCESS_READ)) {
-        return KERN_ERR_PARAM;
-    }
-
 #if CAP_ENABLE
-    timer_id_t id = timer_create(name_buf[0] ? name_buf : NULL,
-                                 (timer_callback_t)a2,
-                                 (void *)a3, a4);
+    timer_id_t id = timer_create(name_buf[0] ? name_buf : NULL, a2);
     if (id < 0) return id;
     tcb_t *cur = sched_get_current();
     void *obj = timer_obj_for_cap(id);
@@ -1083,9 +1075,7 @@ static int sys_timer_create(uint32_t a1, uint32_t a2, uint32_t a3,
     if (cap < 0) return KERN_ERR_RESOURCE;
     return (int)cap;
 #else
-    return (kern_err_t)timer_create(name_buf[0] ? name_buf : NULL,
-                                     (timer_callback_t)a2,
-                                     (void *)a3, a4);
+    return (kern_err_t)timer_create(name_buf[0] ? name_buf : NULL, a2);
 #endif
 }
 
@@ -1924,7 +1914,7 @@ static const syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE] = {
     SYSDEF(SYSCALL_CH_GET_SHM,    sys_ch_get_shm,    1),
     SYSDEF(SYSCALL_CH_SEND_CAPS,  sys_ch_send_caps,  5),
     SYSDEF(SYSCALL_CH_RECV_CAPS,  sys_ch_recv_caps,  5),
-    SYSDEF(SYSCALL_TIMER_CREATE,  sys_timer_create,  4),
+    SYSDEF(SYSCALL_TIMER_CREATE,   sys_timer_create,  2),
     SYSDEF(SYSCALL_TIMER_START,   sys_timer_start,   2),
     SYSDEF(SYSCALL_TIMER_BIND,    sys_timer_bind,    3),
     SYSDEF(SYSCALL_IRQ_REGISTER,  sys_irq_register,  3),

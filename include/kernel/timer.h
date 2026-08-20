@@ -29,7 +29,8 @@
  *     // 定时器回调，在任务上下文执行
  * }
  *
- * timer_id_t tid = timer_create("my_timer", my_callback, NULL, 100);
+ * timer_id_t tid = timer_create("my_timer", 100);
+ * timer_bind_notification(tid, ntfn_obj, 0x1);  // 到期 word |= 0x1
  * timer_start(tid, 0);  // 立即开始
  *
  * // 停止并删除
@@ -61,8 +62,13 @@
  * @note 回调在定时器服务任务上下文执行，可以调用阻塞 API
  * @note 创建后定时器处于停止状态，需要调用 timer_start() 启动
  */
-timer_id_t timer_create(const char *name, timer_callback_t callback,
-                        void *arg, uint32_t period);
+timer_id_t timer_create(const char *name, uint32_t period);
+
+/* P2-2: 到期通知绑定 —— 方式 B(seL4 风格):到期对 notification 对象
+ * 做 word |= badge(ISR 上下文安全)。与 endpoint 绑定(方式 A)互斥,
+ * 后绑定者生效。 */
+kern_err_t timer_bind_notification(timer_id_t timer_id, void *ntfn_obj,
+                                   uint32_t badge);
 
 /**
  * @brief 删除定时器
@@ -113,6 +119,9 @@ kern_err_t timer_stop(timer_id_t timer_id);
  * @note 重新开始计时，相当于 stop + start
  */
 kern_err_t timer_reset(timer_id_t timer_id);
+
+/* P2-2: 累计触发次数(回调移除后的计数观测手段) */
+uint32_t timer_get_fire_count(timer_id_t timer_id);
 
 /**
  * @brief 修改定时器周期

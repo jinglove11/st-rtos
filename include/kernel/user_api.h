@@ -281,11 +281,9 @@ static inline int sys_event_wait(int event_id, int flags, int timeout) {
  * 定时器 — 用户态内联封装
  *============================================================================*/
 
-static inline int sys_timer_create(const char *name, void (*cb)(void *),
-                                   void *arg, int one_shot) {
-    return sys_call4(SYSCALL_TIMER_CREATE,
-                     (int)(uintptr_t)name, (int)(uintptr_t)cb,
-                     (int)(uintptr_t)arg, one_shot);
+/* P2-2: 到期只发通知(timer_bind / notification 绑定),回调参数已删 */
+static inline int sys_timer_create(const char *name, int period) {
+    return sys_call2(SYSCALL_TIMER_CREATE, (int)(uintptr_t)name, period);
 }
 
 static inline int sys_timer_start(int timer_id, int period) {
